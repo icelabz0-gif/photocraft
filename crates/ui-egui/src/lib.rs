@@ -25,6 +25,7 @@ pub mod analysis_ui;
 pub mod anchor_tools;
 mod ants;
 pub mod apply_color;
+mod artboard_overview;
 pub mod artboard_tool;
 pub mod artboard_ui;
 pub(crate) mod background_redraw;
@@ -708,6 +709,8 @@ pub struct PhotocraftApp {
     navigator_plain: std::collections::HashSet<DocId>,
     /// The Info panel's Color Sampler readouts for (document, revision) (`panels::sampler_readouts`).
     info_samplers: Option<panels::SamplerReadouts>,
+    /// Cached, revision-scoped previews for the Artboard Overview window.
+    pub(crate) artboard_overview: artboard_overview::Overview,
     /// Display profile readings (#569).
     monitors: monitor_status::State,
     checker: Option<egui::TextureHandle>,
@@ -723,9 +726,6 @@ pub struct PhotocraftApp {
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
     /// refresh only what it drew after the step they showed (`canvas::damage_since`).
     committed_stroke: Option<canvas::CommittedStroke>,
-    /// Whether the last retouching stroke's commit took the pixels its live stroke drew
-    /// (`"fromLive"`) instead of rendering the stroke again (`retouch_ui::finish_stroke`).
-    pub(crate) retouch_from_live: bool,
     /// Footprint trail of a retouching drag (see `stroke_trail`).
     trail: Option<stroke_trail::Trail>,
     /// Remove tool strokes waiting to be applied together (Remove after each stroke off), the
@@ -1031,6 +1031,7 @@ impl PhotocraftApp {
             navigator_gpu: HashMap::new(),
             navigator_plain: std::collections::HashSet::new(),
             info_samplers: None,
+            artboard_overview: Default::default(),
             monitors: Default::default(),
             checker: None,
             drag: None,
@@ -1038,7 +1039,6 @@ impl PhotocraftApp {
             tool_override: None,
             live_stroke: None,
             committed_stroke: None,
-            retouch_from_live: false,
             trail: None,
             remove_pending: Vec::new(),
             remove_pending_target: None,
@@ -2468,12 +2468,14 @@ impl eframe::App for PhotocraftApp {
         if (chrome && self.ui.panels.dock) || tabbed_in {
             panels::right_dock(self, ui);
         }
+        artboard_overview::refresh_canvas_diagnostics(self);
         let t = theme::Tokens::get(&ctx);
         let backdrop = if chrome { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(backdrop)).show(ui, |ui| {
             canvas::document_area(self, ui);
         });
         panels::properties_window(self, &ctx);
+        artboard_overview::show(self, &ctx);
         brush_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);

@@ -521,6 +521,7 @@ mod tests {
         assert_eq!((c4.visible, c4.position), (None, Some((6, 7))), "a comp without visibility takes none");
         assert_eq!(visible(3, e_id), Some(false), "inherited from c1, past c4");
         assert_eq!(last.state(e_id), None, "the shared entry gives the Last Document State nothing");
+    }
 
     #[test]
     fn semantic_artboard_role_roundtrips_and_preserves_other_shmd_items() {
