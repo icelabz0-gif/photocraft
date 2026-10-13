@@ -415,17 +415,22 @@ fn gradient_pos(style: GradientStyle, angle: f32, scale: f32, reverse: bool, off
 /// pixel also covers (`t` itself when `weight` is 0) and the fraction of the pixel beyond the
 /// seam.
 #[allow(clippy::too_many_arguments)]
-fn gradient_seam(style: GradientStyle, angle: f32, scale: f32, reverse: bool, offset: (f32, f32), frame: (f64, f64, f64, f64), x: f64, y: f64) -> (f32, f32, f32) {
+fn gradient_seam(
+    style: GradientStyle,
+    angle: f32,
+    scale: f32,
+    reverse: bool,
+    offset: (f32, f32),
+    frame: (f64, f64, f64, f64),
+    x: f64,
+    y: f64,
+) -> (f32, f32, f32) {
     let (t, r) = gradient_pos(style, angle, scale, reverse, offset, frame, x, y);
     // Half the pixel's angular width as a fraction of the sweep: half a pixel of arc at r
     // (capped at half the ramp, for pixels at the sweep's centre where the arc is unbounded).
     let half = (0.5 / (std::f64::consts::TAU * r.max(1e-6))).min(0.5);
     let d = t.min(1.0 - t);
-    let (wrap, weight) = if style == GradientStyle::Angle && d < half {
-        (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half))
-    } else {
-        (t, 0.0)
-    };
+    let (wrap, weight) = if style == GradientStyle::Angle && d < half { (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half)) } else { (t, 0.0) };
     (t as f32, wrap as f32, weight as f32)
 }
 

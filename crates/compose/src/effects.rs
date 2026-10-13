@@ -1105,11 +1105,7 @@ pub fn gradient_seam(style: GradientStyle, angle: f32, scale: f32, reverse: bool
     // (capped at half the ramp, for pixels at the sweep's centre where the arc is unbounded).
     let half = (0.5 / (std::f32::consts::TAU * r.max(1e-6))).min(0.5);
     let d = t.min(1.0 - t);
-    let (wrap, weight) = if style == GradientStyle::Angle && d < half {
-        (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half))
-    } else {
-        (t, 0.0)
-    };
+    let (wrap, weight) = if style == GradientStyle::Angle && d < half { (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half)) } else { (t, 0.0) };
     (t, wrap, weight)
 }
 

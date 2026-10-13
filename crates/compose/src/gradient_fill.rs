@@ -163,8 +163,7 @@ fn render_ramp<const N: usize>(f: &Fill, rect: Rect, frame: Rect, ramp: Option<R
     let row = |y: i32, out: &mut [[f32; N]]| {
         for (i, p) in out.iter_mut().enumerate() {
             let x = rect.x0 + i as i32;
-            let (t, wrap, seam) =
-                crate::effects::gradient_seam(*style, *angle, *scale, *reverse, *offset, frame, x as f32 + 0.5, y as f32 + 0.5);
+            let (t, wrap, seam) = crate::effects::gradient_seam(*style, *angle, *scale, *reverse, *offset, frame, x as f32 + 0.5, y as f32 + 0.5);
             let c = ramp.sample(t);
             *p = if seam > 0.0 {
                 let past = ramp.sample(wrap);
