@@ -129,6 +129,7 @@ pub use video_cmds::render_video_with;
 pub mod vp_cmds;
 pub mod warp_cmds;
 pub mod web_cmds;
+pub mod ai_cmds;
 mod wia_cmds;
 
 use std::sync::Arc;

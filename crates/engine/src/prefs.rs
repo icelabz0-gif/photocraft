@@ -907,6 +907,35 @@ pub struct ToolbarCustomization {
     pub order: Vec<String>,
 }
 
+/// Edit › Preferences › AI: local-server inference settings.
+///
+/// Remote / cloud provider settings are intentionally absent until that
+/// feature ships (see `ai-inline-editing-srs.md` MVP-2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiPrefs {
+    /// Base URL of the local inference server (Ollama, llama.cpp `--server`).
+    pub local_url: String,
+    /// Model name sent in every request (the server must have it loaded).
+    pub local_model: String,
+    /// Per-request timeout in seconds for the local server.
+    pub local_timeout_secs: u32,
+    /// Maximum region size in megapixels sent for inference. Larger selections
+    /// are tiled or rejected with an informative error.
+    pub max_region_mpx: f32,
+}
+
+impl Default for AiPrefs {
+    fn default() -> Self {
+        Self {
+            local_url: "http://127.0.0.1:11434".into(),
+            local_model: "llava".into(),
+            local_timeout_secs: 120,
+            max_region_mpx: 24.0,
+        }
+    }
+}
+
 /// All preferences. JSON keys are the `edit.preferences.<section>` ids.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -978,10 +1007,12 @@ pub struct Preferences {
     pub view_extras: Value,
     /// File › Scripts › Script Events Manager: event → script bindings.
     pub script_events: crate::automate_cmds::ScriptEvents,
+    /// Edit › Preferences › AI: local-server inference configuration.
+    pub ai: AiPrefs,
 }
 
 /// Preferences dialog sections in Photoshop's order: (id, title).
-pub const SECTIONS: [(&str, &str); 18] = [
+pub const SECTIONS: [(&str, &str); 19] = [
     ("general", "General"),
     ("interface", "Interface"),
     ("workspace", "Workspace"),
@@ -1000,6 +1031,7 @@ pub const SECTIONS: [(&str, &str); 18] = [
     ("enhancedControls", "Enhanced Controls"),
     ("rawDefaults", "Camera Raw Defaults"),
     ("integrations", "Integrations"),
+    ("ai", "AI"),
 ];
 
 /// Preferences that nothing reads yet, so Edit › Preferences doesn't show them: a control that
