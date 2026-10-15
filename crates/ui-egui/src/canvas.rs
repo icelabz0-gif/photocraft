@@ -2086,6 +2086,9 @@ fn documents(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     let view = app.ui.views[idx].clone();
     canvas_view(app, ui, idx, rect, view, true);
+    // A running AI inference job draws its progress card over the picture
+    // (the modal progress dialog is suppressed for `ai.*` commands).
+    crate::jobs_ui::ai_card(app, ui);
 }
 
 /// The tab strip; returns where its document tabs are.

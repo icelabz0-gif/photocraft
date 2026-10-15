@@ -504,6 +504,38 @@ pub struct DocWindow {
     pub position: Option<[f32; 2]>,
 }
 
+/// Properties panel › AI Retouching: the parameters the panel sends with
+/// `ai.removeObject` / `ai.skinEnhance` (docs/requirements-ai-inline-editing.md, MVP-2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiRetouchState {
+    /// The fill hint sent with `ai.removeObject`.
+    pub remove_prompt: String,
+    /// `ai.removeObject` strength, 0–100 (sent as 0–1).
+    pub remove_strength: f32,
+    /// `ai.removeObject` commits on a new layer instead of in place.
+    pub remove_new_layer: bool,
+    /// `ai.skinEnhance` strength, 0–100.
+    pub skin_strength: f32,
+    /// `ai.skinEnhance` smoothing radius in pixels.
+    pub skin_radius: f32,
+    /// `ai.skinEnhance` keeps high-frequency texture while smoothing.
+    pub skin_preserve_detail: bool,
+}
+
+impl Default for AiRetouchState {
+    fn default() -> Self {
+        Self {
+            remove_prompt: String::new(),
+            remove_strength: 85.0,
+            remove_new_layer: true,
+            skin_strength: 50.0,
+            skin_radius: 6.0,
+            skin_preserve_detail: true,
+        }
+    }
+}
+
 /// Options-bar state for tools (Photoshop keeps these per tool).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1248,6 +1280,10 @@ pub struct UiState {
     pub selection_mode: u8,
     #[serde(default)]
     pub tool_options: ToolOptions,
+    /// Properties panel › AI Retouching: the parameters the panel sends with
+    /// `ai.removeObject` / `ai.skinEnhance` (docs/requirements-ai-inline-editing.md, MVP-2).
+    #[serde(default)]
+    pub ai: AiRetouchState,
     /// In-progress polygonal lasso vertices (document coordinates).
     #[serde(default)]
     pub polygon: Vec<[f64; 2]>,
@@ -1370,6 +1406,7 @@ impl Default for UiState {
             brushes_panel: Default::default(),
             selection_mode: 0,
             tool_options: ToolOptions::default(),
+            ai: AiRetouchState::default(),
             polygon: Vec::new(),
             polygon_mode: String::new(),
             polygon_doc: None,

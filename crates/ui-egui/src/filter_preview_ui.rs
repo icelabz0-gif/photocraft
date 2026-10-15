@@ -26,6 +26,9 @@ const PREVIEW_H: f32 = 150.0;
 const ZOOM_FIELD: &str = "__pvZoom";
 const CENTER_X_FIELD: &str = "__pvCx";
 const CENTER_Y_FIELD: &str = "__pvCy";
+/// Before/After split preview: on/off and the divider's horizontal place (0..1 of the window).
+const SPLIT_FIELD: &str = "__pvSplit";
+const SPLIT_X_FIELD: &str = "__pvSplitX";
 
 /// Draw the filter dialog's in-dialog preview window below its parameters (its `fields` `f`). A
 /// no-op for dialogs without a preview and for Select and Mask, which has its own view.
@@ -103,6 +106,12 @@ pub(crate) fn window(app: &PhotocraftApp, dialog: u64, ui: &mut egui::Ui, f: &mu
     let (x0, y0, sw, sh) = source_rect(cx, cy, zoom, rect.size(), doc);
     let (dest, uv) = placement(rect, (x0, y0, sw, sh), zoom, doc);
 
+    // Before/After split preview: the original stays left of the divider, the
+    // filtered result right of it; drag moves the divider.
+    let mut split = f.get(SPLIT_FIELD).and_then(Value::as_bool).unwrap_or(false);
+    let mut split_x =
+        f.get(SPLIT_X_FIELD).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite()).unwrap_or(0.5).clamp(0.0, 1.0);
+
     // Press-and-hold shows the unfiltered image, as Photoshop's preview does.
     let holding = response.is_pointer_button_down_on();
     let shown = if holding { orig.as_ref() } else { filt.as_ref().or(orig.as_ref()) };
@@ -112,13 +121,28 @@ pub(crate) fn window(app: &PhotocraftApp, dialog: u64, ui: &mut egui::Ui, f: &mu
         crate::widgets::checker(&painter, dest, 8.0);
         painter.image(tex.id(), dest, uv, Color32::WHITE);
     }
+    if split && !holding
+        && let (Some(before), Some(after)) = (orig.as_ref(), filt.as_ref())
+        && let Some((dest_left, uv_left)) = left_of_split(dest, uv, split_x)
+    {
+        painter.image(before.id(), dest_left, uv_left, Color32::WHITE);
+        let line = Rect::from_min_max(pos2(dest_left.right(), rect.top()), pos2(dest_left.right() + 1.0, rect.bottom()));
+        painter.rect_filled(line.intersect(rect), 0.0, t.accent);
+    }
     painter.rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
 
-    // Drag to pan (the image follows the pointer); a plain click centres on the clicked point.
+    // Drag to pan (the image follows the pointer); a plain click centres on the
+    // clicked point. In split mode the drag moves the divider instead.
     if response.dragged() {
-        let d = response.drag_delta();
-        cx -= d.x / zoom;
-        cy -= d.y / zoom;
+        if split {
+            if let Some(p) = response.interact_pointer_pos() {
+                split_x = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+            }
+        } else {
+            let d = response.drag_delta();
+            cx -= d.x / zoom;
+            cy -= d.y / zoom;
+        }
     }
     if response.clicked()
         && let Some(p) = response.interact_pointer_pos()
@@ -135,11 +159,30 @@ pub(crate) fn window(app: &PhotocraftApp, dialog: u64, ui: &mut egui::Ui, f: &mu
         if crate::icons::button(ui, "plus", 22.0, false, tl!("Zoom in")).clicked() {
             zoom = step_zoom(zoom, true);
         }
+        crate::widgets::checkbox(ui, &mut split, tl!("Before/After"));
     });
 
     f.insert(ZOOM_FIELD.into(), json!(zoom.clamp(MIN_ZOOM, MAX_ZOOM)));
     f.insert(CENTER_X_FIELD.into(), json!(cx));
     f.insert(CENTER_Y_FIELD.into(), json!(cy));
+    f.insert(SPLIT_FIELD.into(), json!(split));
+    f.insert(SPLIT_X_FIELD.into(), json!(split_x.clamp(0.0, 1.0)));
+}
+
+/// The part of the shown image left of the Before/After divider at `split_x`
+/// (0..1 across `rect`): the destination sub-rect and the matching source UV
+/// sub-rect, or `None` when the divider sits outside the image.
+fn left_of_split(dest: Rect, uv: Rect, split_x: f32) -> Option<(Rect, Rect)> {
+    if !split_x.is_finite() {
+        return None;
+    }
+    let frac = ((split_x - dest.left()) / dest.width().max(1.0)).clamp(0.0, 1.0);
+    if frac <= 0.0 || frac >= 1.0 {
+        return None;
+    }
+    let px = dest.left() + dest.width() * frac;
+    let ux = uv.min.x + uv.width() * frac;
+    Some((Rect::from_min_max(dest.min, pos2(px, dest.max.y)), Rect::from_min_max(uv.min, pos2(ux, uv.max.y))))
 }
 
 /// The zoom levels the − / + buttons step through, like the Filter Gallery's.
@@ -155,7 +198,7 @@ pub(crate) fn reserved_height(f: &Map<String, Value>) -> f32 {
 /// checkbox, as in Photoshop. Image › Rotation › Arbitrary and the adjustment dialogs keep only
 /// the on-canvas preview, and Select and Mask has its own view.
 fn shows(f: &Map<String, Value>) -> bool {
-    f.contains_key("__preview") && !crate::select_mask_view::owns(f) && f.get("__command").and_then(Value::as_str).is_some_and(|c| c.starts_with("filter."))
+    f.contains_key("__preview") && !crate::select_mask_view::owns(f) && f.get("__command").and_then(Value::as_str).is_some_and(|c| c.starts_with("filter.") || c.starts_with("ai."))
 }
 
 /// The next zoom level up or down from `zoom`, clamped to [`ZOOM_STEPS`]' ends.
@@ -384,7 +427,8 @@ mod tests {
     fn only_filter_dialogs_get_the_preview_window() {
         let fields = |cmd: &str| json!({"__preview": true, "__command": cmd}).as_object().cloned().unwrap();
         assert!(shows(&fields("filter.blur.gaussianBlur")));
-        assert!(reserved_height(&fields("filter.blur.gaussianBlur")) > 0.0);
+        assert!(shows(&fields("ai.skinEnhance")), "AI filters get the preview window (and the split toggle)");
+        assert!(reserved_height(&fields("ai.skinEnhance")) > 0.0);
         // Photoshop's Rotate Canvas and adjustment dialogs have no preview window.
         assert!(!shows(&fields("image.rotation.arbitrary")));
         assert_eq!(reserved_height(&fields("image.rotation.arbitrary")), 0.0);
@@ -500,5 +544,36 @@ mod tests {
         egui::Context::default().run_ui(Default::default(), |ui| window(&app, id, ui, &mut f)).textures_delta.clear();
         assert_eq!(f.get(ZOOM_FIELD), Some(&json!(1.0)));
         assert_eq!(f.get(CENTER_Y_FIELD), Some(&json!(0.0)));
+    }
+
+    #[test]
+    fn the_split_covers_the_image_exactly() {
+        let dest = Rect::from_min_max(pos2(10.0, 0.0), pos2(110.0, 50.0));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        // A quarter in: the left quarter of the image, one source fraction.
+        let (d, u) = left_of_split(dest, uv, 0.35).expect("inside the image");
+        assert_eq!(d, Rect::from_min_max(pos2(10.0, 0.0), pos2(35.0, 50.0)));
+        assert_eq!(u.min, pos2(0.0, 0.0));
+        assert_eq!(u.max, pos2(0.25, 1.0));
+        // Outside the image there is nothing to cover.
+        assert!(left_of_split(dest, uv, 0.1).is_none(), "left of the image");
+        assert!(left_of_split(dest, uv, 1.1).is_none(), "right of the image");
+        // Corrupt state recovers, never panics.
+        assert!(left_of_split(dest, uv, f32::NAN).is_none());
+    }
+
+    #[test]
+    fn the_split_toggle_defaults_off_and_stores_its_place() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        let id = crate::filter_dialog::open(&mut app, "filter.blur.gaussianBlur").expect("Gaussian Blur opens a dialog");
+        let mut f = app.ui.dialogs.iter().find(|d| d.id == id).expect("the dialog is open").fields.clone();
+        egui::Context::default().run_ui(Default::default(), |ui| window(&app, id, ui, &mut f)).textures_delta.clear();
+        assert_eq!(f.get(SPLIT_FIELD), Some(&json!(false)), "off by default");
+        assert_eq!(f.get(SPLIT_X_FIELD), Some(&json!(0.5)), "centred divider");
+        // Corrupt state is recovered, not panicked on.
+        f.insert(SPLIT_X_FIELD.into(), json!(7.5));
+        egui::Context::default().run_ui(Default::default(), |ui| window(&app, id, ui, &mut f)).textures_delta.clear();
+        assert_eq!(f.get(SPLIT_X_FIELD), Some(&json!(1.0)), "clamped into 0..1");
     }
 }

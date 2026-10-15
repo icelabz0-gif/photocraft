@@ -287,6 +287,7 @@ pub fn has_dialog(command: &str) -> bool {
         return false;
     }
     (command.starts_with("filter.")
+        || command.starts_with("ai.")
         || command.starts_with("select.modify.")
         || PREVIEWED.contains(&command)
         || matches!(
@@ -448,7 +449,8 @@ pub fn open(app: &mut PhotocraftApp, command: &str) -> Option<u64> {
     fields.insert("__label".into(), json!(spec.label));
     fields.insert("__filter".into(), json!(true));
     // Select and Mask previews in its view modes (`select_mask_view`), not as the command's result.
-    if command.starts_with("filter.") || PREVIEWED.contains(&command) || command == crate::select_mask_view::COMMAND {
+    // AI commands preview like filters: the dialog's live proxy run is what OK applies.
+    if command.starts_with("filter.") || command.starts_with("ai.") || PREVIEWED.contains(&command) || command == crate::select_mask_view::COMMAND {
         fields.insert("__preview".into(), json!(true));
     }
     for p in parse_spec(spec.params) {
@@ -1018,6 +1020,29 @@ impl FilterPreviewKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AI commands open the same schema dialogs as filters, with live preview
+    /// (docs/requirements-ai-inline-editing.md, MVP-2 before/after split preview).
+    #[test]
+    fn ai_commands_open_schema_dialogs_with_preview() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 24, "height": 24})).unwrap();
+        assert!(has_dialog("ai.skinEnhance"));
+        assert!(has_dialog("ai.removeObject"));
+        assert!(!has_dialog("ai.pingBackend"), "the diagnostic has no options");
+        let d = open(&mut app, "ai.skinEnhance").unwrap();
+        let fields = &app.ui.dialogs.iter().find(|x| x.id == d).unwrap().fields;
+        assert_eq!(fields["__preview"], json!(true), "AI dialogs preview");
+        assert_eq!(fields["strength"], json!(50.0));
+        assert_eq!(fields["smoothRadius"], json!(6.0));
+        assert_eq!(fields["preserveDetail"], json!(true));
+        let d = open(&mut app, "ai.removeObject").unwrap();
+        let fields = &app.ui.dialogs.iter().find(|x| x.id == d).unwrap().fields;
+        assert_eq!(fields["__preview"], json!(true));
+        assert_eq!(fields["strength"], json!(0.85));
+        assert_eq!(fields["output"], json!("newLayer"));
+        assert_eq!(fields["seed"], json!(0));
+    }
 
     /// #5710: the seed field's Random button always gives a different seed the field can hold.
     #[test]

@@ -45,10 +45,10 @@ L0  photocraft-codecs, photocraft-raster, photocraft-color, photocraft-geom
 - [x] Implement `ai.pingBackend` diagnostic command for connectivity checks.
 
 ### MVP-2: Interactive UI & On-Canvas Polish
-- [ ] On-canvas progress overlay for running inference jobs.
-- [ ] Cancel support (Escape key aborts in-flight local inference).
-- [ ] Before/After split preview toggle for AI filters.
-- [ ] Properties panel options bar controls for AI retouching tools.
+- [x] On-canvas progress overlay for running inference jobs.
+- [x] Cancel support (Escape key aborts in-flight local inference).
+- [x] Before/After split preview toggle for AI filters.
+- [x] Properties panel options bar controls for AI retouching tools.
 
 ### MVP-3: Local Specialized Vision Models
 - [ ] Bundled / locally hosted SAM2 (Segment Anything) promptable segmentation.

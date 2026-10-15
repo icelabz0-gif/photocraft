@@ -782,3 +782,74 @@ fn background_open_warns_about_missing_fonts() {
     let want = vec!["font 'NoSuchFamily4559' is not installed; text may render using a fallback face".to_string()];
     assert!(app.ui.notices.last().is_some_and(|n| n.title.contains("poster.psd") && n.lines == want), "{:?}", app.ui.notices);
 }
+
+/// A gated fake job reporting as `ai.skinEnhance` (the desktop app's background path).
+fn slow_ai_job(app: &mut PhotocraftApp, gate: &Arc<AtomicBool>) -> JobId {
+    let gate = gate.clone();
+    let r = app
+        .session
+        .start_job(
+            "ai.skinEnhance",
+            json!({}),
+            "Skin Enhance",
+            true,
+            move |ctx| {
+                ctx.progress(0.4, "Smoothing");
+                while !gate.load(Ordering::Relaxed) {
+                    ctx.check()?;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            },
+            |s, ()| {
+                s.edit("Skin Enhance", |_, _| Ok(()))?;
+                Ok(json!({}))
+            },
+        )
+        .unwrap();
+    match r {
+        Started::Job(id) => id,
+        Started::Done(v) => panic!("ran inline: {v}"),
+    }
+}
+
+#[test]
+fn ai_inference_draws_the_canvas_overlay_card_instead_of_the_modal() {
+    let mut h = app_harness();
+    let gate = Arc::new(AtomicBool::new(false));
+    let doc_before = h.state().session.active().unwrap().doc.clone();
+    let job = slow_ai_job(h.state_mut(), &gate);
+    // Past the modal's delay: the canvas card shows, the modal does not.
+    frames_for(&mut h, 320);
+    let info = h.state().session.active_job().unwrap();
+    assert!(super::ai_job(&info), "the running job is an AI inference job");
+    assert!(h.query_by_label("Smoothing").is_some(), "the card shows the job's message");
+    assert!(h.query_by_label("Cancel").is_some(), "the card's Cancel");
+    // Esc cancels the in-flight inference; the document is untouched.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().session.job(job).is_none());
+    assert!(Arc::ptr_eq(&h.state().session.active().unwrap().doc, &doc_before));
+    assert!(h.state().ui.status.contains("Cancelled"), "{}", h.state().ui.status);
+    gate.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn only_ai_jobs_draw_the_canvas_card_others_keep_the_modal() {
+    let info = |cmd: &str| photocraft_engine::jobs::JobInfo {
+        id: JobId(1),
+        command: cmd.into(),
+        label: "x".into(),
+        document: None,
+        state: "running",
+        progress: 0.0,
+        message: String::new(),
+        elapsed_ms: 0.0,
+        result: None,
+        error: None,
+    };
+    assert!(super::ai_job(&info("ai.skinEnhance")));
+    assert!(super::ai_job(&info("ai.removeObject")));
+    assert!(!super::ai_job(&info("filter.blur.gaussianBlur")));
+    assert!(!super::ai_job(&info(photocraft_engine::jobs::OPEN_JOB)));
+}

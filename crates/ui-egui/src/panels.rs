@@ -3532,6 +3532,13 @@ fn properties_body_inner(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             crate::vector_ui::shape_properties(app, ui, id);
         }
     }
+    // AI retouching controls on pixel layers (docs/requirements-ai-inline-editing.md, MVP-2).
+    if matches!(layer.content, LayerContent::Raster(_)) {
+        ui.add_space(6.0);
+        widgets::hairline(ui);
+        ui.add_space(4.0);
+        crate::ai_props_ui::section(app, ui);
+    }
 }
 
 /// Photoshop's Adjustments panel: a grid of one-click adjustment layers.

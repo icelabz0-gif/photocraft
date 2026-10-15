@@ -697,9 +697,10 @@ pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 /// The modal progress window for a job locking the active document (Photoshop shows one for
 /// long filters): title, status, bar, percentage and elapsed time, Cancel. Appears after
-/// [`DIALOG_DELAY_MS`]; Esc cancels (see [`tick`]).
+/// [`DIALOG_DELAY_MS`]; Esc cancels (see [`tick`]). AI inference jobs draw the on-canvas
+/// overlay card ([`ai_card`]) instead, so the picture stays visible while the model works.
 pub fn dialog(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    let Some(j) = app.session.active_job() else { return };
+    let Some(j) = app.session.active_job().filter(|j| !ai_job(j)) else { return };
     if j.elapsed_ms < DIALOG_DELAY_MS {
         return;
     }
@@ -732,6 +733,58 @@ pub fn dialog(app: &mut PhotocraftApp, ctx: &egui::Context) {
     });
     // A click on the backdrop doesn't cancel the work; Esc is handled in `tick`.
     let _ = modal;
+    if cancel_it {
+        cancel(app, j.id);
+    }
+}
+
+/// Is `j` an AI inference job (`ai.*`)? Those draw the canvas overlay card, not the modal.
+fn ai_job(j: &JobInfo) -> bool {
+    j.command.starts_with("ai.")
+}
+
+/// The on-canvas progress card for a running AI inference job on the active document
+/// (`ai.removeObject`, `ai.skinEnhance`): the canvas keeps showing the picture, the card
+/// centres on it with the job's progress, elapsed time and Cancel. Esc cancels (see [`tick`]).
+pub fn ai_card(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let Some(j) = app.session.active_job().filter(|j| ai_job(j)) else { return };
+    let area = ui.available_rect_before_wrap();
+    if !area.is_positive() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    const W: f32 = 320.0;
+    const H: f32 = 150.0;
+    let card = Rect::from_center_size(area.center(), vec2(W, H));
+    let frame = egui::Frame::NONE
+        .fill(t.card)
+        .stroke(Stroke::new(1.0, t.card_border))
+        .corner_radius(egui::CornerRadius::same(t.radius_lg as u8))
+        .shadow(egui::Shadow { offset: [0, 12], blur: 36, spread: 0, color: t.shadow })
+        .inner_margin(egui::Margin::same(16));
+    let mut cancel_it = false;
+    frame.show(ui, |ui| {
+        ui.set_width(W - 32.0);
+        ui.label(RichText::new(tl!(&j.label)).font(crate::theme::semibold(14.0)).truncate());
+        ui.add_space(2.0);
+        let msg = if j.message.is_empty() { tl!("Working…").to_string() } else { j.message.clone() };
+        ui.label(RichText::new(msg).color(t.text_dim).size(12.0).truncate());
+        ui.add_space(8.0);
+        let (br, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+        bar(ui, br, shown_fraction(&j), &t);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(percent(&j)).color(t.text_faint).size(11.5));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(elapsed(j.elapsed_ms)).color(t.text_faint).size(11.5));
+            });
+        });
+        ui.add_space(8.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            cancel_it = crate::widgets::secondary_button(ui, tl!("Cancel"), 84.0).clicked();
+            ui.label(RichText::new(tl!("Esc to cancel")).color(t.text_faint).size(11.0));
+        });
+    });
     if cancel_it {
         cancel(app, j.id);
     }

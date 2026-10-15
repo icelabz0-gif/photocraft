@@ -4899,6 +4899,7 @@ dependencies = [
 name = "photocraft-ml"
 version = "0.9.0"
 dependencies = [
+ "photocraft-codecs",
  "photocraft-color",
  "photocraft-doc",
  "photocraft-geom",
@@ -4907,7 +4908,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]

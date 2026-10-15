@@ -22,6 +22,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
+use crate::jobs;
 use crate::{EngineError, Result, Session};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,13 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Remove Object",
             menu: &["Edit", "Content-Aware"],
             shortcut: None,
-            params: r#"{
-  "layer":    integer (optional, defaults to active),
-  "prompt":   string  (optional fill hint for the model),
-  "seed":     integer (optional, for reproducibility),
-  "strength": number  0.0–1.0 (default 0.85, how aggressively the model replaces),
-  "output":   "newLayer" | "inPlace" (default "newLayer")
-}"#,
+            params: r#"{"prompt":text,"seed":u32=0,"strength":0.0..1.0=0.85,"output":"newLayer|inPlace"="newLayer"}"#,
             enabled: has_pixel_layer,
             run: remove_object,
             journal: true,
@@ -51,12 +46,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Skin Enhance",
             menu: &["Filter", "Neural Filters"],
             shortcut: None,
-            params: r#"{
-  "layer":          integer (optional, defaults to active),
-  "strength":       number  0–100 (default 50),
-  "smoothRadius":   integer 2–20  (default 6),
-  "preserveDetail": bool    (default true)
-}"#,
+            params: r#"{"strength":0..100=50,"smoothRadius":2..20=6,"preserveDetail":bool=true}"#,
             enabled: has_pixel_layer,
             run: skin_enhance,
             journal: true,
@@ -154,6 +144,8 @@ fn remove_object(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, format!("unknown output `{output_mode}` (newLayer|inPlace)")));
     }
 
+    let new_layer = output_mode == "newLayer";
+
     let backend = make_backend(s);
     let req = InferenceRequest {
         task: Task::Inpaint,
@@ -167,36 +159,53 @@ fn remove_object(s: &mut Session, p: &Value) -> Result<Value> {
         region: bounds,
     };
 
-    let result_surface = match backend.run(req) {
-        Ok(InferenceResult::Pixels(res)) => res,
-        Ok(InferenceResult::Mask(_)) => {
-            return Err(bad(CMD, "backend returned a mask instead of pixels"));
-        }
-        Err(MlError::Unsupported) | Err(MlError::Network(_)) => {
-            // Fall back to classical PatchMatch inpaint via content_aware_native.
-            let (window, filled) = crate::fill_cmds::content_aware_native(
-                &surf,
-                bounds,
-                doc_bounds,
-                true,
-                seed.unwrap_or(1),
-                |x, y| sel.sample_channel(x, y, 0) > 0.0,
-                |_, _| true,
-            )?;
-            let mut out = Surface::new(surf.format());
-            out.write_region(window, &filled);
-            out
-        }
-        Err(e) => return Err(EngineError::Other(format!("AI backend error: {e}"))),
-    };
-
-    let dmg = if output_mode == "inPlace" {
-        commit_inplace(s, id, &result_surface, bounds, "Remove Object")?
-    } else {
-        commit_new_layer(s, id, result_surface, bounds, "Remove Object", "AI: Remove Object")?
-    };
-
-    Ok(json!({ "damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()] }))
+    // Heavy work on the job worker (progress, Esc cancels, the document stays
+    // unchanged); the commit runs on the caller thread through the edit path.
+    jobs::run(
+        s,
+        "Remove Object",
+        true,
+        move |ctx| {
+            ctx.progress(0.0, "Encoding");
+            ctx.check()?;
+            let generated = match backend.run(req) {
+                Ok(InferenceResult::Pixels(res)) => Some(res),
+                Ok(InferenceResult::Mask(_)) => {
+                    return Err(bad(CMD, "backend returned a mask instead of pixels"));
+                }
+                // Fall back to classical PatchMatch inpaint via content_aware_native.
+                Err(MlError::Unsupported) | Err(MlError::Network(_)) => None,
+                Err(e) => return Err(EngineError::Other(format!("AI backend error: {e}"))),
+            };
+            ctx.progress(0.9, "Refining");
+            ctx.check()?;
+            match generated {
+                Some(res) => Ok(res),
+                None => {
+                    let (window, filled) = crate::fill_cmds::content_aware_native(
+                        &surf,
+                        bounds,
+                        doc_bounds,
+                        true,
+                        seed.unwrap_or(1),
+                        |x, y| sel.sample_channel(x, y, 0) > 0.0,
+                        |_, _| true,
+                    )?;
+                    let mut out = Surface::new(surf.format());
+                    out.write_region(window, &filled);
+                    Ok(out)
+                }
+            }
+        },
+        move |s, result| {
+            let dmg = if new_layer {
+                commit_new_layer(s, id, result, bounds, "Remove Object", "AI: Remove Object")?
+            } else {
+                commit_inplace(s, id, &result, bounds, "Remove Object")?
+            };
+            Ok(json!({ "damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()] }))
+        },
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,31 +230,44 @@ fn skin_enhance(s: &mut Session, p: &Value) -> Result<Value> {
     check_region_size(s, CMD, bounds)?;
 
     let backend = make_backend(s);
-    let skin_mask = if backend.supports(Task::SkinSegment) {
-        let req = InferenceRequest {
-            task: Task::SkinSegment,
-            image: surf.clone(),
-            mask: None,
-            prompt: None,
-            negative_prompt: None,
-            seed: None,
-            strength: 1.0,
-            scale: 1,
-            region: bounds,
-        };
-        match backend.run(req) {
-            Ok(InferenceResult::Mask(m)) => Some(m),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    let skin_mask = skin_mask.unwrap_or_else(|| hsv_skin_mask(&surf, bounds));
-    let result = freq_sep_smooth(&surf, &skin_mask, smooth_radius, strength, preserve_detail, bounds)?;
-
-    let dmg = commit_inplace(s, id, &result, bounds, "Skin Enhance")?;
-    Ok(json!({ "damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()] }))
+    jobs::run(
+        s,
+        "Skin Enhance",
+        true,
+        move |ctx| {
+            ctx.progress(0.0, "Detecting skin");
+            ctx.check()?;
+            let segmented = if backend.supports(Task::SkinSegment) {
+                let req = InferenceRequest {
+                    task: Task::SkinSegment,
+                    image: surf.clone(),
+                    mask: None,
+                    prompt: None,
+                    negative_prompt: None,
+                    seed: None,
+                    strength: 1.0,
+                    scale: 1,
+                    region: bounds,
+                };
+                match backend.run(req) {
+                    Ok(InferenceResult::Mask(m)) => Some(m),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            ctx.check()?;
+            let skin_mask = segmented.unwrap_or_else(|| hsv_skin_mask(&surf, bounds));
+            ctx.progress(0.4, "Smoothing");
+            let result = freq_sep_smooth(&surf, &skin_mask, smooth_radius, strength, preserve_detail, bounds)?;
+            ctx.progress(0.95, "");
+            Ok(result)
+        },
+        move |s, result| {
+            let dmg = commit_inplace(s, id, &result, bounds, "Skin Enhance")?;
+            Ok(json!({ "damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()] }))
+        },
+    )
 }
 
 fn hsv_skin_mask(image: &Surface, bounds: Rect) -> Surface {
@@ -378,10 +400,57 @@ fn commit_new_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::{JobCtx, JobOutcome, Started};
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     fn make_session() -> Session {
         Session::headless_for_test()
+    }
+
+    /// A document with a textured background layer, a selection in its middle
+    /// and the AI backend pointed at a port nothing listens on, so the
+    /// classical fallback runs at once.
+    fn session_with_selection(w: u32, h: u32) -> Session {
+        let mut s = make_session();
+        s.execute("file.new", json!({"width": w, "height": h})).unwrap();
+        s.edit("paint", |doc, _| {
+            let surf = doc.layers[0].surface_mut().unwrap();
+            let r = photocraft_geom::Rect::new(0, 0, w as i32, h as i32);
+            let mut px = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let v = ((x * 7 + y * 13) % 31) as f32 / 30.0;
+                    px.extend_from_slice(&[v, 1.0 - v, ((x / 5 + y / 3) % 2) as f32, 1.0]);
+                }
+            }
+            surf.write_region(r, &px);
+            let mut sel = Surface::new(photocraft_color::PixelFormat::GRAY8);
+            sel.fill_rect(photocraft_geom::Rect::new(8, 8, 24, 24), &[1.0]);
+            doc.selection = Some(sel);
+            Ok(())
+        })
+        .unwrap();
+        s.prefs.edit(|p| p.ai.local_url = "http://127.0.0.1:9".into());
+        s
+    }
+
+    fn pixels(s: &Session) -> Vec<f32> {
+        let d = s.active().unwrap();
+        let l = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        l.surface().unwrap().read_region(d.doc.bounds())
+    }
+
+    /// Poll until job `id` ends (or 60 s pass); returns its event.
+    fn wait_event(s: &mut Session, id: crate::jobs::JobId) -> crate::jobs::JobEvent {
+        let t = Instant::now();
+        loop {
+            if let Some(e) = s.poll_jobs().into_iter().find(|e| e.id == id) {
+                return e;
+            }
+            assert!(t.elapsed() < Duration::from_secs(60), "job {id:?} did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -412,5 +481,45 @@ mod tests {
         assert!(r.is_ok());
         let v = r.expect("ping should not panic");
         assert!(v.get("ok").is_some(), "response must have `ok` field");
+    }
+
+    #[test]
+    fn remove_object_runs_as_a_background_job() {
+        let mut s = session_with_selection(48, 48);
+        let layers = s.active().unwrap().doc.layers.len();
+        let Started::Job(id) = s.start("ai.removeObject", json!({})).unwrap() else {
+            panic!("ai.removeObject must run as a background job");
+        };
+        let e = wait_event(&mut s, id);
+        assert!(matches!(e.outcome, JobOutcome::Done(_)), "{e:?}");
+        let st = s.active().unwrap();
+        assert_eq!(st.doc.layers.len(), layers + 1, "the AI result landed as a new layer");
+        assert_eq!(st.doc.layers.last().unwrap().name, "AI: Remove Object");
+        assert!(st.doc.selection.is_some(), "the selection survives");
+    }
+
+    #[test]
+    fn skin_enhance_cancelled_leaves_the_document_unchanged() {
+        let mut s = session_with_selection(48, 48);
+        let before = pixels(&s);
+        let ctx = JobCtx::new();
+        ctx.cancel();
+        s.set_inline_job_ctx(Some(ctx));
+        let r = s.execute("ai.skinEnhance", json!({}));
+        s.set_inline_job_ctx(None);
+        assert!(matches!(r, Err(EngineError::Cancelled)), "{r:?}");
+        assert_eq!(pixels(&s), before, "a cancelled run must not touch the pixels");
+    }
+
+    #[test]
+    fn skin_enhance_reports_progress_and_completes_inline() {
+        let mut s = session_with_selection(48, 48);
+        let before = pixels(&s);
+        let ctx = JobCtx::new();
+        s.set_inline_job_ctx(Some(ctx.clone()));
+        s.execute("ai.skinEnhance", json!({"strength": 80})).unwrap();
+        s.set_inline_job_ctx(None);
+        assert!(ctx.fraction() >= 0.95, "progress reported, got {}", ctx.fraction());
+        assert_ne!(pixels(&s), before, "smoothing changed the pixels");
     }
 }
