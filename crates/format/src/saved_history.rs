@@ -78,9 +78,10 @@ pub(crate) struct Prepared {
     pub blobs: BTreeMap<Hash, Arc<Vec<u8>>>,
 }
 
-/// The history section for a save whose manifest is `manifest`, with every object `doc_tiles` and
-/// `doc_blobs` (the document's own) reaches. States are taken newest first while the pixels only
-/// they add fit in [`SavedHistory::max_bytes`]. `None` when no state fits. The history must never
+/// The history section for a save whose manifest is `manifest`; `has_tile` and `has_blob` say
+/// which objects the document itself already stores. States are taken newest first while the
+/// pixels only they add fit in [`SavedHistory::max_bytes`] and the section stays small enough for
+/// the default load limits to read it back. `None` when no state fits. The history must never
 /// cost the document its save, so a state that can't be written ends the history there instead
 /// of failing.
 pub(crate) fn prepare(
@@ -97,6 +98,9 @@ pub(crate) fn prepare(
     let mut tiles = BTreeMap::new();
     let mut blobs = BTreeMap::new();
     let mut spent = 0u64;
+    // Headroom for labels, targets and the section's own fields.
+    let max_json = (crate::LoadOptions::default().max_manifest_bytes as u64).saturating_sub(1 << 20);
+    let mut json_spent = 0u64;
     let mut states = Vec::new();
     for s in h.states.iter().rev() {
         let mut c = crate::store::Collect { hash_cache: cache.as_deref_mut(), ..Default::default() };
@@ -105,6 +109,11 @@ pub(crate) fn prepare(
         }
         let document = convert::doc_m(&s.doc, &mut c);
         if crate::finite::check(&document).is_err() {
+            break;
+        }
+        // The section is read with the manifest's size limit: keep it within the default one.
+        let Ok(json_len) = serde_json::to_vec(&document).map(|j| j.len() as u64) else { break };
+        if json_spent.saturating_add(json_len) > max_json {
             break;
         }
         let mut added = 0u64;
@@ -122,6 +131,7 @@ pub(crate) fn prepare(
             break;
         }
         spent = spent.saturating_add(added);
+        json_spent = json_spent.saturating_add(json_len);
         for (hash, t) in c.tiles {
             if !has_tile(&hash) {
                 tiles.entry(hash).or_insert(t);
