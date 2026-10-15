@@ -13,9 +13,9 @@ use super::{CURVE_HANDLE_SIZE, Edit, EditorCx, adjusted_spectrum, channel_picker
 use crate::state::PointCurveState;
 use crate::theme::Tokens;
 
-/// The curves: parameter key, picker label, value at the graph's bottom and top.
-const CURVES: [(&str, &str, f32, f32); 3] =
-    [("hue", "Hue vs Hue", -180.0, 180.0), ("saturation", "Hue vs Saturation", 0.0, 2.0), ("luminance", "Hue vs Luminance", -100.0, 100.0)];
+/// The curves (hue vs hue, saturation, luminance): parameter key, picker label, value at the
+/// graph's bottom and top.
+const CURVES: [(&str, &str, f32, f32); 3] = [("hue", "Hue", -180.0, 180.0), ("saturation", "Saturation", 0.0, 2.0), ("luminance", "Luminance", -100.0, 100.0)];
 
 /// Graph level (0..255) of curve value `v`.
 fn level(c: usize, v: f32) -> f32 {
@@ -157,9 +157,9 @@ pub(super) fn editor(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let sel = st.selected.and_then(|i| from_graph(c, &[g.get(i).copied().unwrap_or_default(), [0.0, 0.0]]).first().copied());
-        label(ui, tl!("Hue:"));
+        label(ui, tl!("Input:"));
         ui.label(sel.map_or_else(|| "–".into(), |q| format!("{:.0}°", q[0])));
-        label(ui, tl!("Value:"));
+        label(ui, tl!("Output:"));
         let unit = match c {
             0 => "°",
             2 => "%",
