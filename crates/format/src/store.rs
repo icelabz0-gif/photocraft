@@ -181,9 +181,7 @@ fn read_manifest_hashed(src: &dyn ByteSource, opts: &LoadOptions) -> Result<(Man
     let mut m: Manifest = serde_json::from_value(v)?;
     m.document.layers = layers_from_json(layers)?;
     // A number past f32's range decodes as infinity, which no save could write back (#6862).
-    if let Err(crate::finite::Problem::NonFinite { path }) = crate::finite::check(&m) {
-        return Err(FormatError::corrupt(format!("`{path}` is out of range")));
-    }
+    reject_non_finite(&m)?;
     Ok((m, base))
 }
 
@@ -192,7 +190,16 @@ pub(crate) fn doc_m_from_json(mut v: serde_json::Value) -> Result<crate::manifes
     let layers = take_array(&mut v, "/layers");
     let mut m: crate::manifest::DocM = serde_json::from_value(v)?;
     m.layers = layers_from_json(layers)?;
+    reject_non_finite(&m)?;
     Ok(m)
+}
+
+/// A corrupt-file error when a decoded number is past f32's range (#6862).
+fn reject_non_finite<T: serde::Serialize + ?Sized>(m: &T) -> Result<()> {
+    if let Err(crate::finite::Problem::NonFinite { path }) = crate::finite::check(m) {
+        return Err(FormatError::corrupt(format!("`{path}` is out of range")));
+    }
+    Ok(())
 }
 
 /// Decodes layers one at a time, group children first. Decoding the whole tree in one go costs

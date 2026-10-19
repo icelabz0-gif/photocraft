@@ -196,6 +196,14 @@ fn a_state_that_does_not_decode_drops_the_history() {
     assert!(back.saved_history.is_none());
 }
 
+/// A past state with a number beyond f32's range would load as infinity that no later save can
+/// write back (#6862), so it drops the history like any state that doesn't decode.
+#[test]
+fn a_state_with_an_out_of_range_number_drops_the_history() {
+    let back = reopen_damaged(|dir| edit_history_json(dir, |v| v["states"][0]["document"]["layers"][0]["opacity"] = serde_json::json!(1e39)));
+    assert!(back.saved_history.is_none());
+}
+
 #[test]
 fn history_beyond_the_load_budget_opens_without_history() {
     let (doc, history) = edited();
