@@ -174,6 +174,7 @@ pub mod proxy;
 pub mod puppet_ui;
 pub mod quick_pick;
 pub mod rasterize_prompt;
+pub mod retouch_ai_panel;
 pub mod retouch_ui;
 mod rgb_histogram;
 pub mod rotate_view;
@@ -2080,6 +2081,7 @@ impl eframe::App for PhotocraftApp {
         });
         panels::properties_window(self, &ctx);
         brush_panel::window(self, &ctx);
+        retouch_ai_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);
         type_panels_ui::windows(self, &ctx);

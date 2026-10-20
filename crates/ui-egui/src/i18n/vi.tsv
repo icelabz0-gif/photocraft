@@ -3731,3 +3731,76 @@ curves	Smooth	Làm mượt
 	Use	Dùng
 	In Front	Phía trước
 	Behind	Phía sau
+# Retouch AI panel (Window › Retouch AI) and its window.toggle.retouchAI command
+	Retouch AI	Retouch AI
+	Engine	Engine
+	Local • CPU	Cục bộ • CPU
+	Analyze	Phân tích
+	Run Selected	Chạy đã chọn
+	Skin & Face	Da & Mặt
+	Eyes & Smile	Mắt & Nụ cười
+	Hair, Fabric & Background	Tóc, Vải & Nền
+	Dodge & Burn	Dodge & Burn
+	Skin Tone	Tông da
+	Mattifier	Giảm bóng nhờn
+	Skin Mask	Mask vùng da
+	Portrait Volumes	Khối chân dung
+	Eye Brilliance	Mắt sáng
+	Eye Vessels	Giảm tia máu mắt
+	Teeth Whitening	Làm trắng răng
+	Clean Hair	Dọn tóc bay
+	Fabric Volumes	Khối nếp vải
+	Dust Clean	Xóa bụi vải
+	Background Clean	Dọn phông nền
+	Color Match	Khớp màu
+	ID Photo	Ảnh thẻ
+	Outdoor Wedding	Cưới ngoại cảnh
+	Beauty Studio	Beauty studio
+	Children's Yearbook	Kỷ yếu trẻ em
+	Preset name	Tên thiết lập
+	Preset name is empty.	Tên thiết lập đang trống.
+	Preset saved: {name}	Đã lưu thiết lập: {name}
+	Preset deleted: {name}	Đã xóa thiết lập: {name}
+	Reference image	Ảnh tham chiếu
+	Choose Reference Image…	Chọn ảnh tham chiếu…
+	No reference chosen	Chưa chọn ảnh tham chiếu
+	Reference image: {name}	Ảnh tham chiếu: {name}
+	Choose the reference image: {error}	Chọn ảnh tham chiếu: {error}
+	Open an image to start	Mở một ảnh để bắt đầu
+	Faces: {faces} · Eyes: {eyes} · Mouth: {mouth} · Skin: {skin}	Khuôn mặt: {faces} · Mắt: {eyes} · Miệng: {mouth} · Da: {skin}
+	Analysis failed: {error}	Phân tích thất bại: {error}
+	Retouch failed: {error}	Chạy Retouch thất bại: {error}
+	Created {n} layers	Đã tạo {n} lớp
+	Skipped: {tool} ({reason})	Bỏ qua: {tool} ({reason})
+	Retouch • {tool}	Retouch • {tool}
+	Select at least one tool.	Chọn ít nhất một công cụ.
+	Layer update failed: {error}	Cập nhật lớp thất bại: {error}
+	Results	Kết quả
+	No results yet.	Chưa có kết quả.
+	Show layer	Hiện lớp
+	Hide layer	Ẩn lớp
+	Input folder	Thư mục vào
+	Output folder	Thư mục ra
+	Folder path	Đường dẫn thư mục
+	Same as source	Giống ảnh gốc
+	JPEG	JPEG
+	PNG	PNG
+	TIFF	TIFF
+	Run Batch	Chạy hàng loạt
+	Choose both an input and an output folder.	Hãy chọn cả thư mục vào và ra.
+	Batch finished: {files} files, {errors} errors	Hàng loạt xong: {files} tệp, {errors} lỗi
+	Batch failed: {error}	Hàng loạt thất bại: {error}
+	Removes blemishes, spots and redness in the skin area while keeping texture.	Xóa mụn, vết thâm và đốm đỏ trong vùng da, giữ lại kết cấu.
+	Dodges and burns the skin to soften under-eye shadows and smile lines.	Làm sáng và tối vùng da để giảm bọng mắt và nếp cười.
+	Evens out the skin tone and reduces redness or color casts.	Làm đều tông da và giảm ửng đỏ hoặc ám màu.
+	Reduces oily shine and blown highlights on the skin.	Giảm bóng nhờn và cháy sáng trên da.
+	Creates a copy of the layer with a skin mask; the pixels are unchanged.	Tạo bản sao của lớp với mask vùng da; pixel không thay đổi.
+	Adds depth and volume to the subject.	Tăng độ sâu và khối cho chủ thể.
+	Adds contrast to the iris and brightens the catchlights.	Tăng tương phản cho tròng mắt và làm sáng điểm bắt sáng.
+	Reduces red blood vessels in the whites of the eyes.	Giảm tia máu đỏ trong lòng trắng của mắt.
+	Whitens the teeth naturally and reduces yellow stains.	Làm trắng răng tự nhiên và giảm ố vàng.
+	Removes flyaway hair around the edge of the head.	Xóa sợi tóc bay quanh viền đầu.
+	Dodges and burns folds in the fabric of the clothing.	Làm sáng và tối các nếp gấp trên vải của trang phục.
+	Removes dust and lint from dark backgrounds and clothing.	Xóa bụi và lông vải trên nền tối và trang phục.
+	Removes marks and creases from the backdrop.	Xóa vết bẩn và nếp gấp trên phông nền.
+	Matches the color tone to a reference image.	Khớp tông màu với ảnh tham chiếu.

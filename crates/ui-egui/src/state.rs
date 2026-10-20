@@ -392,6 +392,9 @@ pub struct Panels {
     /// Window › Brushes: dockable panel, like Photoshop's.
     #[serde(default)]
     pub brushes: bool,
+    /// Window › Retouch AI: a floating window, like Brush Settings.
+    #[serde(default)]
+    pub retouch_ai: bool,
     /// Window › Character / Paragraph: the Character | Paragraph dock group (#150).
     #[serde(default)]
     pub character: bool,
@@ -431,6 +434,7 @@ impl Default for Panels {
             status_bar: true,
             brush_settings: false,
             brushes: false,
+            retouch_ai: false,
             character: false,
             toolbar_double: false,
             dock: true,
@@ -1298,6 +1302,9 @@ pub struct UiState {
     /// Brushes panel: collapsed groups and the search filter.
     #[serde(default)]
     pub brushes_panel: crate::brush_panel::BrushesPanelState,
+    /// Retouch AI: tool selections/amounts, presets, batch folders and the last result layers.
+    #[serde(default)]
+    pub retouch_ai: crate::retouch_ai_panel::RetouchAiState,
     /// Marquee options-bar mode: 0 new, 1 add, 2 subtract, 3 intersect (modifier keys override).
     #[serde(default)]
     pub selection_mode: u8,
@@ -1424,6 +1431,7 @@ impl Default for UiState {
             brush_section: 0,
             brush_tab: 0,
             brushes_panel: Default::default(),
+            retouch_ai: Default::default(),
             selection_mode: 0,
             tool_options: ToolOptions::default(),
             polygon: Vec::new(),
