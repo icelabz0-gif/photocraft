@@ -6213,6 +6213,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                 Tool::MagicWand => {
                     let o = app.ui.tool_options.clone();
                     let mode = selection_mode(app, mods);
+                    let baseline = app.session.active().and_then(|doc| doc.doc.selection.clone());
                     if app
                         .run(
                             "select.magicWand",
@@ -6223,7 +6224,16 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                         app.last_magic_wand = app
                             .session
                             .active()
-                            .map(|doc| (doc.doc.id, [x.floor(), y.floor()], mode.to_owned(), o.tolerance));
+                            .map(|doc| crate::LastMagicWand {
+                                doc_id: doc.doc.id,
+                                revision: doc.revision,
+                                view_revision: doc.view_revision,
+                                active_layer: doc.active_layer,
+                                point: [x.floor(), y.floor()],
+                                mode: mode.to_owned(),
+                                tolerance: o.tolerance,
+                                selection_baseline: baseline,
+                            });
                     }
                     return;
                 }

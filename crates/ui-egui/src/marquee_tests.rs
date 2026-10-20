@@ -151,7 +151,7 @@ fn magic_wand_tolerance_drag_repeats_the_last_sample_point_on_release() {
     let initial = h.state().session.active().unwrap().doc.selection.as_ref().unwrap().clone();
     assert!(initial.sample_channel(100, 100, 0) > 0.99);
     assert!(initial.sample_channel(300, 100, 0) < 0.01);
-    assert_eq!(h.state().last_magic_wand.as_ref().unwrap().1, [100.0, 100.0]);
+    assert_eq!(h.state().last_magic_wand.as_ref().unwrap().point, [100.0, 100.0]);
 
     let tolerance_label = h.get_by_label_contains("Tolerance").rect().center();
     h.event(egui::Event::PointerMoved(tolerance_label));
@@ -168,7 +168,22 @@ fn magic_wand_tolerance_drag_repeats_the_last_sample_point_on_release() {
     let updated = h.state().session.active().unwrap().doc.selection.as_ref().unwrap().clone();
     assert!(updated.sample_channel(100, 100, 0) > 0.99);
     assert!(updated.sample_channel(300, 100, 0) > 0.99, "the same sample point now selects the white region");
-    assert_eq!(h.state().last_magic_wand.as_ref().unwrap().1, [100.0, 100.0]);
+    assert_eq!(h.state().last_magic_wand.as_ref().unwrap().point, [100.0, 100.0]);
+}
+
+#[test]
+fn another_selection_command_invalidates_the_last_magic_wand_sample() {
+    let mut h = magic_wand_harness();
+    move_to(&mut h, 100.0, 100.0);
+    let p = screen(&h, 100.0, 100.0);
+    button(&mut h, p, true, Modifiers::NONE);
+    button(&mut h, p, false, Modifiers::NONE);
+    h.run_steps(2);
+    assert!(h.state().last_magic_wand.is_some());
+
+    h.state_mut().run("select.rect", json!({"x": 40, "y": 40, "width": 30, "height": 30})).unwrap();
+
+    assert!(h.state().last_magic_wand.is_none(), "a new selection must discard the old wand sample");
 }
 
 #[test]
