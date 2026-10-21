@@ -766,7 +766,7 @@ pub static CATALOG: &[(&[&str], &str, Option<&str>, &str)] = &[
     (&["Window"], "Paths", None, "window.panel.paths"),
     (&["Window"], "Patterns", None, "window.panel.patterns"),
     (&["Window"], "Properties", None, "window.panel.properties"),
-    (&["Window"], "Retouch AI", None, "window.panel.retouchAI"),
+    (&["Window"], "Retouch AI", None, "window.toggle.retouchAI"),
     (&["Window"], "Shapes", None, "window.panel.shapes"),
     (&["Window"], "Styles", None, "window.panel.styles"),
     (&["Window"], "Swatches", None, "window.panel.swatches"),

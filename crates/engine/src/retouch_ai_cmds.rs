@@ -36,6 +36,8 @@ const ANALYZE: &str = "retouchAI.analyze";
 const MAX_TOOLS: usize = 14;
 const ANALYSIS_SIDE: u32 = 1600;
 const MASK_COVERAGE: f32 = 0.004;
+/// Every result layer this command creates starts with this prefix.
+const RESULT_PREFIX: &str = "Retouch • ";
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
@@ -124,7 +126,7 @@ impl Tool {
     }
 
     fn layer_name(self) -> String {
-        format!("Retouch • {}", self.label())
+        format!("{RESULT_PREFIX}{}", self.label())
     }
 }
 
@@ -1531,12 +1533,36 @@ fn build_tool(ctx: &Ctx<'_>, tool: Tool, amount: f32, reference: Option<&LabStat
 // Commands
 // ---------------------------------------------------------------------------------------------
 
+/// The topmost layer of the contiguous run of Retouch AI results directly above `source` (or
+/// `source` itself when a non-result layer is next). New results stack there, so a second run
+/// lands above the first instead of pushing old results down.
+fn retouch_stack_top(doc: &Document, source: LayerId) -> LayerId {
+    let Some(mut path) = doc.path_of(source) else { return source };
+    let mut top = source;
+    loop {
+        let Some(&idx) = path.last() else { return top };
+        let mut next = path.clone();
+        match next.last_mut() {
+            Some(last) => *last = idx.saturating_add(1),
+            None => return top,
+        }
+        let Some(layer) = doc.layer_at(&next) else { return top };
+        if !layer.name.starts_with(RESULT_PREFIX) {
+            return top;
+        }
+        top = layer.id;
+        path = next;
+    }
+}
+
 fn run_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let requested = parse_tools(p)?;
     let all_layers = bool_param(p, "sampleAllLayers", true, RUN)?;
     let selection_only = bool_param(p, "selectionOnly", false, RUN)?;
     let needs_reference = requested.iter().any(|t| t.tool == Tool::ColorMatch && t.amount > 0.0);
-    let reference_path = reference_path(p, needs_reference)?;
+    // A missing reference is not a command error: `build_tool` reports colorMatch as skipped so
+    // the other tools in a combo still run. A path that is present but unreadable still errors.
+    let reference_path = reference_path(p, false)?;
     let reference = match reference_path.as_deref() {
         Some(path) if needs_reference => Some(load_reference_stats(path)?),
         _ => None,
@@ -1573,13 +1599,15 @@ fn run_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     if !built.is_empty() {
         let mut ids = Vec::with_capacity(built.len());
         s.edit("Retouch AI", |doc, active| {
-            let mut above = Some(source_id);
+            let mut above = Some(retouch_stack_top(doc, source_id));
             for (tool, layer) in built {
                 let id = doc.insert_above(above, layer);
                 above = Some(id);
                 ids.push((tool, id));
             }
-            *active = ids.last().map(|(_, id)| *id);
+            // Keep the original source selected: the result layers are sparse, so using one as
+            // the source of a second run would clip its effects to the first result's bbox.
+            *active = Some(source_id);
             Ok(())
         })?;
         for (tool, id) in ids {
@@ -1794,7 +1822,8 @@ mod tests {
             json!({"tools":[{"id":"nope"}]}),
             json!({"tools":[{"id":"heal","amount":"lots"}]}),
             json!({"tools":[{"id":"heal"},{"id":"heal"}]}),
-            json!({"tools":[{"id":"colorMatch"}]}),
+            json!({"tools":[{"id":"colorMatch"}],"referencePath":5}),
+            json!({"tools":[{"id":"colorMatch"}],"referencePath":"/no/such/reference.png"}),
             json!({"tools":[{"id":"heal"}],"sampleAllLayers":"yes"}),
             json!({"tools":[{"id":"heal"}],"layer":999999}),
         ] {
@@ -1802,6 +1831,38 @@ mod tests {
         }
         let too_many: Vec<Value> = (0..15).map(|_| json!({"id":"heal"})).collect();
         assert!(s.execute(RUN, json!({"tools":too_many})).is_err());
+    }
+
+    #[test]
+    fn heal_and_color_match_without_a_reference_skips_color_match_only() {
+        let mut s = synthetic_session(SampleType::U8);
+        let r = s.execute(RUN, json!({"tools":[{"id":"heal"},{"id":"colorMatch"}]})).unwrap();
+        assert_eq!(r["layers"].as_array().map(Vec::len), Some(1), "{r}");
+        assert_eq!(r["layers"][0]["tool"], "heal");
+        let skipped = r["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{r}");
+        assert_eq!(skipped[0]["tool"], "colorMatch");
+        assert_eq!(skipped[0]["reason"], "colorMatch needs referencePath");
+    }
+
+    #[test]
+    fn repeated_runs_keep_the_source_active_and_stack_above_old_results() {
+        let mut s = synthetic_session(SampleType::U8);
+        let source = s.active().unwrap().active_layer.unwrap();
+        let first = s.execute(RUN, json!({"tools":[{"id":"skinMask"}]})).unwrap();
+        assert_eq!(first["layers"].as_array().map(Vec::len), Some(1), "{first}");
+        assert_eq!(s.active().unwrap().active_layer, Some(source), "the source must stay active after a run");
+        let first_id = LayerId(first["layers"][0]["layer"].as_u64().unwrap());
+
+        let second = s.execute(RUN, json!({"tools":[{"id":"skinMask"}]})).unwrap();
+        assert_eq!(second["layers"].as_array().map(Vec::len), Some(1), "{second}");
+        let second_id = LayerId(second["layers"][0]["layer"].as_u64().unwrap());
+        assert_ne!(first_id, second_id);
+
+        let d = s.active().unwrap();
+        let stack: Vec<LayerId> = d.doc.walk().into_iter().map(|(_, _, l)| l.id).collect();
+        assert_eq!(stack, vec![source, first_id, second_id], "the second run must stack above the first");
+        assert_eq!(d.active_layer, Some(source), "no result layer may be left active");
     }
 
     #[test]
@@ -1845,7 +1906,7 @@ mod tests {
         // Duplicated pixels are the source's, unchanged inside the sparse copy.
         assert_eq!(layer.surface().unwrap().read_region(copy_bounds), d.doc.layer(source).unwrap().surface().unwrap().read_region(copy_bounds));
         assert_eq!(pixels_of(&s, source), before);
-        assert_eq!(d.active_layer, Some(id));
+        assert_eq!(d.active_layer, Some(source), "the source layer stays selected after a run");
     }
 
     #[test]

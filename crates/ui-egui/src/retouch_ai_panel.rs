@@ -293,7 +293,6 @@ pub const BUILTINS: [BuiltinPreset; 4] = [
             ("teeth", 55.0),
             ("cleanHair", 40.0),
             ("backgroundClean", 50.0),
-            ("colorMatch", 35.0),
         ],
     },
     BuiltinPreset {
@@ -309,7 +308,6 @@ pub const BUILTINS: [BuiltinPreset; 4] = [
             ("cleanHair", 55.0),
             ("fabricVolumes", 55.0),
             ("backgroundClean", 50.0),
-            ("colorMatch", 45.0),
         ],
     },
     BuiltinPreset {
@@ -325,7 +323,6 @@ pub const BUILTINS: [BuiltinPreset; 4] = [
             ("eyeVessels", 60.0),
             ("teeth", 70.0),
             ("cleanHair", 60.0),
-            ("colorMatch", 50.0),
         ],
     },
     BuiltinPreset {
@@ -1269,6 +1266,32 @@ mod tests {
         assert!(!app.ui.panels.retouch_ai);
         crate::menus::invoke(&mut app, &ctx, "window.panel.retouchAI", json!({})).expect("panel alias");
         assert!(app.ui.panels.retouch_ai);
+    }
+
+    #[test]
+    fn menu_catalog_uses_the_toggle_command_and_the_alias_works_in_a_custom_workspace() {
+        let entry = crate::menu_catalog::CATALOG
+            .iter()
+            .find(|(path, label, _, _)| *label == "Retouch AI" && path.contains(&"Window"))
+            .expect("Window › Retouch AI is in the catalog");
+        assert_eq!(entry.3, "window.toggle.retouchAI");
+
+        // A saved custom dock layout makes panel_docking answer for `window.panel.*`, but the
+        // Retouch AI panel is not dockable: the alias must reach the real toggle command.
+        let mut app = app();
+        app.run("window.panel.move", json!({"panel":"swatches","anchor":"layers"})).expect("custom layout");
+        assert!(app.ui.docking.is_some());
+        let ctx = egui::Context::default();
+        assert!(!app.ui.panels.retouch_ai);
+        crate::menus::invoke(&mut app, &ctx, "window.panel.retouchAI", json!({})).expect("panel alias");
+        assert!(app.ui.panels.retouch_ai);
+        let item = crate::menus::menu_items(&app)
+            .into_iter()
+            .find(|item| item.label == "Retouch AI" && item.path.iter().any(|p| p == "Window"))
+            .expect("Window › Retouch AI is in the menu");
+        assert_eq!(item.checked, Some(true), "the menu shows Retouch AI checked");
+        crate::menus::invoke(&mut app, &ctx, "window.panel.retouchAI", json!({})).expect("panel alias");
+        assert!(!app.ui.panels.retouch_ai);
     }
 
     #[test]
