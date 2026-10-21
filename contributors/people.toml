@@ -275,3 +275,6 @@ sync_github_name = false
 [people.erenova]
 display_name = "Erenova"
 sync_github_name = false
+
+[people.regexer]
+sync_github_name = true
