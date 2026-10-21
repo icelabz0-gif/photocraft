@@ -204,29 +204,72 @@ fn a_state_with_an_out_of_range_number_drops_the_history() {
     assert!(back.saved_history.is_none());
 }
 
-#[test]
-fn history_beyond_the_load_budget_opens_without_history() {
-    let (doc, history) = edited();
-    let with = save_to_bytes(&with_history(&doc, history), &SaveOptions::default()).unwrap();
-    // Find the smallest budget the document alone loads in: the history can't fit beside it.
-    let without = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+/// The smallest `max_total_bytes` the bundle `bytes` loads in with `states` states of history.
+fn smallest_load_budget(bytes: &[u8], states: usize) -> u64 {
+    let loads = |budget: u64| {
+        load_from_bytes_with(bytes, &LoadOptions { max_total_bytes: budget, ..Default::default() })
+            .is_ok_and(|d| d.saved_history.as_ref().map_or(0, |h| h.states.len()) == states)
+    };
     let mut budget = 1u64;
-    while load_from_bytes_with(&without, &LoadOptions { max_total_bytes: budget, ..Default::default() }).is_err() {
+    while !loads(budget) {
         budget *= 2;
         assert!(budget < 1 << 40);
     }
     let mut lo = budget / 2;
     while lo + 1 < budget {
         let mid = (lo + budget) / 2;
-        if load_from_bytes_with(&without, &LoadOptions { max_total_bytes: mid, ..Default::default() }).is_ok() {
+        if loads(mid) {
             budget = mid;
         } else {
             lo = mid;
         }
     }
+    budget
+}
+
+#[test]
+fn history_beyond_the_load_budget_opens_without_history() {
+    let (doc, history) = edited();
+    let with = save_to_bytes(&with_history(&doc, history), &SaveOptions::default()).unwrap();
+    // The smallest budget the document alone loads in: the history can't fit beside it.
+    let budget = smallest_load_budget(&save_to_bytes(&doc, &SaveOptions::default()).unwrap(), 0);
     let back = load_from_bytes_with(&with, &LoadOptions { max_total_bytes: budget, ..Default::default() }).unwrap();
     assert_eq!(bare(&back), doc);
     assert!(back.saved_history.is_none());
+}
+
+#[test]
+fn a_history_saved_at_the_load_budget_reopens_with_it() {
+    // The history preference allows more than the loader reads back (64 GiB against 16 GiB, and
+    // the document's own pixels count too): the save keeps only the states a loader with that
+    // budget can reopen, so the newest ones survive instead of the whole history being dropped.
+    let (doc, history) = edited();
+    let doc_bytes = smallest_load_budget(&save_to_bytes(&doc, &SaveOptions::default()).unwrap(), 0);
+    let with_all = save_to_bytes(&with_history(&doc, history.clone()), &SaveOptions::default()).unwrap();
+    let all_bytes = smallest_load_budget(&with_all, history.states.len());
+    // Room beside the document for Brush Tool's pixels (none: they are the document's own) but
+    // not for Open's repainted background.
+    let budget = all_bytes - 1;
+    assert!(budget > doc_bytes);
+    let save_at = |budget: u64| {
+        let mut w = PcraftWriter::new();
+        w.set_history_load_budget(budget);
+        w.save_zip(&with_history(&doc, history.clone()), &SaveOptions::default()).unwrap().0
+    };
+    let bytes = save_at(budget);
+    let back = load_from_bytes_with(&bytes, &LoadOptions { max_total_bytes: budget, ..Default::default() }).unwrap();
+    assert_eq!(bare(&back), doc);
+    let h = back.saved_history.expect("the states that fit the load budget reopen");
+    assert_eq!(h.states.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Brush Tool"]);
+
+    // A budget the history fits in keeps all of it; one the document alone fills keeps none.
+    let back = load_from_bytes_with(&save_at(all_bytes), &LoadOptions { max_total_bytes: all_bytes, ..Default::default() }).unwrap();
+    assert_same_history(back.saved_history.as_deref().expect("the whole history fits"), &history);
+    let bytes = save_at(doc_bytes);
+    assert!(zip::ZipReader::new(&bytes).unwrap().find(HISTORY).is_none());
+
+    // The default writer leaves room within the default loader's budget.
+    assert_eq!(PcraftWriter::new().history_load_budget(), LoadOptions::default().max_total_bytes);
 }
 
 #[test]

@@ -80,18 +80,21 @@ pub(crate) struct Prepared {
 
 /// The history section for a save whose manifest is `manifest`; `has_tile` and `has_blob` say
 /// which objects the document itself already stores. States are taken newest first while the
-/// pixels only they add fit in [`SavedHistory::max_bytes`] and the section stays small enough for
-/// the default load limits to read it back. `None` when no state fits. The history must never
+/// pixels only they add fit in [`SavedHistory::max_bytes`] and in `load_room` (what the load byte
+/// budget leaves beside the document's own objects, so a loader that reads the document can read
+/// them too), and the section stays small enough for the default load limits to read it back. `None` when no state fits. The history must never
 /// cost the document its save, so a state that can't be written ends the history there instead
 /// of failing.
 pub(crate) fn prepare(
     h: &SavedHistory,
     manifest: &[u8],
+    load_room: u64,
     hash_cache: Option<&mut crate::store::TileHashCache>,
     has_tile: &dyn Fn(&str) -> bool,
     has_blob: &dyn Fn(&str) -> bool,
 ) -> Option<Prepared> {
-    if h.max_bytes == 0 {
+    let max_bytes = h.max_bytes.min(load_room);
+    if max_bytes == 0 {
         return None;
     }
     let mut cache = hash_cache;
@@ -127,7 +130,7 @@ pub(crate) fn prepare(
                 added = added.saturating_add(b.len() as u64);
             }
         }
-        if spent.saturating_add(added) > h.max_bytes {
+        if spent.saturating_add(added) > max_bytes {
             break;
         }
         spent = spent.saturating_add(added);

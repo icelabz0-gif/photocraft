@@ -98,6 +98,8 @@ fn the_size_limit_comes_from_the_preferences() {
     assert_eq!(h.states.len(), s.active().unwrap().history.past_len());
     // Out of range values are refused.
     assert!(s.execute("prefs.set", json!({"path": "performance.historyInDocumentMb", "value": 0})).is_err());
+    assert_eq!(s.prefs().performance.history_in_document_mb, 64, "a refused value leaves the preference alone");
+    assert_eq!(s.document_to_save(0).unwrap().saved_history.as_deref().unwrap().max_bytes, 64 << 20);
 }
 
 #[test]
