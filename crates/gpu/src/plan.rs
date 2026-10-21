@@ -1573,6 +1573,13 @@ fn to_row(t: &[f32]) -> [f32; 4096] {
 /// and a CMYK document on its inks (`cmyk_channel_adjustment`), which only the CPU does.
 pub fn adjustment_on_gpu(adj: &Adjustment, mode: photocraft_color::ColorMode) -> bool {
     use photocraft_compose::adjust::{cmyk_channel_adjustment, lab_channel_adjustment};
+    // Basic Color ignores its colour sliders in grayscale-family documents, a rule only the CPU
+    // owns (compose::adjust::apply_in), so those modes fall back.
+    if matches!(adj, Adjustment::BasicColor { .. })
+        && matches!(mode, photocraft_color::ColorMode::Grayscale | photocraft_color::ColorMode::Duotone | photocraft_color::ColorMode::Bitmap)
+    {
+        return false;
+    }
     let tone_in_space =
         matches!(adj, Adjustment::Levels { space: ToneSpace::Cmyk | ToneSpace::Lab, .. } | Adjustment::Curves { space: ToneSpace::Cmyk | ToneSpace::Lab, .. });
     let own_channels = match mode {
@@ -1658,6 +1665,17 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             } else {
                 (8, p, None)
             }
+        }
+        Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } => {
+            // compose::adjust::basic_color_px:
+            // p0 = temperature, tint, exposure, contrast; p1 = highlights, shadows, whites, blacks;
+            // p2 = vibrance, saturation, exposure transfer gamma, unused;
+            // p3 = presence transfer gamma, presence ceiling (F32_MAX for 32-bit), unused, unused.
+            p[0] = [temperature / 100.0, tint / 100.0, *exposure, contrast / 100.0];
+            p[1] = [highlights / 100.0, shadows / 100.0, whites / 100.0, blacks / 100.0];
+            p[2] = [vibrance / 100.0, saturation / 100.0, transfer_exponent(transfer.for_exposure()), 0.0];
+            p[3] = [transfer_exponent(transfer), if depth == photocraft_color::SampleType::F32 { f32::MAX } else { 1.0 }, 0.0, 0.0];
+            (18, p, None)
         }
         Adjustment::Vibrance { vibrance, saturation } => {
             // compose::adjust::vibrance_px; 32-bit samples aren't clipped at 1.
@@ -1843,6 +1861,26 @@ mod tests {
         assert!(adjustment_on_gpu(&hue(false), ColorMode::Rgb));
         // Screen-colour adjustments stay on the GPU in Lab documents.
         assert!(adjustment_on_gpu(&Adjustment::Exposure { exposure: 1.0, offset: 0.0, gamma: 1.0 }, ColorMode::Lab));
+        // Basic Color works on screen RGB, but a grayscale-family document can't show its
+        // chroma controls, so those render on the CPU.
+        let basic = Adjustment::BasicColor {
+            temperature: 20.0,
+            tint: -10.0,
+            exposure: 0.5,
+            contrast: 10.0,
+            highlights: -5.0,
+            shadows: 5.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 10.0,
+            saturation: 0.0,
+        };
+        for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
+            assert!(!adjustment_on_gpu(&basic, mode), "{mode:?}");
+        }
+        for mode in [ColorMode::Rgb, ColorMode::Lab, ColorMode::Cmyk] {
+            assert!(adjustment_on_gpu(&basic, mode), "{mode:?}");
+        }
     }
 
     #[test]

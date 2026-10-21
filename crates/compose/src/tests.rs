@@ -3242,3 +3242,178 @@ fn concurrent_effect_identity_misses_compute_once() {
     });
     assert_eq!(keys.built.load(std::sync::atomic::Ordering::Relaxed), 1, "concurrent cache misses must compute one memoized identity");
 }
+
+// ---- Basic Color (Lightroom-style Basic adjustment layer) ------------------------------------
+
+/// `[temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance,
+/// saturation]` as an [`Adjustment::BasicColor`].
+fn basic_color(p: [f32; 10]) -> Adjustment {
+    Adjustment::BasicColor {
+        temperature: p[0],
+        tint: p[1],
+        exposure: p[2],
+        contrast: p[3],
+        highlights: p[4],
+        shadows: p[5],
+        whites: p[6],
+        blacks: p[7],
+        vibrance: p[8],
+        saturation: p[9],
+    }
+}
+
+fn basic_px(c: [f32; 3], p: [f32; 10], depth: SampleType) -> [f32; 3] {
+    let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [c[0], c[1], c[2], 1.0]);
+    adjust::apply_depth(&basic_color(p), &mut buf, adjust::Transfer::Srgb, Some(depth));
+    [buf.px[0][0], buf.px[0][1], buf.px[0][2]]
+}
+
+fn basic_luma(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+#[test]
+fn basic_color_all_zero_is_an_exact_no_op() {
+    let snapshot = [[0.13, 0.42, 0.77, 0.4], [2.0, -0.5, 0.0, 1.0], [0.0, 0.999, 0.001, 0.0]];
+    let mut buf = Buffer { rect: Rect::new(0, 0, 3, 1), px: snapshot.to_vec() };
+    adjust::apply(&basic_color([0.0; 10]), &mut buf);
+    assert_eq!(buf.px, snapshot, "every slider at 0 must leave the buffer untouched");
+    // The same through the mode-aware path (grayscale included) and a 32-bit document.
+    for mode in [ColorMode::Rgb, ColorMode::Grayscale, ColorMode::Cmyk, ColorMode::Lab] {
+        let mut buf = Buffer { rect: Rect::new(0, 0, 3, 1), px: snapshot.to_vec() };
+        adjust::apply_in(&basic_color([0.0; 10]), &mut buf, adjust::Transfer::Srgb, Some(SampleType::F32), mode);
+        assert_eq!(buf.px, snapshot, "{mode:?}");
+    }
+}
+
+#[test]
+fn basic_color_exposure_brightens_and_white_balance_moves_the_right_way() {
+    let grey = [0.5, 0.5, 0.5];
+    let neutral = basic_px(grey, [0.0; 10], SampleType::U8);
+    let plus = basic_px(grey, [0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    let minus = basic_px(grey, [0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!(basic_luma(plus) > basic_luma(neutral) + 0.02, "+0.5 EV: {plus:?}");
+    assert!(basic_luma(minus) < basic_luma(neutral) - 0.02, "-0.5 EV: {minus:?}");
+
+    let warm = basic_px(grey, [60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    let cool = basic_px(grey, [-60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!(warm[0] > neutral[0] && warm[2] < neutral[2], "+ temperature warms: {warm:?}");
+    assert!(cool[0] < neutral[0] && cool[2] > neutral[2], "- temperature cools: {cool:?}");
+
+    let magenta = basic_px(grey, [0.0, 60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    let green = basic_px(grey, [0.0, -60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!(magenta[1] < magenta[0] && magenta[1] < magenta[2], "+ tint is magenta: {magenta:?}");
+    assert!(green[1] > green[0] && green[1] > green[2], "- tint is green: {green:?}");
+}
+
+#[test]
+fn basic_color_tone_controls_move_their_ranges() {
+    // Contrast pivots at mid grey and moves away from it.
+    let zero = basic_px([0.5, 0.5, 0.5], [0.0; 10], SampleType::U8);
+    assert!((basic_luma(zero) - 0.5).abs() < 1e-6);
+    let contrast = basic_px([0.5; 3], [0.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!((basic_luma(contrast) - 0.5).abs() < 1e-5, "contrast pins mid grey: {contrast:?}");
+    let dark = basic_px([0.35; 3], [0.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    let light = basic_px([0.65; 3], [0.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!(basic_luma(dark) < 0.30 && basic_luma(light) > 0.70, "contrast: {dark:?} {light:?}");
+
+    // Highlights act on the upper half only.
+    let hi = |v: f32, amount: f32| {
+        let mut p = [0.0; 10];
+        p[4] = amount;
+        basic_px([v; 3], p, SampleType::U8)
+    };
+    assert!(basic_luma(hi(0.8, 100.0)) > 0.82, "highlights +: {:?}", hi(0.8, 100.0));
+    assert!(basic_luma(hi(0.8, -100.0)) < 0.78, "highlights -: {:?}", hi(0.8, -100.0));
+    assert!((hi(0.1, 100.0)[0] - 0.1).abs() < 1e-6, "highlights leave shadows alone: {:?}", hi(0.1, 100.0));
+
+    // Shadows act on the lower half only.
+    let sh = |v: f32, amount: f32| {
+        let mut p = [0.0; 10];
+        p[5] = amount;
+        basic_px([v; 3], p, SampleType::U8)
+    };
+    assert!(basic_luma(sh(0.2, 100.0)) > 0.22, "shadows +: {:?}", sh(0.2, 100.0));
+    assert!(basic_luma(sh(0.2, -100.0)) < 0.18, "shadows -: {:?}", sh(0.2, -100.0));
+    assert!((sh(0.9, 100.0)[0] - 0.9).abs() < 1e-6, "shadows leave highlights alone: {:?}", sh(0.9, 100.0));
+
+    // Whites act near white only.
+    let wh = |v: f32, amount: f32| {
+        let mut p = [0.0; 10];
+        p[6] = amount;
+        basic_px([v; 3], p, SampleType::U8)
+    };
+    assert!(basic_luma(wh(0.95, 100.0)) > 0.96, "whites +: {:?}", wh(0.95, 100.0));
+    assert!(basic_luma(wh(0.95, -100.0)) < 0.94, "whites -: {:?}", wh(0.95, -100.0));
+    assert!((wh(0.2, 100.0)[0] - 0.2).abs() < 1e-6, "whites leave shadows alone: {:?}", wh(0.2, 100.0));
+
+    // Blacks act near black only.
+    let bl = |v: f32, amount: f32| {
+        let mut p = [0.0; 10];
+        p[7] = amount;
+        basic_px([v; 3], p, SampleType::U8)
+    };
+    assert!(basic_luma(bl(0.1, -100.0)) < 0.08, "blacks -: {:?}", bl(0.1, -100.0));
+    assert!(basic_luma(bl(0.1, 100.0)) > 0.12, "blacks +: {:?}", bl(0.1, 100.0));
+    assert!((bl(0.9, -100.0)[0] - 0.9).abs() < 1e-6, "blacks leave highlights alone: {:?}", bl(0.9, -100.0));
+}
+
+#[test]
+fn basic_color_layer_mask_and_opacity() {
+    let mut d = Document::with_background("bc", Size::new(4, 1), ColorMode::Rgb, SampleType::U8, Color::rgb(0.2, 0.2, 0.2));
+    let mut adj = Layer::new("bc", LayerContent::Adjustment(basic_color([0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])));
+    let mut m = LayerMask::reveal_all();
+    m.surface.fill_rect(Rect::new(2, 0, 4, 1), &[0.0]);
+    adj.mask = Some(m);
+    d.layers.push(adj);
+    let inside = px(&d, 0, 0);
+    assert!(inside[0] > 0.3, "masked-in side is brightened: {inside:?}");
+    assert_eq!(px(&d, 3, 0), [0.2, 0.2, 0.2, 1.0], "masked-out side is untouched");
+
+    // Opacity blends the adjustment with the backdrop.
+    let full = px(&d, 0, 0);
+    d.layers[1].opacity = 0.5;
+    let half = px(&d, 0, 0);
+    assert!(half[0] > 0.0 && half[0] < full[0], "opacity: {half:?} vs {full:?}");
+}
+
+#[test]
+fn basic_color_works_at_every_depth_and_preserves_alpha() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut d = Document::with_background("bc", Size::new(2, 2), ColorMode::Rgb, depth, Color::rgb(0.4, 0.45, 0.5));
+        d.layers.push(Layer::new("bc", LayerContent::Adjustment(basic_color([30.0, -10.0, 0.6, 25.0, 20.0, 15.0, 10.0, -10.0, 30.0, -10.0]))));
+        let p = px(&d, 1, 1);
+        assert!(basic_luma([p[0], p[1], p[2]]) > 0.5, "{depth:?}: {p:?}");
+        assert!((p[3] - 1.0).abs() < 1e-6, "{depth:?}: alpha kept");
+        // An adjustment over a transparent pixel leaves it transparent.
+        assert_eq!(px(&d, -1, 0), [0.0; 4], "{depth:?}: outside the canvas stays transparent");
+    }
+
+    // 32-bit documents don't clip: +2 EV over 1.5 stays well above white.
+    let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [1.5, 1.0, 0.5, 0.25]);
+    adjust::apply_depth(&basic_color([0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), &mut buf, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    assert!(buf.px[0][0] > 3.0 && buf.px[0][1] > 2.0, "32-bit HDR: {:?}", buf.px[0]);
+    assert_eq!(buf.px[0][3], 0.25, "alpha is preserved");
+}
+
+#[test]
+fn basic_color_never_tints_grayscale_family_documents() {
+    let p = [100.0, -100.0, 1.0, 30.0, 20.0, 10.0, 5.0, -5.0, 100.0, -100.0];
+    for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
+        let mut buf = Buffer::filled(Rect::new(0, 0, 2, 1), [0.5, 0.5, 0.5, 1.0]);
+        let transfer = adjust::Transfer::for_document(mode, SampleType::U8);
+        adjust::apply_in(&basic_color(p), &mut buf, transfer, Some(SampleType::U8), mode);
+        for px in &buf.px {
+            assert_eq!(px[0], px[1], "{mode:?} tinted: {px:?}");
+            assert_eq!(px[1], px[2], "{mode:?} tinted: {px:?}");
+            assert!(px[0] > 0.5, "{mode:?}: exposure still applies: {px:?}");
+        }
+    }
+    // Lab and CMYK keep the screen-colour path, so the colour sliders apply there.
+    let chroma = [100.0, -100.0, 1.0, 30.0, 20.0, 10.0, 5.0, -5.0, 100.0, 0.0];
+    for mode in [ColorMode::Rgb, ColorMode::Lab, ColorMode::Cmyk] {
+        let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [0.5, 0.5, 0.5, 1.0]);
+        adjust::apply_in(&basic_color(chroma), &mut buf, adjust::Transfer::Srgb, Some(SampleType::U8), mode);
+        assert!(buf.px[0][0] > buf.px[0][2], "{mode:?} should warm: {:?}", buf.px[0]);
+    }
+}

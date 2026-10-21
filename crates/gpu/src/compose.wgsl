@@ -591,6 +591,24 @@ fn tone_channel(row: i32, v: f32, identity: f32) -> f32 {
     return lut(row, v);
 }
 
+// Rec. 709 luma (Basic Color's tone stages and its white-balance gains).
+fn luma709(c: vec3<f32>) -> f32 {
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+}
+
+// compose::adjust::smoothstep: the usual cubic Hermite clamped to 0..1.
+fn smoothstep01(a: f32, b: f32, x: f32) -> f32 {
+    let t = clamp((x - a) / (b - a), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// compose::adjust::basic_tone: towards white when raised, towards black when lowered.
+fn basic_tone(l: f32, amount: f32, w: f32) -> f32 {
+    let d = amount * 0.5 * w;
+    if (d > 0.0) { return l + d * (1.0 - l); }
+    return l + d * l;
+}
+
 fn adjust(c: vec3<f32>) -> vec3<f32> {
     let hdr = (op.flags & F_HDR) != 0u;
     let p0 = op.p0;
@@ -676,6 +694,43 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             }
             l = clamp(l, vec3(0.0), vec3(p0.w));
             return vec3(t_encode(l.r, p0.z), t_encode(l.g, p0.z), t_encode(l.b, p0.z));
+        }
+        case 18: {                                                             // Basic Color (compose::adjust::basic_color_px)
+            // p0 = temperature, tint, exposure, contrast; p1 = highlights, shadows, whites, blacks;
+            // p2 = vibrance, saturation, exposure transfer gamma, unused; p3 = presence transfer
+            // gamma, presence ceiling, unused, unused.
+            var gains = vec3(1.0 + 0.35 * p0.x, 1.0 - 0.25 * p0.y, 1.0 - 0.35 * p0.x);
+            let lg = luma709(gains);
+            let m = pow(2.0, p0.z);
+            if (abs(lg) > 1e-6) { gains = gains / lg * m; } else { gains = vec3(m); }
+            var rgb: vec3<f32>;
+            if (hdr) {
+                rgb = c * gains;                                               // 32-bit samples are linear as stored
+            } else {
+                // White balance and exposure in linear light through the Exposure curve.
+                rgb = vec3(t_encode(t_decode(c.r, p2.z) * gains.r, p2.z), t_encode(t_decode(c.g, p2.z) * gains.g, p2.z), t_encode(t_decode(c.b, p2.z) * gains.b, p2.z));
+                rgb = clamp(rgb, vec3(0.0), vec3(1.0));
+            }
+            // Tone in encoded space, luma-preserving, in the contract's order.
+            let l = luma709(rgb);
+            var ln = 0.5 + (l - 0.5) * (1.0 + p0.w);
+            ln = basic_tone(ln, p1.x, smoothstep01(0.5, 1.0, ln));
+            ln = basic_tone(ln, p1.y, 1.0 - smoothstep01(0.0, 0.5, ln));
+            ln = basic_tone(ln, p1.z, smoothstep01(0.6, 1.0, ln));
+            ln = basic_tone(ln, p1.w, 1.0 - smoothstep01(0.0, 0.4, ln));
+            if (l > 1e-4) { rgb = rgb * (ln / l); } else { rgb = vec3(ln); }
+            if (!hdr) { rgb = clamp(rgb, vec3(0.0), vec3(1.0)); }
+            if (p2.x == 0.0 && p2.y == 0.0) { return rgb; }
+            // compose::adjust::vibrance_px: Vibrance (boost fit from VIBRANCE_BOOST) then
+            // Saturation towards 0.288 R + 0.712 G, through the document transfer.
+            var pres = vec3(t_decode(rgb.r, p3.x), t_decode(rgb.g, p3.x), t_decode(rgb.b, p3.x));
+            if (p2.x != 0.0) { pres = vibrance_lin(pres, p2.x, vec4(0.5001, 0.0887, 0.4374, 0.7573), vec3(-0.8113, 0.5154, 2.8026)); }
+            if (p2.y != 0.0) {
+                let grey = 0.288 * pres.r + 0.712 * pres.g;
+                pres = clamp(vec3(grey) + (1.0 + p2.y) * (pres - vec3(grey)), vec3(0.0), vec3(p3.y));
+            }
+            pres = clamp(pres, vec3(0.0), vec3(p3.y));
+            return vec3(t_encode(pres.r, p3.x), t_encode(pres.g, p3.x), t_encode(pres.b, p3.x));
         }
         case 10: {                                                             // Channel mixer (32-bit unclipped)
             let lo = select(0.0, -F32_MAX, hdr);

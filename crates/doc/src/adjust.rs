@@ -216,6 +216,30 @@ pub enum Adjustment {
         offset: f32,
         gamma: f32,
     },
+    /// Lightroom-style Basic controls: white balance, exposure, tone and presence on one layer.
+    /// Photoshop has no PSD block for it (it lives in native `.pcraft`).
+    BasicColor {
+        /// -100..=100: + warmer (red up, blue down), 0 neutral.
+        temperature: f32,
+        /// -100..=100: + magenta (green down), 0 neutral.
+        tint: f32,
+        /// -5..=5 EV, 0 neutral.
+        exposure: f32,
+        /// -100..=100, 0 neutral.
+        contrast: f32,
+        /// -100..=100, 0 neutral.
+        highlights: f32,
+        /// -100..=100, 0 neutral.
+        shadows: f32,
+        /// -100..=100, 0 neutral.
+        whites: f32,
+        /// -100..=100, 0 neutral.
+        blacks: f32,
+        /// -100..=100, 0 neutral.
+        vibrance: f32,
+        /// -100..=100, 0 neutral.
+        saturation: f32,
+    },
     Vibrance {
         vibrance: f32,
         saturation: f32,
@@ -295,6 +319,7 @@ impl Adjustment {
             Adjustment::Levels { .. } => "Levels",
             Adjustment::Curves { .. } => "Curves",
             Adjustment::Exposure { .. } => "Exposure",
+            Adjustment::BasicColor { .. } => "Basic Color",
             Adjustment::Vibrance { .. } => "Vibrance",
             Adjustment::HueSaturation { .. } => "Hue/Saturation",
             Adjustment::ColorBalance { .. } => "Color Balance",

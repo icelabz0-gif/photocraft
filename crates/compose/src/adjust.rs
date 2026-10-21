@@ -124,6 +124,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 })
             })
         }
+        Adjustment::BasicColor { .. } => apply_basic_color(adj, buf, transfer, depth, true),
         Adjustment::Levels { master, per_channel, space: ToneSpace::Rgb, .. } if depth == Some(SampleType::F32) => {
             // A 0..1 lookup table cannot represent signed, unbounded float samples.
             let master_identity = *master == LevelsChannel::default();
@@ -309,6 +310,13 @@ pub fn threshold_white(c: [f32; 3], level: f32, depth: Option<SampleType>) -> bo
 /// and CMYK documents the adjustments Photoshop evaluates on the document's own channels do so
 /// (see [`lab_channel_adjustment`] and [`cmyk_channel_adjustment`]).
 pub fn apply_in(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>, mode: ColorMode) {
+    // Basic Color must not tint grayscale-family documents: temperature, tint, vibrance and
+    // saturation are off there, and the CPU owns that rule (the GPU falls back for these modes).
+    if let Adjustment::BasicColor { .. } = adj {
+        let chroma = !matches!(mode, ColorMode::Grayscale | ColorMode::Duotone | ColorMode::Bitmap);
+        apply_basic_color(adj, buf, transfer, depth, chroma);
+        return;
+    }
     if mode == ColorMode::Lab && lab_channel_adjustment(adj) {
         apply_lab(adj, buf, depth);
     } else if mode == ColorMode::Cmyk && cmyk_channel_adjustment(adj) {
@@ -932,6 +940,117 @@ pub fn vibrance_px(c: [f32; 3], v: f32, s: f32, transfer: Transfer, hi: f32) -> 
         l = l.map(|x| (g + (1.0 + s) * (x - g)).clamp(0.0, hi));
     }
     l.map(|x| transfer.encode(x.clamp(0.0, hi)))
+}
+
+/// Rec. 709 luma: Basic Color's tone stages and the normalisation of its white-balance gains.
+fn luma709(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// The usual cubic Hermite `smoothstep(a, b, x)`, clamped to 0..=1.
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// One Basic Color tone slider at luma `l`: the change `amount * 0.5 * w` goes towards white
+/// when raised and towards black when lowered (`w` is the slider's range weight 0..=1).
+fn basic_tone(l: f32, amount: f32, w: f32) -> f32 {
+    let d = amount * 0.5 * w;
+    if d > 0.0 { l + d * (1.0 - l) } else { l + d * l }
+}
+
+/// Basic Color's sliders on one pixel: white balance and exposure in linear light, then the
+/// luma-preserving tone controls in encoded space, then [`vibrance_px`] for Presence.
+///
+/// `p.chroma` is false for grayscale-family documents (they must stay neutral) and turns off
+/// temperature, tint, vibrance and saturation. 32-bit samples stay linear and unclipped at the
+/// white-balance stage, as with Exposure, and the whole result is clamped only below 32 bits.
+fn basic_color_px(c: [f32; 3], p: &BasicColorPx, transfer: Transfer, hdr: bool, hi: f32) -> [f32; 3] {
+    let (t, n) = if p.chroma { (p.temperature / 100.0, p.tint / 100.0) } else { (0.0, 0.0) };
+    let mut gains = [1.0 + 0.35 * t, 1.0 - 0.25 * n, 1.0 - 0.35 * t];
+    let exposure = 2f32.powf(p.exposure);
+    let lg = luma709(gains);
+    gains = if lg.abs() > 1e-6 { gains.map(|g| g / lg * exposure) } else { [exposure; 3] };
+    let mut rgb = if hdr {
+        // 32-bit samples are linear as stored; negatives survive (as with Exposure).
+        std::array::from_fn(|i| c[i] * gains[i])
+    } else {
+        let tt = transfer.for_exposure();
+        std::array::from_fn(|i| tt.encode(tt.decode(c[i]) * gains[i]))
+    };
+    if !hdr {
+        rgb = rgb.map(|v| v.clamp(0.0, 1.0));
+    }
+    // Tone, encoded and luma-preserving, in the contract's order.
+    let l = luma709(rgb);
+    let mut ln = 0.5 + (l - 0.5) * (1.0 + p.contrast / 100.0);
+    ln = basic_tone(ln, p.highlights / 100.0, smoothstep(0.5, 1.0, ln));
+    ln = basic_tone(ln, p.shadows / 100.0, 1.0 - smoothstep(0.0, 0.5, ln));
+    ln = basic_tone(ln, p.whites / 100.0, smoothstep(0.6, 1.0, ln));
+    ln = basic_tone(ln, p.blacks / 100.0, 1.0 - smoothstep(0.0, 0.4, ln));
+    let mut rgb = if l > 1e-4 { rgb.map(|v| v * (ln / l)) } else { [ln; 3] };
+    if !hdr {
+        rgb = rgb.map(|v| v.clamp(0.0, 1.0));
+    }
+    let (v, s) = if p.chroma { (p.vibrance / 100.0, p.saturation / 100.0) } else { (0.0, 0.0) };
+    if v == 0.0 && s == 0.0 { rgb } else { vibrance_px(rgb, v, s, transfer, hi) }
+}
+
+/// Basic Color's parameters with the document's neutrality rule applied; see [`basic_color_px`].
+#[derive(Clone, Copy, Debug)]
+struct BasicColorPx {
+    temperature: f32,
+    tint: f32,
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    vibrance: f32,
+    saturation: f32,
+    chroma: bool,
+}
+
+impl BasicColorPx {
+    /// Whether every slider this document evaluates is neutral (0), so the buffer is untouched.
+    fn is_neutral(&self) -> bool {
+        self.exposure == 0.0
+            && self.contrast == 0.0
+            && self.highlights == 0.0
+            && self.shadows == 0.0
+            && self.whites == 0.0
+            && self.blacks == 0.0
+            && (!self.chroma || (self.temperature == 0.0 && self.tint == 0.0 && self.vibrance == 0.0 && self.saturation == 0.0))
+    }
+}
+
+/// [`apply_depth`]'s Basic Color arm and [`apply_in`]'s mode-aware one.
+fn apply_basic_color(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>, chroma: bool) {
+    let Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } = adj else {
+        return;
+    };
+    let p = BasicColorPx {
+        temperature: *temperature,
+        tint: *tint,
+        exposure: *exposure,
+        contrast: *contrast,
+        highlights: *highlights,
+        shadows: *shadows,
+        whites: *whites,
+        blacks: *blacks,
+        vibrance: *vibrance,
+        saturation: *saturation,
+        chroma,
+    };
+    // Stage 1: all-zero is an exact no-op (the buffer keeps every bit, negatives included).
+    if p.is_neutral() {
+        return;
+    }
+    let hdr = depth == Some(SampleType::F32);
+    let hi = if hdr { f32::INFINITY } else { 1.0 };
+    map_rgb(buf, |c| basic_color_px(c, &p, transfer, hdr, hi));
 }
 
 /// Weights of the grey Photoshop's Vibrance › Saturation desaturates to (R, G; blue has none).

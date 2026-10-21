@@ -104,6 +104,8 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
         (Adjustment::Unsupported { psd_key: "selc".into(), raw: vec![0, 1, 0, 0] }, true),
     ];
     // Compile-time guard: a new Adjustment kind must be added to the list above.
+    // Basic Color is deliberately absent: PSD has no block for it, so the dedicated test below
+    // checks the warning + drop policy instead of the generic three-block round trip.
     for (a, _) in &all {
         match a {
             Adjustment::BrightnessContrast { .. }
@@ -111,6 +113,7 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
             | Adjustment::Curves { .. }
             | Adjustment::Exposure { .. }
             | Adjustment::Vibrance { .. }
+            | Adjustment::BasicColor { .. }
             | Adjustment::HueSaturation { .. }
             | Adjustment::ColorBalance { .. }
             | Adjustment::BlackWhite { .. }
@@ -198,6 +201,48 @@ fn every_adjustment_kind_round_trips_8bit() {
 fn every_adjustment_kind_round_trips_16bit() {
     for (adj, lossless) in adjustments() {
         check_adjustment(&adj, lossless, SampleType::U16);
+    }
+}
+
+/// Basic Color has no PSD block: the layer is kept (as an empty pixel layer) with a warning,
+/// while native `.pcraft` keeps the adjustment exactly.
+#[test]
+fn basic_color_survives_pcraft_and_warns_when_dropped_from_psd() {
+    let adj = Adjustment::BasicColor {
+        temperature: 45.0,
+        tint: -25.0,
+        exposure: 0.6,
+        contrast: 30.0,
+        highlights: -40.0,
+        shadows: 35.0,
+        whites: 15.0,
+        blacks: -20.0,
+        vibrance: 40.0,
+        saturation: -15.0,
+    };
+    let mut d = Document::new("basic color", photocraft_geom::Size::new(16, 12), ColorMode::Rgb, SampleType::U8);
+    let fmt = d.pixel_format();
+    d.layers.push(raster("Background", fmt, d.bounds(), 1, false));
+    d.layers.push(Layer::new("Basic Color", LayerContent::Adjustment(adj.clone())));
+    let r = export(&d, "x.psd", &ExportOptions::default()).expect("export");
+    assert!(
+        r.warnings.iter().any(|w| w.contains("\"Basic Color\"") && w.contains("not yet written")),
+        "export must warn about the unwritten adjustment: {:?}",
+        r.warnings
+    );
+    let file = PsdFile::from_bytes(&r.bytes).expect("parse");
+    let blocks = file.layers().iter().filter(|l| l.blocks.iter().any(|b| ADJUSTMENT_KEYS.contains(&&b.key))).count();
+    assert_eq!(blocks, 0, "no adjustment block is written for Basic Color");
+    let back = import("x.psd", &r.bytes).expect("import").document;
+    assert_eq!(back.layers.len(), d.layers.len(), "the layer itself is kept");
+    assert!(!back.layers.iter().any(|l| matches!(l.content, LayerContent::Adjustment(_))), "PSD import must not invent a Basic Color adjustment");
+    // Native format round-trips the model exactly.
+    let bytes = photocraft_format::save_to_bytes(&d, &Default::default()).expect("save .pcraft");
+    let again = photocraft_format::load_from_bytes(&bytes).expect("load .pcraft");
+    assert_eq!(again.layers.len(), d.layers.len());
+    assert_eq!(again.layers[1].content, LayerContent::Adjustment(adj));
+    for (a, b) in d.layers.iter().zip(&again.layers) {
+        assert_eq!(a.content, b.content);
     }
 }
 

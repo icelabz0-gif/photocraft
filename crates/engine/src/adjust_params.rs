@@ -117,6 +117,26 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             };
             Adjustment::Vibrance { vibrance: r.num("vibrance", v, -100.0, 100.0)?, saturation: r.num("saturation", s, -100.0, 100.0)? }
         }
+        "basicColor" => {
+            let [temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation] = match base {
+                Some(Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation }) => {
+                    [*temperature, *tint, *exposure, *contrast, *highlights, *shadows, *whites, *blacks, *vibrance, *saturation]
+                }
+                _ => [0.0; 10],
+            };
+            Adjustment::BasicColor {
+                temperature: r.num("temperature", temperature, -100.0, 100.0)?,
+                tint: r.num("tint", tint, -100.0, 100.0)?,
+                exposure: r.num("exposure", exposure, -5.0, 5.0)?,
+                contrast: r.num("contrast", contrast, -100.0, 100.0)?,
+                highlights: r.num("highlights", highlights, -100.0, 100.0)?,
+                shadows: r.num("shadows", shadows, -100.0, 100.0)?,
+                whites: r.num("whites", whites, -100.0, 100.0)?,
+                blacks: r.num("blacks", blacks, -100.0, 100.0)?,
+                vibrance: r.num("vibrance", vibrance, -100.0, 100.0)?,
+                saturation: r.num("saturation", saturation, -100.0, 100.0)?,
+            }
+        }
         "hueSaturation" => hue_saturation(&r, base)?,
         "levels" => levels(&r, base, mode)?,
         "curves" => curves(&r, base, mode)?,
@@ -217,6 +237,18 @@ pub fn to_params(adj: &Adjustment) -> Value {
         Adjustment::Threshold { level } => json!({"level": (level * 255.0).round()}),
         Adjustment::Posterize { levels } => json!({"levels": levels}),
         Adjustment::Exposure { exposure, offset, gamma } => json!({"exposure": exposure, "offset": offset, "gamma": gamma}),
+        Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } => json!({
+            "temperature": temperature,
+            "tint": tint,
+            "exposure": exposure,
+            "contrast": contrast,
+            "highlights": highlights,
+            "shadows": shadows,
+            "whites": whites,
+            "blacks": blacks,
+            "vibrance": vibrance,
+            "saturation": saturation,
+        }),
         Adjustment::Vibrance { vibrance, saturation } => json!({"vibrance": vibrance, "saturation": saturation}),
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
             let mut v = json!({"hue": hue, "saturation": saturation, "lightness": lightness, "colorize": colorize});
@@ -1084,12 +1116,13 @@ pub fn user_keys(p: &Value) -> Map<String, Value> {
 mod tests {
     use super::*;
 
-    const KINDS: [&str; 15] = [
+    const KINDS: [&str; 16] = [
         "invert",
         "brightnessContrast",
         "threshold",
         "posterize",
         "exposure",
+        "basicColor",
         "vibrance",
         "hueSaturation",
         "levels",
@@ -1109,6 +1142,18 @@ mod tests {
             "threshold" => json!({"level": 100}),
             "posterize" => json!({"levels": 7}),
             "exposure" => json!({"exposure": 1.5, "offset": 0.1, "gamma": 1.4}),
+            "basicColor" => json!({
+                "temperature": 30,
+                "tint": -15,
+                "exposure": 0.75,
+                "contrast": 20,
+                "highlights": -25,
+                "shadows": 35,
+                "whites": 10,
+                "blacks": -12,
+                "vibrance": 40,
+                "saturation": -8
+            }),
             "vibrance" => json!({"vibrance": 30, "saturation": -20}),
             "hueSaturation" => {
                 json!({"hue": 25, "saturation": -20, "lightness": 10, "reds": {"hue": 10, "saturation": -30, "lightness": 5, "range": [300, 340, 20, 50]}})
@@ -1142,6 +1187,83 @@ mod tests {
                 let again = from_params(kind, &json!({}), Some(&a), mode).unwrap();
                 assert_eq!(again, a, "{kind} {mode:?}");
             }
+        }
+    }
+
+    #[test]
+    fn basic_color_defaults_clamp_and_merge() {
+        assert_eq!(
+            default_for("basicColor", ColorMode::Rgb).unwrap(),
+            Adjustment::BasicColor {
+                temperature: 0.0,
+                tint: 0.0,
+                exposure: 0.0,
+                contrast: 0.0,
+                highlights: 0.0,
+                shadows: 0.0,
+                whites: 0.0,
+                blacks: 0.0,
+                vibrance: 0.0,
+                saturation: 0.0
+            }
+        );
+        // Every number clamps to the contract's range.
+        let a = from_params(
+            "basicColor",
+            &json!({
+                "temperature": 1e9,
+                "tint": -1e9,
+                "exposure": 1e9,
+                "contrast": -1e9,
+                "highlights": 1e9,
+                "shadows": -1e9,
+                "whites": 1e9,
+                "blacks": -1e9,
+                "vibrance": 1e9,
+                "saturation": -1e9
+            }),
+            None,
+            ColorMode::Rgb,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            Adjustment::BasicColor {
+                temperature: 100.0,
+                tint: -100.0,
+                exposure: 5.0,
+                contrast: -100.0,
+                highlights: 100.0,
+                shadows: -100.0,
+                whites: 100.0,
+                blacks: -100.0,
+                vibrance: 100.0,
+                saturation: -100.0
+            }
+        );
+        // A partial update merges over the base and leaves the keys it doesn't name alone.
+        let base = from_params("basicColor", &json!({"temperature": 30, "exposure": 1.25, "shadows": 30}), None, ColorMode::Rgb).unwrap();
+        let merged = from_params("basicColor", &json!({"highlights": -40}), Some(&base), ColorMode::Rgb).unwrap();
+        assert!(matches!(merged, Adjustment::BasicColor { temperature: 30.0, exposure: 1.25, shadows: 30.0, highlights: -40.0, .. }));
+        // Wrong types are errors, not silently ignored.
+        for p in [
+            json!({"temperature": "warm"}),
+            json!({"tint": true}),
+            json!({"exposure": [1]}),
+            json!({"highlights": {}}),
+            json!({"shadows": "30"}),
+            json!({"whites": false}),
+            json!({"blacks": [1]}),
+            json!({"vibrance": "40"}),
+            json!({"saturation": {}}),
+            json!([1, 2]),
+        ] {
+            assert!(from_params("basicColor", &p, None, ColorMode::Rgb).is_err(), "{p}");
+        }
+        // to_params returns every key.
+        let back = to_params(&merged);
+        for key in ["temperature", "tint", "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation"] {
+            assert!(back.get(key).is_some(), "{key} missing from {back}");
         }
     }
 

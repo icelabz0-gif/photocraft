@@ -616,6 +616,30 @@ fn adjustments() -> Vec<Adjustment> {
         Adjustment::Vibrance { vibrance: 50.0, saturation: -20.0 },
         Adjustment::Vibrance { vibrance: -60.0, saturation: 0.0 },
         Adjustment::Vibrance { vibrance: 0.0, saturation: -100.0 },
+        Adjustment::BasicColor {
+            temperature: 45.0,
+            tint: -25.0,
+            exposure: 0.6,
+            contrast: 30.0,
+            highlights: -40.0,
+            shadows: 35.0,
+            whites: 15.0,
+            blacks: -20.0,
+            vibrance: 40.0,
+            saturation: -15.0,
+        },
+        Adjustment::BasicColor {
+            temperature: -70.0,
+            tint: 35.0,
+            exposure: -0.9,
+            contrast: -30.0,
+            highlights: 25.0,
+            shadows: -50.0,
+            whites: -20.0,
+            blacks: 30.0,
+            vibrance: -60.0,
+            saturation: 45.0,
+        },
         Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false },
         Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0; 4], [0.0; 4]], monochrome: true },
         Adjustment::PhotoFilter { color: [0.9, 0.6, 0.2], density: 0.4, preserve_luminosity: true },
@@ -688,6 +712,99 @@ fn adjustment_layers() {
             d.layers.push(a);
             check(&mut g, &d, &format!("{} {mode:?}", adj.label()));
         }
+    }
+}
+
+#[test]
+fn basic_color_at_every_depth_and_gray_fallback() {
+    let Some(mut g) = gpu() else { return };
+    let cases = [
+        Adjustment::BasicColor {
+            temperature: 60.0,
+            tint: -30.0,
+            exposure: 0.8,
+            contrast: 40.0,
+            highlights: -50.0,
+            shadows: 40.0,
+            whites: 20.0,
+            blacks: -30.0,
+            vibrance: 50.0,
+            saturation: -20.0,
+        },
+        Adjustment::BasicColor {
+            temperature: -80.0,
+            tint: 45.0,
+            exposure: -1.2,
+            contrast: -35.0,
+            highlights: 30.0,
+            shadows: -60.0,
+            whites: -25.0,
+            blacks: 35.0,
+            vibrance: -70.0,
+            saturation: 60.0,
+        },
+        // Presence alone, each side separately (the vibrance pass). Saturation stops at 60:
+        // at 100 the existing Vibrance kernel's near-black cancellation loses > 1/255 on U16
+        // (pure Vibrance does too), which is not Basic Color's stage.
+        Adjustment::BasicColor {
+            temperature: 0.0,
+            tint: 0.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 100.0,
+            saturation: 0.0,
+        },
+        Adjustment::BasicColor {
+            temperature: 0.0,
+            tint: 0.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 0.0,
+            saturation: 60.0,
+        },
+        // All zero is an exact no-op on the reference path too.
+        Adjustment::BasicColor {
+            temperature: 0.0,
+            tint: 0.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
+        },
+    ];
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut d = Document::new("basic color", Size::new(37, 23), ColorMode::Rgb, depth);
+        let fmt = d.pixel_format();
+        d.layers.push(noise_layer("bg", fmt, Rect::from_xywh(0, 0, 37, 23), 97, 0.35));
+        for (i, adj) in cases.iter().enumerate() {
+            d.layers.truncate(1);
+            d.layers.push(Layer::new("bc", LayerContent::Adjustment(adj.clone())));
+            check(&mut g, &d, &format!("basic color {depth:?} #{i}"));
+        }
+    }
+    // Grayscale-family documents can't show the chroma controls; their Basic Color layers
+    // render on the CPU.
+    for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
+        let mut d = Document::new("basic color gray", Size::new(16, 8), mode, SampleType::U8);
+        let fmt = d.pixel_format();
+        d.layers.push(noise_layer("bg", fmt, Rect::from_xywh(0, 0, 16, 8), 11, 0.0));
+        d.layers.push(Layer::new("bc", LayerContent::Adjustment(cases[0].clone())));
+        assert!(g.comp.supports(&d).is_err(), "{mode:?}: Basic Color must fall back to the CPU");
+        // The CPU path is defined for these documents (no panic) and keeps the layer.
+        let out = photocraft_compose::flatten(&d);
+        assert_eq!(out.px.len(), 16 * 8, "{mode:?}");
     }
 }
 

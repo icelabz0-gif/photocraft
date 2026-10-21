@@ -161,6 +161,65 @@ fn selective_color_layer_and_destructive() {
 }
 
 #[test]
+fn basic_color_params_merge_and_layer_mask() {
+    let mut s = session(8, "rgb");
+    s.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
+    let r = s
+        .execute(
+            "layer.newAdjustmentLayer.basicColor",
+            json!({
+                "temperature": 40,
+                "tint": -20,
+                "exposure": 0.5,
+                "contrast": 15,
+                "highlights": -30,
+                "shadows": 25,
+                "whites": 10,
+                "blacks": -5,
+                "vibrance": 30,
+                "saturation": -10
+            }),
+        )
+        .unwrap();
+    let id = photocraft_doc::LayerId(r["layer"].as_u64().unwrap());
+    assert!(matches!(
+        adjustment_of(&s, id),
+        Adjustment::BasicColor {
+            temperature: 40.0,
+            tint: -20.0,
+            exposure: 0.5,
+            contrast: 15.0,
+            highlights: -30.0,
+            shadows: 25.0,
+            whites: 10.0,
+            blacks: -5.0,
+            vibrance: 30.0,
+            saturation: -10.0
+        }
+    ));
+    // The selection becomes the layer mask.
+    assert_eq!(mask_at(&s, 12, 12), 1.0);
+    assert_eq!(mask_at(&s, 40, 4), 0.0);
+    // A properties edit merges one key at a time.
+    s.execute("layer.setAdjustment", json!({"layer": id.0, "highlights": 55, "exposure": -0.25})).unwrap();
+    assert!(matches!(adjustment_of(&s, id), Adjustment::BasicColor { temperature: 40.0, exposure: -0.25, highlights: 55.0, shadows: 25.0, .. }));
+    // Painting the mask reveals the layer where the brush went.
+    s.execute("select.deselect", json!({})).unwrap();
+    s.execute("layer.layerMask.hideAll", json!({})).unwrap();
+    assert_eq!(mask_at(&s, 4, 3), 0.0);
+    assert!(s.is_enabled_with("paint.stroke", &json!({"target": "mask"})));
+    s.execute("paint.stroke", json!({"points": [[3, 3], [6, 3]], "size": 4, "color": "#ffffff", "target": "mask"})).unwrap();
+    assert!(mask_at(&s, 4, 3) > 0.9);
+    assert_eq!(mask_at(&s, 30, 20), 0.0);
+    // Without a selection the new layer's mask is white everywhere.
+    let mut s = session(8, "rgb");
+    s.execute("layer.newAdjustmentLayer.basicColor", json!({})).unwrap();
+    assert_eq!(mask_at(&s, 1, 1), 1.0);
+    assert_eq!(mask_at(&s, 40, 30), 1.0);
+    assert!(matches!(adjustment_of(&s, doc(&s).layers[1].id), Adjustment::BasicColor { exposure: 0.0, .. }));
+}
+
+#[test]
 fn color_lookup_builtin_data_and_errors() {
     let mut s = session(8, "rgb");
     let r = s.execute("layer.newAdjustmentLayer.colorLookup", json!({"lut": "dayForNight"})).unwrap();

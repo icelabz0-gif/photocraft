@@ -592,6 +592,9 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
     let mut v = Vec::new();
     match adj {
         Adjustment::Invert => return vec![(*b"nvrt", Vec::new())],
+        // Photoshop has no Basic Color block (the Lightroom-style Basic panel); native `.pcraft`
+        // keeps it, and a PSD save warns and writes no block rather than inventing one.
+        Adjustment::BasicColor { .. } => return Vec::new(),
         Adjustment::Threshold { level } => {
             put16(&mut v, q255(*level).max(1));
             put16(&mut v, 0);
