@@ -158,3 +158,55 @@ fn file_commands_restore_it_on_open_and_leave_it_behind_on_revert_and_place() {
     assert!(st.doc.saved_history.is_none(), "placing doesn't bring another file's history along");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The `.pcraft` bytes the smart object layer `layer` of `s`'s active document embeds.
+fn embedded_bytes(s: &Session, layer: u64) -> Vec<u8> {
+    let doc = &s.active().unwrap().doc;
+    let layer = doc.layers.iter().find(|l| l.id.0 == layer).unwrap();
+    match &layer.content {
+        photocraft_doc::LayerContent::Smart(so) => match &so.source {
+            photocraft_doc::SmartSource::Embedded { bytes, .. } => bytes.to_vec(),
+            other => panic!("not embedded: {other:?}"),
+        },
+        _ => panic!("not a smart object"),
+    }
+}
+
+#[test]
+fn placing_a_pcraft_with_history_embeds_it_without_the_history() {
+    // The placed file travels inside the parent document: its earlier pixel states must not.
+    let dir = std::env::temp_dir().join(format!("photocraft-placed-history-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let with = saved_bytes(&edited(true));
+    assert!(has_history_section(&with));
+    let path = dir.join("placed.pcraft");
+    std::fs::write(&path, &with).unwrap();
+
+    let mut t = Session::new();
+    t.execute("file.new", json!({"width": 300, "height": 300})).unwrap();
+    let placed = t.execute("file.placeEmbedded", json!({"path": path.to_str().unwrap()})).unwrap();
+    let embedded = embedded_bytes(&t, placed["layer"].as_u64().unwrap());
+    assert!(photocraft_format::is_pcraft(&embedded), "still a .pcraft file");
+    assert!(!has_history_section(&embedded), "the saved history stays behind");
+
+    let (original, kept) = (photocraft_format::load_from_bytes(&with).unwrap(), photocraft_format::load_from_bytes(&embedded).unwrap());
+    assert!(kept.saved_history.is_none());
+    assert_eq!(kept.size, original.size);
+    assert_eq!(kept.layers, original.layers, "the placed contents are unchanged");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn placing_a_pcraft_without_history_embeds_its_bytes_as_they_are() {
+    let dir = std::env::temp_dir().join(format!("photocraft-placed-plain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let plain = saved_bytes(&edited(false));
+    let path = dir.join("plain.pcraft");
+    std::fs::write(&path, &plain).unwrap();
+
+    let mut t = Session::new();
+    t.execute("file.new", json!({"width": 300, "height": 300})).unwrap();
+    let placed = t.execute("file.placeEmbedded", json!({"path": path.to_str().unwrap()})).unwrap();
+    assert_eq!(embedded_bytes(&t, placed["layer"].as_u64().unwrap()), plain);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

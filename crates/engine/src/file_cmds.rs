@@ -735,8 +735,17 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
         )));
     }
     let mut src = imported.document;
-    // The placed contents are not opened for editing: a saved undo history (#6053) stays behind.
-    src.saved_history = None;
+    // The placed contents are not opened for editing: a saved undo history (#6053) stays behind,
+    // in the layer as in the embedded file, which would otherwise carry the earlier pixel states
+    // into every file this document is saved to. Other files are embedded as they are.
+    let bytes = if src.saved_history.take().is_some() && photocraft_format::is_pcraft(&bytes) {
+        // Written as a `.pcraft` save writes it, with its thumbnail and composite previews.
+        photocraft_io::export(&src, photocraft_format::EXTENSION, &photocraft_io::ExportOptions::default())
+            .map(|r| r.bytes)
+            .map_err(|e| EngineError::Other(format!("{name}: cannot embed the .pcraft file without its saved history: {e}")))?
+    } else {
+        bytes
+    };
     let (w, h) = (src.size.width as f64, src.size.height as f64);
     // The implicit `fit` is Preferences ▸ General ▸ Resize Image During Place (on by default).
     let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(s.prefs().general.resize_image_during_place);
