@@ -637,12 +637,17 @@ fn save_a_copy(s: &mut Session, p: &Value) -> Result<Value> {
             msg: "`path` is the document's own file, so the copy would replace it: choose another path, or pass \"overwrite\": true".into(),
         });
     }
-    let mut doc = (*d.doc).clone();
+    // The copy is written as a save writes the document: with Save History in Document on, a
+    // `.pcraft` copy keeps the undo history (#6053).
+    let i = s.active_index().ok_or(EngineError::NoDocument)?;
+    let mut doc = (*s.document_to_save(i).unwrap_or_else(|| d.doc.clone())).clone();
     if p.get("layers").and_then(Value::as_bool) == Some(false) {
-        // "Layers" unchecked in Save a Copy: write the flattened image.
+        // "Layers" unchecked in Save a Copy: write the flattened image, which the saved history
+        // does not lead to.
         let fmt = doc.pixel_format();
         let px = flattened(&doc, fmt);
         doc.layers = vec![Layer::new("Background", LayerContent::Raster(px))];
+        doc.saved_history = None;
     }
     let warnings = save_doc(&doc, &path, SaveOpts::from_params(s, p, "file.saveACopy")?)?;
     Ok(json!({"path": path, "warnings": warnings}))

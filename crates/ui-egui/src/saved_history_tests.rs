@@ -82,3 +82,33 @@ fn a_background_save_gets_the_history_too() {
     }
     assert_eq!(*seen.lock().unwrap(), Some(Some(2)), "New Layer and Fill go to the worker");
 }
+
+#[test]
+fn save_a_copy_as_pcraft_follows_the_preference() {
+    for on in [true, false] {
+        let (mut app, bytes) = app(on);
+        let (dialog, _) = crate::file_dialog::fake(vec![Some(crate::file_dialog::FileDialogAnswer::SaveTo("copy.pcraft".into()))]);
+        app.services.file_dialog = Some(dialog);
+        menus::invoke(&mut app, &egui::Context::default(), "file.saveACopy", json!({})).unwrap();
+        app.poll_file_dialog(&egui::Context::default(), None);
+        let saved = bytes.borrow().clone();
+        assert!(!saved.is_empty(), "the copy was written");
+        assert!(app.session.active().unwrap().doc.saved_history.is_none(), "the document itself carries no history");
+        app.run("file.closeAll", json!({})).unwrap();
+        app.open_bytes("copy.pcraft", &saved).unwrap();
+        assert_eq!(app.session.active().unwrap().history.can_undo(), on, "Save History in Document {on}");
+    }
+}
+
+#[test]
+fn a_replayed_save_a_copy_follows_the_preference() {
+    // A Save a Copy step played from an action (#4373) writes the same copy as the dialog.
+    for on in [true, false] {
+        let (mut app, bytes) = app(on);
+        app.replay_save("file.saveACopy", &json!({"path": "copy.pcraft"})).unwrap();
+        let saved = bytes.borrow().clone();
+        app.run("file.closeAll", json!({})).unwrap();
+        app.open_bytes("copy.pcraft", &saved).unwrap();
+        assert_eq!(app.session.active().unwrap().history.can_undo(), on, "Save History in Document {on}");
+    }
+}

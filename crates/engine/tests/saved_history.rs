@@ -210,3 +210,26 @@ fn placing_a_pcraft_without_history_embeds_its_bytes_as_they_are() {
     assert_eq!(embedded_bytes(&t, placed["layer"].as_u64().unwrap()), plain);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn save_a_copy_as_pcraft_follows_the_preference() {
+    let dir = std::env::temp_dir().join(format!("photocraft-copy-history-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for on in [true, false] {
+        let mut s = edited(on);
+        let path = dir.join(format!("copy-{on}.pcraft"));
+        s.execute("file.saveACopy", json!({"path": path.to_str().unwrap()})).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(has_history_section(&bytes), on, "Save History in Document {on}");
+        let mut t = Session::new();
+        reopen(&mut t, &bytes);
+        assert_eq!(t.active().unwrap().history.can_undo(), on);
+        assert!(s.active().unwrap().doc.saved_history.is_none(), "the open document itself carries no history");
+    }
+    // A flattened copy is not the document the history leads to.
+    let mut s = edited(true);
+    let path = dir.join("flat.pcraft");
+    s.execute("file.saveACopy", json!({"path": path.to_str().unwrap(), "layers": false})).unwrap();
+    assert!(!has_history_section(&std::fs::read(&path).unwrap()));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
