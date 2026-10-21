@@ -162,8 +162,15 @@ fn psd_save_keeps_the_look_as_a_color_lookup() {
 #[test]
 fn bad_hue_curves_params_are_errors_not_panics() {
     let mut s = session(8);
+    let before = pixels(&s);
+    let layers = s.active().unwrap().doc.layers.len();
+    let steps = s.active().unwrap().history.past_len();
     for p in [json!({"hue": "red"}), json!({"saturation": [[0]]}), json!({"luminance": [[0, null, 3]]}), json!([1, 2])] {
         assert!(s.execute("layer.newAdjustmentLayer.hueCurves", p.clone()).is_err(), "{p}");
         assert!(s.execute("image.adjustments.hueCurves", p.clone()).is_err(), "{p}");
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layers.len(), layers, "{p}: no layer added");
+        assert_eq!(d.history.past_len(), steps, "{p}: no history step");
+        assert_eq!(pixels(&s), before, "{p}: pixels untouched");
     }
 }
