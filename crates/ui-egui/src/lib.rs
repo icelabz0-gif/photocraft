@@ -25,6 +25,7 @@ pub mod anchor_tools;
 pub mod artboard_tool;
 pub mod artboard_ui;
 pub(crate) mod background_redraw;
+pub mod basic_color_panel;
 pub mod bidi_text;
 mod blend_keys;
 pub(crate) mod blend_preview;
@@ -2082,6 +2083,7 @@ impl eframe::App for PhotocraftApp {
         panels::properties_window(self, &ctx);
         brush_panel::window(self, &ctx);
         retouch_ai_panel::window(self, &ctx);
+        basic_color_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);
         type_panels_ui::windows(self, &ctx);

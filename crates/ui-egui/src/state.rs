@@ -395,6 +395,9 @@ pub struct Panels {
     /// Window › Retouch AI: a floating window, like Brush Settings.
     #[serde(default)]
     pub retouch_ai: bool,
+    /// Window › Basic Color: a floating window around a Basic Color adjustment layer.
+    #[serde(default)]
+    pub basic_color: bool,
     /// Window › Character / Paragraph: the Character | Paragraph dock group (#150).
     #[serde(default)]
     pub character: bool,
@@ -435,6 +438,7 @@ impl Default for Panels {
             brush_settings: false,
             brushes: false,
             retouch_ai: false,
+            basic_color: false,
             character: false,
             toolbar_double: false,
             dock: true,
@@ -1305,6 +1309,9 @@ pub struct UiState {
     /// Retouch AI: tool selections/amounts, presets, batch folders and the last result layers.
     #[serde(default)]
     pub retouch_ai: crate::retouch_ai_panel::RetouchAiState,
+    /// Basic Color: the floating panel's last command error.
+    #[serde(default)]
+    pub basic_color: crate::basic_color_panel::BasicColorState,
     /// Marquee options-bar mode: 0 new, 1 add, 2 subtract, 3 intersect (modifier keys override).
     #[serde(default)]
     pub selection_mode: u8,
@@ -1432,6 +1439,7 @@ impl Default for UiState {
             brush_tab: 0,
             brushes_panel: Default::default(),
             retouch_ai: Default::default(),
+            basic_color: Default::default(),
             selection_mode: 0,
             tool_options: ToolOptions::default(),
             polygon: Vec::new(),

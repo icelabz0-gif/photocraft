@@ -41,6 +41,7 @@ pub(crate) fn panel_alias(id: &str) -> Option<&'static str> {
         "brushSettings" => "window.toggle.brushSettings",
         "brushes" => "window.toggle.brushes",
         "retouchAI" => "window.toggle.retouchAI",
+        "basicColor" => "window.toggle.basicColor",
         _ => return None,
     })
 }
@@ -634,6 +635,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
                 "brushSettings" => &mut p.brush_settings,
                 "brushes" => &mut p.brushes,
                 "retouchAI" => &mut p.retouch_ai,
+                "basicColor" => &mut p.basic_color,
                 "dock" => &mut p.dock,
                 _ => return Err(format!("unknown panel in {t}")),
             };
@@ -845,6 +847,7 @@ fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
         "window.toggle.brushSettings" => p.brush_settings,
         "window.toggle.brushes" => p.brushes,
         "window.toggle.retouchAI" => p.retouch_ai,
+        "window.toggle.basicColor" => p.basic_color,
         _ => return None,
     })
 }

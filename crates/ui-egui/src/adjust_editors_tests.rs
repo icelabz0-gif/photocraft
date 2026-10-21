@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::PhotocraftApp;
 
-const ALL_KINDS: [&str; 16] = [
+const ALL_KINDS: [&str; 17] = [
     "brightnessContrast",
     "levels",
     "curves",
@@ -22,6 +22,7 @@ const ALL_KINDS: [&str; 16] = [
     "blackWhite",
     "photoFilter",
     "channelMixer",
+    "basicColor",
     "invert",
     "posterize",
     "threshold",
@@ -116,6 +117,7 @@ fn every_adjustment_layer_edits_through_properties() {
                 "blackWhite" => Some("Reds"),
                 "photoFilter" => Some("Density"),
                 "channelMixer" => Some("Constant"),
+                "basicColor" => Some("Temperature"),
                 "posterize" => Some("Levels"),
                 "threshold" => Some("Threshold Level"),
                 "selectiveColor" => Some("Cyan"),

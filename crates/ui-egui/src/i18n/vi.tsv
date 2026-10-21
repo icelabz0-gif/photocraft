@@ -3806,3 +3806,22 @@ curves	Smooth	Làm mượt
 	Removes dust and lint from dark backgrounds and clothing.	Xóa bụi và lông vải trên nền tối và trang phục.
 	Removes marks and creases from the backdrop.	Xóa vết bẩn và nếp gấp trên phông nền.
 	Matches the color tone to a reference image.	Khớp tông màu với ảnh tham chiếu.
+# Basic Color panel (Window › Basic Color), its window.toggle.basicColor command, the
+# Layer › New Adjustment Layer entry and the Basic Color editor's section labels
+	Basic Color	Chỉnh màu
+	Basic Color…	Chỉnh màu…
+	White Balance	Cân bằng trắng
+	Tone	Tông
+	Presence	Hiện diện
+	The active layer isn't a Basic Color layer. Create one above it, then paint the region to adjust.	Lớp đang chọn không phải lớp Chỉnh màu. Hãy tạo một lớp phía trên, rồi tô vùng cần chỉnh.
+	Create Basic Color layer	Tạo lớp Chỉnh màu
+	No pixel mask yet. Apply to whole image adds one; then paint to narrow it.	Chưa có mặt nạ pixel. Áp dụng cho toàn ảnh sẽ thêm một mặt nạ, sau đó tô để thu hẹp vùng.
+	Paint a new region	Tô vùng mới
+	Add to region	Thêm vào vùng
+	Apply to whole image	Áp dụng cho toàn ảnh
+	Show mask	Hiện mặt nạ
+	Hide mask	Ẩn mặt nạ
+	Paint white to reveal, black to hide. Sliders affect only the painted region.	Tô màu trắng để hiện, màu đen để ẩn. Thanh trượt chỉ ảnh hưởng vùng đã tô.
+	Create Basic Color layer failed: {error}	Tạo lớp Chỉnh màu thất bại: {error}
+	Reset failed: {error}	Đặt lại thất bại: {error}
+	Mask change failed: {error}	Đổi mặt nạ thất bại: {error}

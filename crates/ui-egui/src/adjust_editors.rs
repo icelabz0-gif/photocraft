@@ -24,7 +24,7 @@ use crate::tone::{self, HistSource, Histograms};
 use crate::widgets;
 
 /// Kinds edited here (Selective Color and Color Lookup have their own editors; Invert has none).
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "brightnessContrast",
     "levels",
     "curves",
@@ -35,6 +35,7 @@ pub const KINDS: [&str; 13] = [
     "blackWhite",
     "photoFilter",
     "channelMixer",
+    "basicColor",
     "posterize",
     "threshold",
     "gradientMap",
@@ -126,6 +127,7 @@ pub fn editor(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Ed
             ],
         ),
         "vibrance" => sliders(ui, v, &[("vibrance", "Vibrance", -100.0, 100.0, 0.0, "%", None), ("saturation", "Saturation", -100.0, 100.0, 0.0, "%", None)]),
+        "basicColor" => basic_color(ui, v),
         "hueSaturation" => hue_saturation(ui, v, cx),
         "colorBalance" => color_balance(ui, v, cx),
         "blackWhite" => black_white(ui, v, cx),
@@ -252,6 +254,50 @@ fn brightness_contrast(ui: &mut egui::Ui, v: &mut Value) -> Edit {
         }
         e.add(Edit::discrete(true));
     }
+    e
+}
+
+// ---------------------------------------------------------------------------------------------
+// Basic Color
+
+/// A section heading in the Basic Color editor (White Balance / Tone / Presence).
+fn basic_color_section(ui: &mut egui::Ui, text: &str) {
+    let t = Tokens::get(ui.ctx());
+    ui.add_space(2.0);
+    widgets::hairline(ui);
+    ui.label(RichText::new(tl!(text)).font(crate::theme::semibold(11.5)).color(t.text_dim));
+}
+
+/// Exposure's ±5 EV slider: a 1/20-stop step, shown with two decimals.
+fn basic_color_exposure(ui: &mut egui::Ui, v: &mut Value) -> Edit {
+    let mut x = num(v, "exposure", 0.0).clamp(-5.0, 5.0);
+    let gestures = widgets::RowGestures { reset: Some(0.0), wheel_step: None, ..Default::default() };
+    let r = widgets::slider_row_prec(ui, tl!("Exposure"), &mut x, -5.0..=5.0, "", None, gestures, Some(2));
+    if r.changed() {
+        v["exposure"] = json!(round(x, 0.05));
+    }
+    Edit::of(&r)
+}
+
+fn basic_color(ui: &mut egui::Ui, v: &mut Value) -> Edit {
+    let mut e = Edit::default();
+    basic_color_section(ui, tl!(crate::basic_color_panel::text::WHITE_BALANCE));
+    e.add(sliders(ui, v, &[("temperature", tl!("Temperature"), -100.0, 100.0, 0.0, "", None), ("tint", tl!("Tint"), -100.0, 100.0, 0.0, "", None)]));
+    basic_color_section(ui, tl!(crate::basic_color_panel::text::TONE));
+    e.add(basic_color_exposure(ui, v));
+    e.add(sliders(
+        ui,
+        v,
+        &[
+            ("contrast", tl!("Contrast"), -100.0, 100.0, 0.0, "", None),
+            ("highlights", tl!("Highlights"), -100.0, 100.0, 0.0, "", None),
+            ("shadows", tl!("Shadows"), -100.0, 100.0, 0.0, "", None),
+            ("whites", tl!("Whites"), -100.0, 100.0, 0.0, "", None),
+            ("blacks", tl!("Blacks"), -100.0, 100.0, 0.0, "", None),
+        ],
+    ));
+    basic_color_section(ui, tl!(crate::basic_color_panel::text::PRESENCE));
+    e.add(sliders(ui, v, &[("vibrance", tl!("Vibrance"), -100.0, 100.0, 0.0, "%", None), ("saturation", tl!("Saturation"), -100.0, 100.0, 0.0, "%", None)]));
     e
 }
 

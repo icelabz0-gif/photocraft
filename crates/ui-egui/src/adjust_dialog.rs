@@ -215,9 +215,10 @@ fn picker_controls(ui: &mut egui::Ui, fields: &mut Map<String, Value>, mode: pho
     }
 }
 
-/// Whether `command` opens an adjustment dialog (when run without params).
+/// Whether `command` opens an adjustment dialog (when run without params). Basic Color has no
+/// Image › Adjustments dialog: it is edited in the Properties panel and its floating panel only.
 pub fn has_dialog(command: &str) -> bool {
-    command.strip_prefix(PREFIX).is_some_and(adjust_editors::has_editor)
+    command.strip_prefix(PREFIX).is_some_and(|kind| adjust_editors::has_editor(kind) && kind != "basicColor")
 }
 
 pub fn owns(fields: &Map<String, Value>) -> bool {
@@ -263,7 +264,7 @@ pub fn reset(app: &PhotocraftApp, ctx: &egui::Context, fields: &mut Map<String, 
 
 /// Opens the dialog for `command` with the kind's neutral settings.
 pub fn open(app: &mut PhotocraftApp, command: &str) -> Option<u64> {
-    let kind = command.strip_prefix(PREFIX).filter(|k| adjust_editors::has_editor(k))?;
+    let kind = command.strip_prefix(PREFIX).filter(|k| adjust_editors::has_editor(k) && *k != "basicColor")?;
     let spec = photocraft_engine::commands::find(command)?;
     let mode = curve_mode(app, kind);
     let defaults = photocraft_engine::adjust_params::default_for(kind, mode).ok()?;
@@ -401,7 +402,8 @@ mod tests {
     #[test]
     fn every_adjustment_with_an_editor_has_a_dialog() {
         for kind in adjust_editors::KINDS {
-            assert!(has_dialog(&format!("image.adjustments.{kind}")), "{kind}");
+            // Basic Color is edited in the Properties panel and its floating panel; no dialog.
+            assert_eq!(has_dialog(&format!("image.adjustments.{kind}")), kind != "basicColor", "{kind}");
         }
         for id in ["image.adjustments.invert", "image.adjustments.selectiveColor", "image.adjustments.desaturate", "filter.blur.gaussianBlur"] {
             assert!(!has_dialog(id), "{id}");
@@ -413,6 +415,10 @@ mod tests {
     #[test]
     fn dialogs_preview_cancel_and_commit() {
         for kind in adjust_editors::KINDS {
+            if kind == "basicColor" {
+                // Properties-panel and floating-panel kind: no modal dialog to preview.
+                continue;
+            }
             let cmd = format!("image.adjustments.{kind}");
             let mut harness =
                 Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());

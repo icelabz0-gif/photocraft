@@ -177,10 +177,10 @@ pub(crate) fn command(app: &mut PhotocraftApp, id: &str, params: &Value) -> Opti
         );
     }
     if let Some(panel) = id.strip_prefix("window.panel.").or_else(|| id.strip_prefix("window.toggle.")).and_then(normalize) {
-        // Retouch AI is a floating window, not a dockable panel. Let it fall through to the
-        // `window.toggle.retouchAI` shell command (and the `window.panel.*` alias) instead of
-        // asking the dock layout to activate a panel it does not contain.
-        if panel == "retouchAI" {
+        // Retouch AI and Basic Color are floating windows, not dockable panels. Let them fall
+        // through to the `window.toggle.*` shell commands (and the `window.panel.*` alias)
+        // instead of asking the dock layout to activate a panel it does not contain.
+        if panel == "retouchAI" || panel == "basicColor" {
             return None;
         }
         if app.ui.docking.is_none() && panel != "brushes" {
