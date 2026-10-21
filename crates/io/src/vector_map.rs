@@ -237,6 +237,8 @@ fn unit_px(v: Option<&Value>, dpi: f32) -> Option<f64> {
 /// offset is tagged `#Pnt` and the dash set carries no tag at all, its values being points by
 /// convention. The two agree only at 72 dpi, where a point is a pixel.
 fn points_px(v: Option<&Value>, dpi: f32) -> Option<f64> {
+    // A document without a resolution is measured in points, where a point is a pixel.
+    let dpi = if dpi > 0.0 { dpi } else { 72.0 };
     let k = f64::from(dpi) / 72.0;
     match v? {
         Value::UnitFloat { unit: [b'#', b'P', b'n', b't'], value } => Some(value * k),
@@ -271,10 +273,13 @@ pub fn parse_vstk(data: &[u8], dpi: f32) -> Option<VstkInfo> {
     };
     // The stroke width is in pixels, the dash lengths in points (see `points_px`). The model
     // keeps the dash lengths as multiples of the stroke width, as the SVG and Affinity readers
-    // do, so a Photoshop dash of 6 pt on a 5 px stroke is 1.2 widths, not 6.
+    // do: at 72 dpi, where a point is a pixel, a Photoshop dash of 6 pt on a 5 px stroke is 1.2
+    // widths, not 6.
     let width = unit_px(d.get("strokeStyleLineWidth"), dpi).unwrap_or(1.0);
-    let width = if width > 0.0 { width } else { 1.0 };
-    let multiples = |px: f64| (px / width) as f32;
+    // A stroke of no width has no dash length to speak of: the divisor keeps the conversion
+    // finite, and the width itself is kept as the file has it.
+    let divisor = if width > 0.0 { width } else { 1.0 };
+    let multiples = |px: f64| (px / divisor) as f32;
     let dashes = match d.get("strokeStyleLineDashSet") {
         Some(Value::List(l)) => l.iter().filter_map(|v| points_px(Some(v), dpi)).map(multiples).collect(),
         _ => Vec::new(),
@@ -715,6 +720,7 @@ mod tests {
     fn psd_dash_lengths_are_points_measured_against_the_stroke_width() {
         // A Photoshop dash of 6 pt on a 5 px stroke is 1.2 widths, not 6: the model keeps the
         // dash lengths as multiples of the stroke width, as the SVG and Affinity readers do.
+        // (72 dpi, where a point is a pixel.)
         let s = parse_vstk(&photoshop_vstk(5.0, &[6.0, 3.0], 2.0), 72.0).unwrap().stroke.unwrap();
         assert_eq!(s.width, 5.0);
         assert!((s.dashes[0] - 1.2).abs() < 1e-6 && (s.dashes[1] - 0.6).abs() < 1e-6, "{:?}", s.dashes);
@@ -722,6 +728,17 @@ mod tests {
         // A point is 300/72 pixels at 300 dpi.
         let s = parse_vstk(&photoshop_vstk(5.0, &[6.0], 0.0), 300.0).unwrap().stroke.unwrap();
         assert!((s.dashes[0] - 25.0 / 5.0).abs() < 1e-6, "{:?}", s.dashes);
+        // A document without a resolution is measured in points, where a point is a pixel.
+        let s = parse_vstk(&photoshop_vstk(5.0, &[6.0], 0.0), 0.0).unwrap().stroke.unwrap();
+        assert!((s.dashes[0] - 1.2).abs() < 1e-6, "{:?}", s.dashes);
+    }
+
+    #[test]
+    fn a_stroke_of_no_width_keeps_its_width() {
+        // A zero-width stroke is not rendered, but the file's width is kept as it is.
+        let s = parse_vstk(&photoshop_vstk(0.0, &[6.0], 0.0), 72.0).unwrap().stroke.unwrap();
+        assert_eq!(s.width, 0.0);
+        assert!((s.dashes[0] - 6.0).abs() < 1e-6, "{:?}", s.dashes);
     }
 
     #[test]

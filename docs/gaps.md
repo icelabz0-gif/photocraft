@@ -60,7 +60,8 @@ what an agent can't finish alone.
 - **Fixed (2026-10-21):** a shape layer's dash pattern now round trips through PSD in the
   right units: PSD keeps the stroke width in pixels and the dash lengths in points, while the
   model keeps the dash lengths as multiples of the width (as the SVG and Affinity readers do).
-  A Photoshop dash of 6 pt on a 5 px stroke renders as 1.2 widths, not 6.
+  At 72 dpi, where a point is a pixel, a Photoshop dash of 6 pt on a 5 px stroke renders as 1.2
+  widths, not 6.
 - **Estimate:** 150–250 h. **Human:** opening exports in Photoshop on the owner's Mac (or a
   scripted check there) is the only real oracle.
 

@@ -71,8 +71,9 @@ files retain their serde defaults; saves preserve all style fields. PSD import/e
 the same fields through `vstk` (line width, dash set/offset, cap, join, alignment, miter limit,
 opacity, and paint), converting the dash lengths: PSD keeps the stroke width in pixels and the
 dash lengths in points (the dash offset tagged `#Pnt`, the dash set untagged), while the model
-keeps them as multiples of the width, as the SVG and Affinity readers do. A Photoshop dash of
-6 pt on a 5 px stroke is therefore 1.2 widths, not 6. Existing unknown layer blocks and
+keeps them as multiples of the width, as the SVG and Affinity readers do. At 72 dpi, where a
+point is a pixel, a Photoshop dash of 6 pt on a 5 px stroke is therefore 1.2 widths, not 6.
+Existing unknown layer blocks and
 original compatible vector records remain handled by the existing I/O path. Stroke overprint,
 non-Normal PSD vector-stroke blend modes, corner-fitting dash optimization, and Photoshop's
 saved stroke preset libraries are not implemented. No Photoshop-authored oracle establishes
