@@ -42,6 +42,8 @@ mod text {
     pub const OPEN_IMAGE_TO_START: &str = "Open an image to start";
     pub const ANALYZE: &str = "Analyze";
     pub const RUN_SELECTED: &str = "Run Selected";
+    pub const SELECTION_ONLY: &str = "Selection only";
+    pub const SELECTION_ONLY_HINT: &str = "Paint a selection first (Lasso or Selection Brush); the tools run only inside it.";
 
     // Presets.
     pub const PRESET: &str = "Preset";
@@ -141,6 +143,8 @@ mod text {
         OPEN_IMAGE_TO_START,
         ANALYZE,
         RUN_SELECTED,
+        SELECTION_ONLY,
+        SELECTION_ONLY_HINT,
         PRESET,
         CUSTOM,
         SAVE,
@@ -415,6 +419,8 @@ pub struct RetouchAiState {
     pub presets: Vec<RetouchPreset>,
     /// The selected preset: `custom`, `builtin:<key>` or `user:<name>`.
     pub last_preset: String,
+    /// Run every tool only inside the selection the user painted.
+    pub selection_only: bool,
     /// The Save field's text.
     pub preset_name: String,
     pub batch_input: String,
@@ -445,6 +451,7 @@ impl Default for RetouchAiState {
             tools: default_tools(),
             presets: Vec::new(),
             last_preset: CUSTOM.into(),
+            selection_only: false,
             preset_name: String::new(),
             batch_input: String::new(),
             batch_output: String::new(),
@@ -660,11 +667,7 @@ fn analysis_text(value: &Value) -> String {
     let faces = value.get("faces").and_then(Value::as_u64).unwrap_or(0);
     let eyes = value.get("eyes").and_then(Value::as_u64).unwrap_or(0);
     let yes_no = |key: &str| {
-        if value.get(key).and_then(Value::as_bool).unwrap_or(false) {
-            tl!(text::YES)
-        } else {
-            tl!(text::NO)
-        }
+        if value.get(key).and_then(Value::as_bool).unwrap_or(false) { tl!(text::YES) } else { tl!(text::NO) }
     };
     crate::i18n::fmt(
         tl!(text::ANALYSIS_COUNTS),
@@ -700,9 +703,12 @@ fn store_results(state: &mut RetouchAiState, value: &Value, document: Option<usi
             let Some(layer) = item.get("layer").and_then(Value::as_u64) else { continue };
             let tool = item.get("tool").and_then(Value::as_str).unwrap_or("").to_string();
             let label = tool_label(&tool);
-            let name = item.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| {
-                crate::i18n::fmt(tl!(text::RETOUCH_LAYER_NAME), &[("tool", label)])
-            });
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::i18n::fmt(tl!(text::RETOUCH_LAYER_NAME), &[("tool", label)]));
             let opacity = item.get("opacity").and_then(Value::as_f64).map(|o| (o * 100.0) as f32).unwrap_or(100.0);
             layers.push(RetouchResultLayer { tool, name, layer, opacity: clamp_amount(opacity), visible: true });
         }
@@ -714,8 +720,7 @@ fn store_results(state: &mut RetouchAiState, value: &Value, document: Option<usi
 /// Keep the Results list tied to its document: clear it on a switch, prune layers deleted since.
 fn sync_results_to_document(app: &mut PhotocraftApp) {
     let active = app.session.active_index();
-    let live: Option<Vec<u64>> =
-        active.and_then(|i| app.session.documents().get(i)).map(|state| state.doc.layers.iter().map(|layer| layer.id.0).collect());
+    let live: Option<Vec<u64>> = active.and_then(|i| app.session.documents().get(i)).map(|state| state.doc.layers.iter().map(|layer| layer.id.0).collect());
     let panel = &mut app.ui.retouch_ai;
     if panel.result_document != active {
         panel.result_layers.clear();
@@ -742,15 +747,15 @@ fn run_combo(app: &mut PhotocraftApp) {
         set_status(&mut app.ui.retouch_ai, tl!(text::OPEN_IMAGE_TO_START).into(), true);
         return;
     };
-    let (tools, reference) = {
+    let (tools, reference, selection_only) = {
         let state = &app.ui.retouch_ai;
-        (state.selected_tools(), state.reference_path.trim().to_string())
+        (state.selected_tools(), state.reference_path.trim().to_string(), state.selection_only)
     };
     if tools.is_empty() {
         set_status(&mut app.ui.retouch_ai, tl!(text::SELECT_A_TOOL).into(), true);
         return;
     }
-    let mut params = json!({"tools": tools, "sampleAllLayers": true});
+    let mut params = json!({"tools": tools, "sampleAllLayers": true, "selectionOnly": selection_only});
     if !reference.is_empty() {
         params["referencePath"] = json!(reference);
     }
@@ -936,20 +941,16 @@ fn presets(ui: &mut egui::Ui, state: &mut RetouchAiState) {
             choices.push((format!("user:{}", preset.name), preset.name.clone()));
         }
         let mut chosen: Option<String> = None;
-        egui::ComboBox::from_id_salt("retouch-ai-preset")
-            .selected_text(state.preset_label())
-            .width(180.0)
-            .icon(widgets::chevron_icon)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(state.last_preset == CUSTOM, tl!(text::CUSTOM)).clicked() {
-                    chosen = Some(CUSTOM.into());
+        egui::ComboBox::from_id_salt("retouch-ai-preset").selected_text(state.preset_label()).width(180.0).icon(widgets::chevron_icon).show_ui(ui, |ui| {
+            if ui.selectable_label(state.last_preset == CUSTOM, tl!(text::CUSTOM)).clicked() {
+                chosen = Some(CUSTOM.into());
+            }
+            for (key, label) in &choices {
+                if ui.selectable_label(state.last_preset == *key, label).clicked() {
+                    chosen = Some(key.clone());
                 }
-                for (key, label) in &choices {
-                    if ui.selectable_label(state.last_preset == *key, label).clicked() {
-                        chosen = Some(key.clone());
-                    }
-                }
-            });
+            }
+        });
         if let Some(key) = chosen {
             if let Some(builtin) = key.strip_prefix("builtin:") {
                 state.apply_builtin(builtin);
@@ -1147,7 +1148,13 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             if !has_document {
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
                 ui.painter().rect_filled(rect, t.radius_sm, t.field);
-                ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, tl!(text::OPEN_IMAGE_TO_START), theme::medium(11.5), t.warning);
+                ui.painter().text(
+                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    tl!(text::OPEN_IMAGE_TO_START),
+                    theme::medium(11.5),
+                    t.warning,
+                );
                 // Painted text has no accessibility node of its own; name the banner for tests,
                 // screen readers and the control channel.
                 let hint = ui.interact(rect, ui.id().with("retouch-ai-no-document"), Sense::hover());
@@ -1178,6 +1185,11 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         actions.push(Action::Run);
                     }
                 });
+                let only = ui.add_enabled(has_document, egui::Checkbox::new(&mut state.selection_only, tl!(text::SELECTION_ONLY)));
+                only.on_hover_text(tl!(text::SELECTION_ONLY_HINT));
+                if state.selection_only {
+                    ui.add(egui::Label::new(egui::RichText::new(tl!(text::SELECTION_ONLY_HINT)).size(10.5).color(Tokens::get(ui.ctx()).text_faint)).wrap());
+                }
                 if !state.status.is_empty() {
                     let color = if state.status_error { t.danger } else { t.text_dim };
                     ui.add(egui::Label::new(egui::RichText::new(&state.status).size(11.0).color(color)).wrap());
@@ -1211,6 +1223,7 @@ mod tests {
     #[test]
     fn default_state_selects_the_expected_tools_and_round_trips_through_serde() {
         let state = RetouchAiState::default();
+        assert!(!state.selection_only, "selection-only starts off");
         assert_eq!(state.tools.len(), TOOLS.len());
         for id in ["heal", "dodgeBurn", "skinTone", "eyeBrilliance", "teeth"] {
             let tool = state.tool(id).unwrap_or_else(|| panic!("{id} missing"));
@@ -1342,9 +1355,8 @@ mod tests {
         let missing: Vec<_> = keys.iter().copied().filter(|key| !crate::i18n::has(vi, key)).collect();
         assert!(missing.is_empty(), "vi: missing Retouch AI panel strings: {missing:#?}");
         // The data keys reach `tl!` correctly (not only the catalog): every label kind resolves.
-        let (tool, group, preset, format) = crate::i18n::with_language(vi, || {
-            (tool_label("heal"), group_title(0), builtin_label("idPhoto"), format_label("same"))
-        });
+        let (tool, group, preset, format) =
+            crate::i18n::with_language(vi, || (tool_label("heal"), group_title(0), builtin_label("idPhoto"), format_label("same")));
         assert_eq!(tool, "Vá");
         assert_eq!(group, "Da & Mặt");
         assert_eq!(preset, "Ảnh thẻ");

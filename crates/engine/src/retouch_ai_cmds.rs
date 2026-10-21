@@ -1533,28 +1533,6 @@ fn build_tool(ctx: &Ctx<'_>, tool: Tool, amount: f32, reference: Option<&LabStat
 // Commands
 // ---------------------------------------------------------------------------------------------
 
-/// The topmost layer of the contiguous run of Retouch AI results directly above `source` (or
-/// `source` itself when a non-result layer is next). New results stack there, so a second run
-/// lands above the first instead of pushing old results down.
-fn retouch_stack_top(doc: &Document, source: LayerId) -> LayerId {
-    let Some(mut path) = doc.path_of(source) else { return source };
-    let mut top = source;
-    loop {
-        let Some(&idx) = path.last() else { return top };
-        let mut next = path.clone();
-        match next.last_mut() {
-            Some(last) => *last = idx.saturating_add(1),
-            None => return top,
-        }
-        let Some(layer) = doc.layer_at(&next) else { return top };
-        if !layer.name.starts_with(RESULT_PREFIX) {
-            return top;
-        }
-        top = layer.id;
-        path = next;
-    }
-}
-
 fn run_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let requested = parse_tools(p)?;
     let all_layers = bool_param(p, "sampleAllLayers", true, RUN)?;
@@ -1599,12 +1577,15 @@ fn run_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     if !built.is_empty() {
         let mut ids = Vec::with_capacity(built.len());
         s.edit("Retouch AI", |doc, active| {
-            let mut above = Some(retouch_stack_top(doc, source_id));
-            for (tool, layer) in built {
-                let id = doc.insert_above(above, layer);
-                above = Some(id);
+            // Put results at the top of the root stack. Inserting directly above the source can
+            // hide every result under a duplicate background or another full-canvas layer; a
+            // retouch panel's new layers should be visible immediately. Insert in reverse so the
+            // panel's tool order stays the same from top to bottom.
+            for (tool, layer) in built.into_iter().rev() {
+                let id = doc.insert_above(None, layer);
                 ids.push((tool, id));
             }
+            ids.reverse();
             // Keep the original source selected: the result layers are sparse, so using one as
             // the source of a second run would clip its effects to the first result's bbox.
             *active = Some(source_id);
@@ -1863,6 +1844,19 @@ mod tests {
         let stack: Vec<LayerId> = d.doc.walk().into_iter().map(|(_, _, l)| l.id).collect();
         assert_eq!(stack, vec![source, first_id, second_id], "the second run must stack above the first");
         assert_eq!(d.active_layer, Some(source), "no result layer may be left active");
+    }
+
+    #[test]
+    fn results_clear_a_duplicate_background() {
+        let mut s = synthetic_session(SampleType::U8);
+        let source = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.duplicate", json!({})).unwrap();
+        s.execute("layer.select", json!({"layer": source.0})).unwrap();
+        let r = s.execute(RUN, json!({"tools":[{"id":"skinMask"}]})).unwrap();
+        assert_eq!(r["layers"].as_array().map(Vec::len), Some(1), "{r}");
+        let id = LayerId(r["layers"][0]["layer"].as_u64().unwrap());
+        assert_eq!(layer_ids(&s).last(), Some(&id), "the result must sit above the duplicate");
+        assert_eq!(s.active().unwrap().active_layer, Some(source));
     }
 
     #[test]

@@ -3737,6 +3737,8 @@ curves	Smooth	Làm mượt
 	Local • CPU	Cục bộ • CPU
 	Analyze	Phân tích
 	Run Selected	Chạy đã chọn
+	Selection only	Chỉ trong vùng chọn
+	Paint a selection first (Lasso or Selection Brush); the tools run only inside it.	Hãy tạo vùng chọn trước (Lasso hoặc cọ chọn); công cụ chỉ chạy trong vùng đó.
 	Skin & Face	Da & Mặt
 	Eyes & Smile	Mắt & Nụ cười
 	Hair, Fabric & Background	Tóc, Vải & Nền
