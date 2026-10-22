@@ -20,6 +20,34 @@ use crate::{PhotocraftApp, icons, widgets};
 /// Panel width, in points, like Brush Settings' and Retouch AI's fixed cards.
 pub const WIDTH: f32 = 352.0;
 
+/// The chrome above the scrolling body: the title row, the hairline under it and the space
+/// around them, with the spacing that follows it. The body's cap below adds this to the
+/// window's height, so it is the measured height of that chrome, not a guess.
+const HEADER_HEIGHT: f32 = 43.0;
+
+/// The height of the panel's body: the mask controls, the three sections and the ten sliders
+/// (about 840 points). The body is this tall when the window has the room for it, and shorter —
+/// scrolling, never clipping — when it has not.
+pub const BODY_HEIGHT: f32 = 840.0;
+
+/// Headroom on top of [`BODY_HEIGHT`], so that a small change in the panel's content does not
+/// start the body scrolling.
+const BODY_HEADROOM: f32 = 20.0;
+/// The panel's id, so the tests can find its rectangle in egui's memory.
+fn panel_id() -> egui::Id {
+    egui::Id::new("basic-color")
+}
+
+/// The panel's card, like Brush Settings' and Retouch AI's.
+fn card_frame(t: &Tokens) -> egui::Frame {
+    egui::Frame::NONE
+        .fill(t.card)
+        .stroke(Stroke::new(1.0, t.card_border))
+        .corner_radius(CornerRadius::same(t.radius_lg as u8))
+        .shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: t.shadow })
+        .inner_margin(egui::Margin::same(10))
+}
+
 /// The panel's English source keys, as data rather than literal `tl!` calls.
 ///
 /// Every key below has a `vi.tsv` row (checked by `tests::vietnamese_covers_every_panel_key`);
@@ -230,21 +258,29 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let mut open = true;
     let mut actions = Vec::new();
     let t = Tokens::get(ctx);
-    let frame = egui::Frame::NONE
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.card_border))
-        .corner_radius(CornerRadius::same(t.radius_lg as u8))
-        .shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: t.shadow })
-        .inner_margin(egui::Margin::same(10));
+    let frame = card_frame(&t);
     let canvas = app.last_canvas_rect;
-    let max_height = (ctx.content_rect().height() * 0.72).max(320.0);
+    // The card's margin, on both sides: egui takes it off the requested minimum height before
+    // that becomes the content minimum.
+    let frame_margin = frame.total_margin().sum().y;
+    // The body may not grow past the window: it is capped by the room below the panel's top
+    // edge, which is where the panel opens (or where the user dragged it to).
+    let default_top = canvas.top() + 24.0;
+    let panel_top = ctx.memory(|mem| mem.area_rect(panel_id())).map_or(default_top, |rect| rect.top());
+    let room = (ctx.content_rect().bottom() - panel_top.min(default_top) - frame_margin - HEADER_HEIGHT).max(0.0);
+    let body_height = (BODY_HEIGHT + BODY_HEADROOM).min(room);
     egui::Window::new(tl!(text::TITLE))
-        .id(egui::Id::new("basic-color"))
+        .id(panel_id())
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
         .frame(frame)
-        .default_pos(egui::pos2((canvas.right() - WIDTH - 30.0).max(canvas.left() + 8.0), canvas.top() + 24.0))
+        .default_pos(egui::pos2((canvas.right() - WIDTH - 30.0).max(canvas.left() + 8.0), default_top))
+        // The window keeps the room the body asks for: a borderless auto-sized window settles
+        // for the height of its first frame and never grows, which cut the panel off after two
+        // sliders. egui takes the frame's margin off the requested minimum before it becomes
+        // the content minimum, so the request carries that margin again.
+        .min_height(HEADER_HEIGHT + body_height + frame_margin)
         .show(ctx, |ui| {
             ui.set_width(WIDTH);
             ui.horizontal(|ui| {
@@ -274,7 +310,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 hint.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, tl!(text::OPEN_IMAGE_TO_START)));
                 return;
             }
-            egui::ScrollArea::vertical().id_salt("basic-color-body").max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("basic-color-body").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 match &active {
                     Some(info) => {
@@ -322,6 +358,102 @@ mod tests {
 
     fn app() -> PhotocraftApp {
         PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default())
+    }
+
+    /// The ten sliders of the editor, in the order the panel shows them.
+    const SLIDERS: &[&str] = &["Temperature", "Tint", "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks", "Vibrance", "Saturation"];
+
+    /// The three section headings of the editor.
+    const SECTIONS: &[&str] = &["White Balance", "Tone", "Presence"];
+
+    /// A harness with a document and a Basic Color layer, so the panel draws the editor.
+    fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, PhotocraftApp> {
+        let mut session = photocraft_engine::Session::new();
+        session.execute("file.new", json!({"width": 64, "height": 64, "mode": "rgb", "depth": 8})).expect("new document");
+        session.execute("layer.newAdjustmentLayer.basicColor", json!({})).expect("basic color layer");
+        let mut app = PhotocraftApp::new(session, crate::Services::default());
+        app.ui.panels.basic_color = true;
+        let mut h = Harness::builder().with_size(size).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                let ctx = ui.ctx().clone();
+                if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                window(app, &ctx);
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(4);
+        h
+    }
+
+    /// The panel's rectangle in the window.
+    fn panel_rect(h: &egui_kittest::Harness<'static, PhotocraftApp>) -> egui::Rect {
+        h.ctx.memory(|mem| mem.area_rect(panel_id())).expect("the panel is open")
+    }
+
+    /// The card's vertical margin: the frame's inner margin and its stroke, on both sides.
+    fn frame_margin(h: &egui_kittest::Harness<'static, PhotocraftApp>) -> f32 {
+        card_frame(&Tokens::get(&h.ctx)).total_margin().sum().y
+    }
+
+    /// The panel must show every slider and every section heading when the window has the room
+    /// for them: the body is as tall as the panel's content, so nothing needs scrolling.
+    #[test]
+    fn every_slider_is_visible_in_a_tall_window() {
+        let h = harness(vec2(1440.0, 1200.0));
+        let rect = panel_rect(&h);
+        assert!(rect.bottom() <= 1200.0, "the panel stays inside the window: {rect:?}");
+        for name in SLIDERS.iter().chain(SECTIONS) {
+            let row = h.query_all_by_label(name).next().unwrap_or_else(|| panic!("the panel has a {name} row"));
+            let row = row.rect();
+            assert!(rect.contains_rect(row), "{name} is inside the panel: {row:?} in {rect:?}");
+        }
+        // The body ends with the last slider: the card is as tall as its content, not cut short.
+        let last = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row").rect();
+        assert!(rect.bottom() - last.bottom() < 60.0, "the body ends with the last slider: {last:?} in {rect:?}");
+        // The card is the chrome plus the body, and the body keeps the height it asks for.
+        let body = rect.height() - HEADER_HEIGHT - frame_margin(&h);
+        assert!(body >= BODY_HEIGHT - 1.0, "the body keeps the height it asks for: {body} in {rect:?}");
+    }
+
+    /// The panel takes the room the window gives it and never grows past it: in a short window
+    /// the body fills the space below the panel, in a tall one it is as tall as its content.
+    #[test]
+    fn the_panel_fills_the_window_without_growing_past_it() {
+        for height in [600.0, 900.0, 1500.0] {
+            let h = harness(vec2(1440.0, height));
+            let rect = panel_rect(&h);
+            assert!(rect.bottom() <= height, "the panel stays inside a {height} point window: {rect:?}");
+            if height < 1200.0 {
+                assert!((rect.bottom() - height).abs() < 1.0, "the panel fills a {height} point window: {rect:?}");
+            }
+            // The card is WIDTH wide, plus the frame's margins.
+            assert!((rect.width() - (WIDTH + frame_margin(&h))).abs() < 1.0, "the panel keeps its width: {rect:?}");
+        }
+    }
+
+    /// A short window scrolls the body instead of clipping it: the last slider is out of view
+    /// until the body is scrolled.
+    #[test]
+    fn a_short_window_scrolls_the_body() {
+        let mut h = harness(vec2(1440.0, 600.0));
+        let rect = panel_rect(&h);
+        let saturation = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row");
+        assert!(!rect.contains_rect(saturation.rect()), "the body is too short for every slider: {:?} in {rect:?}", saturation.rect());
+        // The wheel belongs to the scroll area under the pointer.
+        h.hover_at(egui::pos2(rect.left() + 100.0, rect.top() + 120.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -400.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+        let rect = panel_rect(&h);
+        let saturation = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row");
+        assert!(rect.contains_rect(saturation.rect()), "scrolling brings the last slider into view: {:?}", saturation.rect());
     }
 
     #[test]
