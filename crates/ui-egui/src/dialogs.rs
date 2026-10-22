@@ -944,7 +944,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
                 }
                 return result;
             }
-            let (cmd, params) = match crate::smart_ui::confirm_command(app, &fields, crate::filter_dialog::params_of(&fields)) {
+            let (cmd, params) = match crate::smart_ui::confirm_command(app, &fields, cmd, crate::filter_dialog::params_of(&fields)) {
                 Ok(edit) => edit,
                 Err(e) => {
                     app.filter_preview = None;
