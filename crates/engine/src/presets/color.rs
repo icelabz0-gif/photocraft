@@ -210,6 +210,7 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
 fn new_preset(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "color.presets.new";
     let mut layers = Vec::new();
+    let mut skipped = 0usize;
     {
         let d = s.active().ok_or(EngineError::NoDocument)?;
         for (path, _, layer) in d.doc.walk() {
@@ -221,6 +222,7 @@ fn new_preset(s: &mut Session, p: &Value) -> Result<Value> {
             // Unsupported adjustments only exist as imported data; there is no parameter set to
             // recreate them from, so they cannot be saved into a preset.
             if matches!(adjustment, Adjustment::Unsupported { .. }) {
+                skipped += 1;
                 continue;
             }
             layers.push(ColorPresetLayer {
@@ -246,7 +248,7 @@ fn new_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let group = s.presets.color_presets[gi].name.clone();
     let count = s.presets.color_presets[gi].items.last().map_or(0, |p| p.layers.len());
     s.presets_changed();
-    Ok(json!({"name": name, "group": group, "layers": count}))
+    Ok(json!({"name": name, "group": group, "layers": count, "skipped": skipped}))
 }
 
 /// The preset named by `"preset"`: a library name (optionally narrowed by `"group"`) or an
@@ -332,7 +334,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "New Color Preset…",
             menu: &[],
             shortcut: None,
-            params: r##"{"name":str? (default a unique "Look 1", "Look 2"…),"group":name?="My Presets" (created when missing)} → {name,group,layers} (captures every visible adjustment layer, bottom-to-top, with opacity and blend; no masks, effects or groups)"##,
+            params: r##"{"name":str? (default a unique "Look 1", "Look 2"…),"group":name?="My Presets" (created when missing)} → {name,group,layers,skipped} (captures every visible adjustment layer, bottom-to-top, with opacity and blend; unsupported imported adjustments have no parameter set and are counted as skipped; no masks, effects or groups)"##,
             enabled: has_doc,
             run: new_preset,
             journal: true,

@@ -246,7 +246,8 @@ impl Session {
         {
             st.color_presets = groups;
         }
-        // Loading is not an edit: `rev` stays put so caches are not rebuilt for unchanged data.
+        // Preferences can be reloaded at runtime: bump `rev` so UI caches keyed on it rebuild.
+        self.presets.rev += 1;
     }
 
     /// Record a preset change: bumps the panel revision and marks the preferences document dirty

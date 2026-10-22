@@ -938,6 +938,8 @@ fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
     push_layer(&mut s, top);
     let fmt = s.active().unwrap().doc.pixel_format();
     push_layer(&mut s, Layer::raster("Pixels", fmt));
+    // Imported adjustments have no parameter set: they are counted, not saved or applied.
+    push_layer(&mut s, adjustment_layer("Imported", Adjustment::Unsupported { psd_key: "test".into(), raw: vec![1, 2, 3] }));
 
     assert_eq!(s.presets.color_presets.len(), 1, "no user group yet");
     let rev = s.presets.rev;
@@ -945,7 +947,8 @@ fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
     let r = s.execute("color.presets.new", json!({"name": "  Look A  "})).unwrap();
     assert_eq!(r["name"], "Look A", "name is trimmed");
     assert_eq!(r["group"], "My Presets", "the default group is created");
-    assert_eq!(r["layers"], 3);
+    assert_eq!(r["layers"], 3, "supported layers are saved");
+    assert_eq!(r["skipped"], 1, "unsupported imported layers are counted");
     assert_eq!(s.presets.rev, rev + 1, "a capture bumps the preset revision");
     assert_eq!(history_steps(&s), steps, "a capture does not touch the document history");
 
@@ -1181,7 +1184,7 @@ fn color_presets_list_and_edit_actions() {
 }
 
 #[test]
-fn color_presets_persist_independently_and_load_is_not_an_edit() {
+fn color_presets_persist_independently_and_reload_bumps_rev() {
     let mut s = Session::new();
     s.execute("gradient.presets.new", json!({"name": "Keep Me", "stops": [[0, "#ff0000"], [1, "#0000ff"]]})).unwrap();
     s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
@@ -1193,7 +1196,7 @@ fn color_presets_persist_independently_and_load_is_not_an_edit() {
     let mut t = Session::new();
     let rev = t.presets.rev;
     t.load_presets_json(saved.clone());
-    assert_eq!(t.presets.rev, rev, "loading is not an edit");
+    assert_eq!(t.presets.rev, rev + 1, "reloading prefs invalidates UI caches");
     assert!(t.presets.color_presets.iter().any(|g| g.name == "Mine" && g.items[0].name == "Saved Look"));
     assert_eq!(t.presets.color_presets[0].items.len(), 5, "built-ins round-trip");
 
