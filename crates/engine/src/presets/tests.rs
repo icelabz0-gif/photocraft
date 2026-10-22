@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use crate::Session;
-use photocraft_doc::{Fill, LayerContent, LayerId};
+use photocraft_color::BlendMode;
+use photocraft_doc::{Adjustment, Fill, Layer, LayerContent, LayerId, LayerMask};
 
 fn session(depth: u32) -> Session {
     let mut s = Session::new();
@@ -808,4 +811,504 @@ fn export_presets_survive_a_presets_json_round_trip() {
     assert_eq!(restored.presets.export_presets.len(), 1);
     assert_eq!(restored.presets.export_presets[0].name, "Web");
     assert_eq!(restored.presets.export_presets[0].settings.format, "jpg");
+}
+
+// ------------------------------------------------------------------ color presets
+
+/// A small RGB document with a warm background: adjustment layers are easy to see on it.
+fn color_session() -> Session {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 24, "height": 18, "background": "#e04020"})).unwrap();
+    s
+}
+
+fn adjustment_layer(name: &str, adjustment: Adjustment) -> Layer {
+    Layer::new(name, LayerContent::Adjustment(adjustment))
+}
+
+/// Append a fixture layer without a history step or a preference change.
+fn push_layer(s: &mut Session, layer: Layer) -> LayerId {
+    let st = s.active_mut().unwrap();
+    let id = layer.id;
+    Arc::make_mut(&mut st.doc).layers.push(layer);
+    id
+}
+
+fn color_pixel(s: &Session, x: i32, y: i32) -> [f32; 4] {
+    let d = s.active().unwrap();
+    photocraft_compose::render(&d.doc, photocraft_geom::Rect::from_xywh(x, y, 1, 1)).px[0]
+}
+
+fn history_steps(s: &Session) -> usize {
+    s.active().unwrap().history.entries().len()
+}
+
+/// Writes an 8×8 solid PNG and returns its path.
+fn solid_png(dir: &std::path::Path, name: &str, color: &str) -> std::path::PathBuf {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 8, "height": 8, "background": color})).unwrap();
+    let path = dir.join(name);
+    crate::file_cmds::save_doc(&s.active().unwrap().doc, path.to_str().unwrap(), None).unwrap();
+    path
+}
+
+#[test]
+fn color_presets_builtins_match_the_contract() {
+    let mut s = Session::new();
+    let v = s.execute("color.presets.list", json!({})).unwrap();
+    let groups = v["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "only the built-in group starts out");
+    assert_eq!(groups[0]["name"], "PhotoCraft");
+    let presets = groups[0]["presets"].as_array().unwrap();
+    let names: Vec<&str> = presets.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Warm Portrait", "Cool Soft", "Punchy", "Faded Film", "Black & White"]);
+    let expected = [
+        (
+            0,
+            json!({"temperature": 25.0, "tint": -5.0, "exposure": 0.15, "contrast": 10.0, "highlights": -15.0, "shadows": 15.0, "whites": 0.0, "blacks": 0.0, "vibrance": 15.0, "saturation": 0.0}),
+        ),
+        (
+            1,
+            json!({"temperature": -20.0, "tint": 5.0, "exposure": 0.05, "contrast": -5.0, "highlights": -10.0, "shadows": 10.0, "whites": 0.0, "blacks": 5.0, "vibrance": 0.0, "saturation": -5.0}),
+        ),
+        (
+            2,
+            json!({"temperature": 5.0, "tint": 0.0, "exposure": 0.0, "contrast": 25.0, "highlights": -10.0, "shadows": 5.0, "whites": 10.0, "blacks": -10.0, "vibrance": 25.0, "saturation": 5.0}),
+        ),
+        (
+            3,
+            json!({"temperature": 10.0, "tint": 3.0, "exposure": 0.0, "contrast": -15.0, "highlights": -20.0, "shadows": 20.0, "whites": -5.0, "blacks": 15.0, "vibrance": -5.0, "saturation": -15.0}),
+        ),
+        (
+            4,
+            json!({"temperature": 0.0, "tint": 0.0, "exposure": 0.0, "contrast": 15.0, "highlights": 0.0, "shadows": 0.0, "whites": 0.0, "blacks": -5.0, "vibrance": 0.0, "saturation": -100.0}),
+        ),
+    ];
+    for (i, params) in expected {
+        let layers = presets[i]["layers"].as_array().unwrap();
+        assert_eq!(layers.len(), 1, "{}", names[i]);
+        assert_eq!(layers[0]["kind"], "basicColor");
+        assert_eq!(layers[0]["name"], "Basic Color");
+        assert_eq!(layers[0]["opacity"], json!(1.0));
+        assert_eq!(layers[0]["blend"], "Normal");
+        assert_eq!(layers[0]["params"], params, "{}", names[i]);
+    }
+}
+
+#[test]
+fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
+    let mut s = color_session();
+    let basic = Adjustment::BasicColor {
+        temperature: 12.0,
+        tint: -8.0,
+        exposure: 0.3,
+        contrast: 5.0,
+        highlights: -10.0,
+        shadows: 20.0,
+        whites: 4.0,
+        blacks: -6.0,
+        vibrance: 30.0,
+        saturation: -12.0,
+    };
+    let mut root_basic = adjustment_layer("Root Basic", basic.clone());
+    root_basic.opacity = 0.8;
+    root_basic.blend = BlendMode::Multiply;
+    root_basic.mask = Some(LayerMask::reveal_all());
+    push_layer(&mut s, root_basic);
+
+    let invert = Adjustment::Invert;
+    let mut nested_invert = adjustment_layer("Nested Invert", invert.clone());
+    nested_invert.opacity = 0.6;
+    nested_invert.blend = BlendMode::Screen;
+    let mut hidden_vibrance = adjustment_layer("Hidden Vibrance", Adjustment::Vibrance { vibrance: 20.0, saturation: -5.0 });
+    hidden_vibrance.visible = false;
+    push_layer(&mut s, Layer::group("Group One", vec![nested_invert, hidden_vibrance]));
+
+    let mut hidden_exposure = adjustment_layer("Hidden Exposure", Adjustment::Exposure { exposure: 1.0, offset: 0.0, gamma: 1.0 });
+    hidden_exposure.visible = false;
+    push_layer(&mut s, hidden_exposure);
+
+    let mut hidden_group = Layer::group("Hidden Group", vec![adjustment_layer("Inside Hidden", Adjustment::Threshold { level: 0.5 })]);
+    hidden_group.visible = false;
+    push_layer(&mut s, hidden_group);
+
+    let top_vibrance = Adjustment::Vibrance { vibrance: 45.0, saturation: 10.0 };
+    let mut top = adjustment_layer("Top Vibrance", top_vibrance.clone());
+    top.opacity = 0.5;
+    push_layer(&mut s, top);
+    let fmt = s.active().unwrap().doc.pixel_format();
+    push_layer(&mut s, Layer::raster("Pixels", fmt));
+
+    assert_eq!(s.presets.color_presets.len(), 1, "no user group yet");
+    let rev = s.presets.rev;
+    let steps = history_steps(&s);
+    let r = s.execute("color.presets.new", json!({"name": "  Look A  "})).unwrap();
+    assert_eq!(r["name"], "Look A", "name is trimmed");
+    assert_eq!(r["group"], "My Presets", "the default group is created");
+    assert_eq!(r["layers"], 3);
+    assert_eq!(s.presets.rev, rev + 1, "a capture bumps the preset revision");
+    assert_eq!(history_steps(&s), steps, "a capture does not touch the document history");
+
+    let group = s.presets.color_presets.iter().find(|g| g.name == "My Presets").unwrap();
+    assert_eq!(group.items.len(), 1);
+    let preset = &group.items[0];
+    assert_eq!(preset.name, "Look A");
+    let kinds: Vec<&str> = preset.layers.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(kinds, ["basicColor", "invert", "vibrance"], "visible layers, bottom-to-top");
+    let names: Vec<&str> = preset.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Root Basic", "Nested Invert", "Top Vibrance"]);
+    assert_eq!(preset.layers[0].params, crate::adjust_params::to_params(&basic));
+    assert_eq!(preset.layers[1].params, crate::adjust_params::to_params(&invert));
+    assert_eq!(preset.layers[2].params, crate::adjust_params::to_params(&top_vibrance));
+    assert_eq!(preset.layers[0].opacity, 0.8);
+    assert_eq!(preset.layers[1].opacity, 0.6);
+    assert_eq!(preset.layers[2].opacity, 0.5);
+    assert_eq!(preset.layers[0].blend, "Multiply");
+    assert_eq!(preset.layers[1].blend, "Screen");
+    assert_eq!(preset.layers[2].blend, "Normal");
+    // Only the five look fields are stored: no mask, effects, ids or pixels.
+    for l in &preset.layers {
+        let v = l.to_json();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["blend", "kind", "name", "opacity", "params"]);
+    }
+
+    // A duplicate in the same group gets a number; another group may reuse the name.
+    let r = s.execute("color.presets.new", json!({"name": "Look A"})).unwrap();
+    assert_eq!(r["name"], "Look A 2");
+    s.execute("color.presets.edit", json!({"action": "newGroup", "name": "Other"})).unwrap();
+    let r = s.execute("color.presets.new", json!({"name": "Look A", "group": "  Other  "})).unwrap();
+    assert_eq!(r["group"], "Other");
+    assert_eq!(r["name"], "Look A", "uniqueness is per group");
+    // An omitted name takes the next free automatic one.
+    let r = s.execute("color.presets.new", json!({})).unwrap();
+    assert_eq!(r["name"], "Look 1");
+    assert_eq!(history_steps(&s), steps, "captures never edit the document");
+}
+
+#[test]
+fn color_presets_new_needs_a_visible_supported_adjustment() {
+    let mut s = color_session();
+    let before = s.presets.color_presets.clone();
+    for p in [json!({"name": "Empty"}), json!({})] {
+        let e = s.execute("color.presets.new", p.clone()).unwrap_err();
+        assert!(e.to_string().contains("no visible adjustment layers"), "{p}: {e}");
+    }
+    let mut hidden = adjustment_layer("Hidden", Adjustment::Invert);
+    hidden.visible = false;
+    push_layer(&mut s, hidden);
+    assert!(s.execute("color.presets.new", json!({"name": "Hidden"})).is_err());
+    let mut hidden_group = Layer::group("Hidden Group", vec![adjustment_layer("Visible Inside", Adjustment::Invert)]);
+    hidden_group.visible = false;
+    push_layer(&mut s, hidden_group);
+    assert!(s.execute("color.presets.new", json!({"name": "Hidden Group"})).is_err());
+    // Imported unsupported adjustments have no parameter set to recreate them from.
+    push_layer(&mut s, adjustment_layer("Imported", Adjustment::Unsupported { psd_key: "test".into(), raw: vec![1, 2, 3] }));
+    assert!(s.execute("color.presets.new", json!({"name": "Unsupported"})).is_err());
+    assert_eq!(s.presets.color_presets, before, "failed captures add nothing");
+    let mut t = Session::new();
+    assert!(t.execute("color.presets.new", json!({})).is_err(), "no document");
+}
+
+#[test]
+fn color_presets_apply_creates_one_pass_through_group_undo_step() {
+    let mut s = color_session();
+    s.execute("layer.new.layer", json!({"name": "Ink"})).unwrap();
+    let before_layers = s.active().unwrap().doc.layers.clone();
+    let before_px = color_pixel(&s, 6, 6);
+    assert!(before_px[0] > before_px[1] && before_px[0] > 0.7, "warm red background: {before_px:?}");
+    let steps = history_steps(&s);
+
+    let r = s.execute("color.presets.apply", json!({"preset": "Black & White", "group": "PhotoCraft"})).unwrap();
+    assert_eq!(r["name"], "Black & White");
+    let gid = LayerId(r["group"].as_u64().unwrap());
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before_layers.len() + 1, "one new top-level group");
+    assert_eq!(&d.doc.layers[..before_layers.len()], &before_layers[..], "existing layers are untouched");
+    let group = d.doc.layers.last().unwrap();
+    assert_eq!(group.id, gid);
+    assert_eq!(group.name, "Preset \u{2022} Black & White");
+    assert_eq!(group.blend, BlendMode::PassThrough, "the look must reach the composite below");
+    assert_eq!(group.opacity, 1.0);
+    assert!(group.visible && group.mask.is_none());
+    let LayerContent::Group(g) = &group.content else { panic!("not a group") };
+    assert!(g.expanded, "the new group is expanded");
+    assert_eq!(g.children.len(), 1);
+    let child = &g.children[0];
+    assert_eq!(child.id.0, r["layers"][0].as_u64().unwrap());
+    assert_eq!(child.name, "Basic Color");
+    assert_eq!(child.opacity, 1.0);
+    assert_eq!(child.blend, BlendMode::Normal);
+    assert!(child.visible && child.mask.is_none(), "applied looks are global");
+    assert!(matches!(child.content, LayerContent::Adjustment(Adjustment::BasicColor { saturation, .. }) if (saturation + 100.0).abs() < 1e-5));
+    assert_eq!(d.active_layer, Some(gid), "the new group is selected");
+    assert_eq!(d.history.entries().len(), steps + 1, "exactly one undo step");
+    assert_eq!(d.history.entries().last().map(String::as_str), Some("Apply Preset \u{201c}Black & White\u{201d}"));
+
+    let after_px = color_pixel(&s, 6, 6);
+    assert!((after_px[0] - after_px[1]).abs() < 0.02 && (after_px[1] - after_px[2]).abs() < 0.02, "desaturated: {after_px:?}");
+    assert!((after_px[0] - before_px[0]).abs() > 0.1, "the composite changed");
+
+    // Undo removes the whole group in one step; redo restores it with the same ids.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layers, before_layers);
+    s.execute("edit.redo", json!({})).unwrap();
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before_layers.len() + 1);
+    assert_eq!(d.doc.layers.last().unwrap().id, gid);
+    assert_eq!(d.doc.layers.last().unwrap().children().unwrap().len(), 1);
+
+    // Applying again stacks another group; the first one and the existing layers stay as they were.
+    let r2 = s.execute("color.presets.apply", json!({"preset": "Warm Portrait"})).unwrap();
+    assert_ne!(r2["group"], r["group"]);
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before_layers.len() + 2);
+    assert_eq!(&d.doc.layers[..before_layers.len()], &before_layers[..]);
+    assert_eq!(d.doc.layers.last().unwrap().id.0, r2["group"].as_u64().unwrap());
+    assert_eq!(d.doc.layers[d.doc.layers.len() - 2].id, gid);
+    assert_eq!(d.doc.layers.last().unwrap().name, "Preset \u{2022} Warm Portrait");
+}
+
+#[test]
+fn color_presets_apply_inline_and_rejects_bad_presets_atomically() {
+    let mut s = color_session();
+    let steps = history_steps(&s);
+    let r = s
+        .execute(
+            "color.presets.apply",
+            json!({"preset": {"name": "Inline Invert", "layers": [
+                {"kind": "invert", "name": "", "params": {}, "opacity": 2.0, "blend": "Normal"}
+            ]}}),
+        )
+        .unwrap();
+    assert_eq!(r["name"], "Inline Invert");
+    let d = s.active().unwrap();
+    let group = d.doc.layers.last().unwrap();
+    assert_eq!(group.name, "Preset \u{2022} Inline Invert");
+    let child = &group.children().unwrap()[0];
+    assert_eq!(child.name, "Invert", "an empty name falls back to the kind label");
+    assert_eq!(child.opacity, 1.0, "opacity is clamped");
+    assert_eq!(d.history.entries().len(), steps + 1);
+    let px = color_pixel(&s, 6, 6);
+    assert!(px[0] < 0.2 && px[1] > 0.7 && px[2] > 0.8, "red inverted: {px:?}");
+    s.execute("edit.undo", json!({})).unwrap();
+    let base = s.active().unwrap().doc.layers.clone();
+    let base_steps = history_steps(&s);
+
+    // Multi-layer presets keep their stored order, opacity and blend inside the new group.
+    let r = s
+        .execute(
+            "color.presets.apply",
+            json!({"preset": {"name": "Stacked", "layers": [
+                {"kind": "invert", "name": "Bottom", "params": {}, "opacity": 0.25, "blend": "Screen"},
+                {"kind": "exposure", "name": "Top", "params": {"exposure": 1.0}, "opacity": 0.75, "blend": "Multiply"}
+            ]}}),
+        )
+        .unwrap();
+    let d = s.active().unwrap();
+    let children = d.doc.layers.last().unwrap().children().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].name, "Bottom");
+    assert_eq!(children[0].opacity, 0.25);
+    assert_eq!(children[0].blend, BlendMode::Screen);
+    assert!(matches!(children[0].content, LayerContent::Adjustment(Adjustment::Invert)));
+    assert_eq!(children[1].name, "Top");
+    assert_eq!(children[1].opacity, 0.75);
+    assert_eq!(children[1].blend, BlendMode::Multiply);
+    assert!(matches!(children[1].content, LayerContent::Adjustment(Adjustment::Exposure { exposure, .. }) if (exposure - 1.0).abs() < 1e-6));
+    let ids = r["layers"].as_array().unwrap();
+    assert_eq!([ids[0].as_u64().unwrap(), ids[1].as_u64().unwrap()], [children[0].id.0, children[1].id.0], "bottom-to-top ids");
+    assert_eq!(d.history.entries().len(), base_steps + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layers, base);
+    assert_eq!(history_steps(&s), base_steps);
+
+    let bad = [
+        json!({"preset": {"name": "Bad kind", "layers": [{"kind": "nope", "params": {}}]}}),
+        json!({"preset": {"name": "Bad params", "layers": [{"kind": "basicColor", "params": {"temperature": "hot"}}]}}),
+        json!({"preset": {"name": "Bad blend", "layers": [{"kind": "invert", "params": {}, "blend": "Nope"}]}}),
+        json!({"preset": {"name": "Pass through", "layers": [{"kind": "invert", "params": {}, "blend": "PassThrough"}]}}),
+        json!({"preset": {"name": "Empty", "layers": []}}),
+        json!({"preset": {"name": "   ", "layers": [{"kind": "invert", "params": {}}]}}),
+        json!({"preset": 7}),
+        json!({}),
+        json!({"preset": "No Such Look"}),
+        json!({"preset": "Warm Portrait", "group": "No Such Group"}),
+    ];
+    for p in bad {
+        let e = s.execute("color.presets.apply", p.clone()).unwrap_err();
+        assert!(!e.to_string().is_empty(), "{p}");
+        assert_eq!(s.active().unwrap().doc.layers, base, "no partial stack for {p}");
+        assert_eq!(history_steps(&s), base_steps, "no undo step for {p}");
+    }
+    let mut t = Session::new();
+    assert!(t.execute("color.presets.apply", json!({"preset": "Warm Portrait"})).is_err(), "no document");
+}
+
+#[test]
+fn color_presets_list_and_edit_actions() {
+    let mut s = color_session();
+    s.execute("layer.newAdjustmentLayer.basicColor", json!({"temperature": 10})).unwrap();
+    s.execute("color.presets.new", json!({"name": "Take"})).unwrap();
+    let v = s.execute("color.presets.list", json!({})).unwrap();
+    let g = v["groups"].as_array().unwrap().iter().find(|g| g["name"] == "My Presets").unwrap();
+    assert_eq!(g["presets"][0]["name"], "Take");
+    assert_eq!(g["presets"][0]["layers"][0]["params"]["temperature"], json!(10.0));
+
+    let rev = s.presets.rev;
+    s.execute("color.presets.edit", json!({"action": "rename", "preset": "Take", "name": "Renamed"})).unwrap();
+    assert_eq!(s.presets.rev, rev + 1, "edits bump the revision");
+    let r = s.execute("color.presets.edit", json!({"action": "rename", "preset": "Renamed", "name": "Warm Portrait"})).unwrap_err();
+    assert!(r.to_string().contains("already exists"), "{r}");
+    assert_eq!(s.presets.rev, rev + 1, "a failed edit changes nothing");
+    assert!(s.execute("color.presets.edit", json!({"action": "nope"})).is_err());
+
+    s.execute("color.presets.edit", json!({"action": "newGroup", "name": "Mine"})).unwrap();
+    s.execute("color.presets.edit", json!({"action": "newGroup", "name": "Mine"})).unwrap();
+    assert!(s.presets.color_presets.iter().any(|g| g.name == "Mine 1"), "unique group names");
+    s.execute("color.presets.edit", json!({"action": "move", "preset": "Renamed", "to": "Mine", "index": 0})).unwrap();
+    let mine = s.presets.color_presets.iter().find(|g| g.name == "Mine").unwrap();
+    assert_eq!(mine.items[0].name, "Renamed");
+    s.execute("color.presets.edit", json!({"action": "renameGroup", "group": "Mine", "name": "Mine Renamed"})).unwrap();
+    assert!(s.presets.color_presets.iter().any(|g| g.name == "Mine Renamed"));
+    let r = s.execute("color.presets.edit", json!({"action": "delete", "preset": ["Renamed", "missing"]})).unwrap_err();
+    assert!(r.to_string().contains("no preset"), "{r}");
+    let r = s.execute("color.presets.edit", json!({"action": "delete", "preset": "Renamed"})).unwrap();
+    assert_eq!(r["deleted"], 1);
+    let r = s.execute("color.presets.edit", json!({"action": "deleteGroup", "group": "Mine Renamed"})).unwrap();
+    assert_eq!(r["deleted"], 0);
+    assert!(s.execute("color.presets.edit", json!({"action": "deleteGroup", "group": "Missing"})).is_err());
+}
+
+#[test]
+fn color_presets_persist_independently_and_load_is_not_an_edit() {
+    let mut s = Session::new();
+    s.execute("gradient.presets.new", json!({"name": "Keep Me", "stops": [[0, "#ff0000"], [1, "#0000ff"]]})).unwrap();
+    s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
+    s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
+    s.execute("color.presets.new", json!({"name": "Saved Look", "group": "Mine"})).unwrap();
+    let saved = s.presets.to_json(&s);
+    assert_eq!(saved["color_presets"].as_array().unwrap().len(), 2, "PhotoCraft + Mine");
+
+    let mut t = Session::new();
+    let rev = t.presets.rev;
+    t.load_presets_json(saved.clone());
+    assert_eq!(t.presets.rev, rev, "loading is not an edit");
+    assert!(t.presets.color_presets.iter().any(|g| g.name == "Mine" && g.items[0].name == "Saved Look"));
+    assert_eq!(t.presets.color_presets[0].items.len(), 5, "built-ins round-trip");
+
+    // Deleting a built-in persists: it must not reappear on the next launch.
+    s.execute("color.presets.edit", json!({"action": "delete", "preset": "Warm Portrait"})).unwrap();
+    let saved = s.presets.to_json(&s);
+    let mut u = Session::new();
+    u.load_presets_json(saved.clone());
+    assert!(!u.presets.color_presets.iter().flat_map(|g| &g.items).any(|p| p.name == "Warm Portrait"));
+    assert_eq!(u.presets.color_presets[0].items.len(), 4);
+
+    // Missing or malformed sets keep the defaults; an explicitly empty list stays empty.
+    let mut m = Session::new();
+    m.load_presets_json(json!({"gradients": []}));
+    assert_eq!(m.presets.color_presets[0].items.len(), 5);
+    let mut bad = Session::new();
+    bad.load_presets_json(json!({"color_presets": "not a set"}));
+    assert_eq!(bad.presets.color_presets[0].items.len(), 5);
+    let mut empty = Session::new();
+    empty.load_presets_json(json!({"color_presets": []}));
+    assert!(empty.presets.color_presets.is_empty(), "an emptied library stays empty");
+
+    // Damaged entries and groups are dropped one by one.
+    let mut partial = Session::new();
+    partial.load_presets_json(json!({"color_presets": [
+        {"name": "Good Group", "items": [
+            {"name": "Good", "layers": [{"kind": "invert", "name": "", "params": {}, "opacity": 1.0, "blend": "Normal"}]},
+            {"name": 5},
+            "junk"
+        ]},
+        {"name": "   ", "items": []},
+        {"items": []},
+        "junk"
+    ]}));
+    assert_eq!(partial.presets.color_presets.len(), 1);
+    let group = &partial.presets.color_presets[0];
+    assert_eq!(group.name, "Good Group");
+    assert_eq!(group.items.len(), 1);
+    assert_eq!(group.items[0].name, "Good");
+    assert_eq!(group.items[0].layers.len(), 1);
+
+    // A damaged colour set does not discard the other preset kinds, and vice versa.
+    let mut blob = saved.clone();
+    blob["color_presets"] = json!({"broken": true});
+    let mut other = Session::new();
+    other.load_presets_json(blob);
+    assert!(other.presets.gradients.iter().any(|g| g.items.iter().any(|p| p.name == "Keep Me")), "gradients still load");
+    assert_eq!(other.presets.color_presets[0].items.len(), 5, "colour defaults");
+    let mut blob = saved.clone();
+    blob["gradients"] = json!("broken");
+    let mut color = Session::new();
+    color.load_presets_json(blob);
+    assert!(color.presets.color_presets.iter().any(|g| g.name == "Mine"), "colour presets still load");
+    assert_eq!(color.presets.gradients, Session::new().presets.gradients, "gradients keep their defaults");
+}
+
+#[test]
+fn color_presets_batch_applies_a_user_preset_to_a_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    let output = dir.path().join("out");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::create_dir_all(&output).unwrap();
+    let sources = [("a.png", "#ff0000"), ("b.png", "#00ff00"), ("c.png", "#0000ff")];
+    let before: Vec<(std::path::PathBuf, Vec<u8>)> = sources
+        .iter()
+        .map(|(name, color)| {
+            let p = solid_png(&input, name, color);
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    let broken = input.join("broken.png");
+    std::fs::write(&broken, b"not a png").unwrap();
+    let broken_bytes = std::fs::read(&broken).unwrap();
+
+    // The preset lives in the caller's library and is addressed by name, as the panel does.
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+    s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
+    s.execute("color.presets.new", json!({"name": "Batch Invert", "group": "My Presets"})).unwrap();
+
+    let r = s
+        .execute(
+            "file.automate.batch",
+            json!({
+                "steps": [["color.presets.apply", {"preset": "Batch Invert", "group": "My Presets"}]],
+                "input": input.to_str().unwrap(),
+                "output": output.to_str().unwrap(),
+                "format": "png",
+                "includeSubfolders": false
+            }),
+        )
+        .unwrap();
+    assert_eq!(r["files"].as_array().unwrap().len(), 3, "{r}");
+    let errors = r["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{r}");
+    assert!(errors[0]["file"].as_str().unwrap().ends_with("broken.png"), "{r}");
+
+    for (path, bytes) in &before {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{name}: source untouched");
+        let out = output.join(name);
+        assert!(out.is_file(), "{name}: output written");
+        let src = photocraft_io::import(name, bytes).unwrap().document;
+        let dst = photocraft_io::import(name, &std::fs::read(&out).unwrap()).unwrap().document;
+        let rect = photocraft_geom::Rect::from_xywh(4, 4, 1, 1);
+        let a = photocraft_compose::render(&src, rect).px[0];
+        let b = photocraft_compose::render(&dst, rect).px[0];
+        assert!((a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs() > 0.5, "{name}: pixels differ ({a:?} vs {b:?})");
+    }
+    // Red becomes cyan through the applied invert.
+    let a = photocraft_io::import("a.png", &std::fs::read(output.join("a.png")).unwrap()).unwrap().document;
+    let px = photocraft_compose::render(&a, photocraft_geom::Rect::from_xywh(4, 4, 1, 1)).px[0];
+    assert!(px[0] < 0.02 && px[1] > 0.98 && px[2] > 0.98, "{px:?}");
+    assert_eq!(std::fs::read(&broken).unwrap(), broken_bytes, "the bad file is untouched");
+    assert_eq!(std::fs::read_dir(&output).unwrap().count(), 3, "no output for the bad file");
 }

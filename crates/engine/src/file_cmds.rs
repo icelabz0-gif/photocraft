@@ -1187,8 +1187,13 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let actions = crate::actions_cmds::ActionState { list, playing: s.actions.playing, playback_stack: s.actions.playback_stack.clone(), ..Default::default() };
     let names = batch_naming::plan(&inputs, &output, &format, p)?;
     let save = SaveOpts::from_params(s, p, cmd)?;
+    // Preset commands run in each file's scratch session, which starts with defaults: carry the
+    // caller's colour library so an apply step picks the preset a click would, including edits to
+    // the built-ins (Color Presets batch uses `color.presets.apply` by name).
+    let color_presets = s.presets.color_presets.clone();
     let run = |scratch: &mut Session| {
         scratch.actions = actions.clone();
+        scratch.presets.color_presets = color_presets.clone();
         for (id, params) in &steps {
             let r = scratch.execute(id, params.clone())?;
             // A failed step inside a called action makes this file an error, not a saved result.

@@ -13,13 +13,16 @@
 //! - clone sources ([`clone_source`]): five source slots with offset, scale, rotation and flip
 //!   that `paint.cloneStamp` / `paint.healingBrush` follow;
 //! - swatches ([`swatches`]): named colours in their own colour model (commands in
-//!   `crate::swatch_cmds`, `.aco`/`.ase` import and export).
+//!   `crate::swatch_cmds`, `.aco`/`.ase` import and export);
+//! - color ([`color`]): whole-image colour/tone looks captured from visible adjustment layers and
+//!   applied as a new pass-through group.
 //!
 //! The built-in groups are our own (clean-room): colours, styles and shapes were designed here,
 //! not copied from Photoshop's presets. User edits persist with the preferences document: see
 //! [`PresetState::to_json`] (saved under `"presets"` by [`Session::prefs_to_json`]).
 
 pub mod clone_source;
+pub mod color;
 pub mod gradients;
 pub mod patterns;
 pub mod shapes;
@@ -91,6 +94,8 @@ pub struct PresetState {
     pub layer_defaults: BTreeMap<String, Value>,
     /// Swatches panel library.
     pub swatches: Vec<Group<swatches::Swatch>>,
+    /// Window › Color Presets: captured colour/tone looks.
+    pub color_presets: Vec<Group<color::ColorPreset>>,
     /// Bumped on every preset change (UIs key thumbnail caches on it).
     pub rev: u64,
 }
@@ -111,6 +116,7 @@ impl Default for PresetState {
             clone: Default::default(),
             layer_defaults: BTreeMap::new(),
             swatches: swatches::builtin(),
+            color_presets: color::builtin(),
             rev: 0,
         }
     }
@@ -144,6 +150,9 @@ struct Persisted {
     #[serde(default)]
     layer_defaults: Option<BTreeMap<String, Value>>,
     swatches: Option<Vec<Group<swatches::Swatch>>>,
+    // Read independently and leniently (`color::load`): a damaged look keeps the other sets.
+    #[serde(default)]
+    color_presets: Option<Value>,
 }
 
 impl PresetState {
@@ -162,6 +171,7 @@ impl PresetState {
             custom_shapes: Some(s.edit_state.custom_shapes.clone()),
             layer_defaults: Some(self.layer_defaults.clone()),
             swatches: Some(self.swatches.clone()),
+            color_presets: Some(json!(self.color_presets)),
         };
         serde_json::to_value(p).unwrap_or(Value::Null)
     }
@@ -190,6 +200,7 @@ impl Session {
             custom_shapes: take(&mut m, "custom_shapes"),
             layer_defaults: take(&mut m, "layer_defaults"),
             swatches: take(&mut m, "swatches"),
+            color_presets: take(&mut m, "color_presets"),
         };
         let st = &mut self.presets;
         if let Some(g) = p.gradients {
@@ -228,9 +239,14 @@ impl Session {
         if let Some(mut g) = p.swatches {
             // A hand-edited preferences file can't make the library unbounded.
             crate::swatch_cmds::cap_library(&mut g);
-            self.presets.swatches = g;
+            st.swatches = g;
         }
-        self.presets.rev += 1;
+        if let Some(c) = p.color_presets
+            && let Some(groups) = color::load(c)
+        {
+            st.color_presets = groups;
+        }
+        // Loading is not an edit: `rev` stays put so caches are not rebuilt for unchanged data.
     }
 
     /// Record a preset change: bumps the panel revision and marks the preferences document dirty
@@ -389,6 +405,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(shapes::specs());
     v.extend(tools::specs());
     v.extend(clone_source::specs());
+    v.extend(color::specs());
     v
 }
 
