@@ -268,11 +268,22 @@ fn basic_color_section(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(tl!(text)).font(crate::theme::semibold(11.5)).color(t.text_dim));
 }
 
+/// One of the Basic Color panel's ten one-line sliders: ±100, default 0.
+fn basic_color_slider(ui: &mut egui::Ui, v: &mut Value, key: &str, text: &str, unit: &str) -> Edit {
+    let mut x = num(v, key, 0.0).clamp(-100.0, 100.0);
+    let gestures = widgets::RowGestures { reset: Some(0.0), wheel_step: None, ..Default::default() };
+    let r = widgets::slider_row_compact(ui, text, &mut x, -100.0..=100.0, unit, gestures, None);
+    if r.changed() {
+        v[key] = json!(row_value(x, -100.0, 100.0, None));
+    }
+    Edit::of(&r)
+}
+
 /// Exposure's ±5 EV slider: a 1/20-stop step, shown with two decimals.
 fn basic_color_exposure(ui: &mut egui::Ui, v: &mut Value) -> Edit {
     let mut x = num(v, "exposure", 0.0).clamp(-5.0, 5.0);
     let gestures = widgets::RowGestures { reset: Some(0.0), wheel_step: None, ..Default::default() };
-    let r = widgets::slider_row_prec(ui, tl!("Exposure"), &mut x, -5.0..=5.0, "", None, gestures, Some(2));
+    let r = widgets::slider_row_compact(ui, "Exposure", &mut x, -5.0..=5.0, "", gestures, Some(2));
     if r.changed() {
         v["exposure"] = json!(round(x, 0.05));
     }
@@ -282,22 +293,16 @@ fn basic_color_exposure(ui: &mut egui::Ui, v: &mut Value) -> Edit {
 fn basic_color(ui: &mut egui::Ui, v: &mut Value) -> Edit {
     let mut e = Edit::default();
     basic_color_section(ui, tl!(crate::basic_color_panel::text::WHITE_BALANCE));
-    e.add(sliders(ui, v, &[("temperature", tl!("Temperature"), -100.0, 100.0, 0.0, "", None), ("tint", tl!("Tint"), -100.0, 100.0, 0.0, "", None)]));
+    e.add(basic_color_slider(ui, v, "temperature", "Temperature", ""));
+    e.add(basic_color_slider(ui, v, "tint", "Tint", ""));
     basic_color_section(ui, tl!(crate::basic_color_panel::text::TONE));
     e.add(basic_color_exposure(ui, v));
-    e.add(sliders(
-        ui,
-        v,
-        &[
-            ("contrast", tl!("Contrast"), -100.0, 100.0, 0.0, "", None),
-            ("highlights", tl!("Highlights"), -100.0, 100.0, 0.0, "", None),
-            ("shadows", tl!("Shadows"), -100.0, 100.0, 0.0, "", None),
-            ("whites", tl!("Whites"), -100.0, 100.0, 0.0, "", None),
-            ("blacks", tl!("Blacks"), -100.0, 100.0, 0.0, "", None),
-        ],
-    ));
+    for (key, text) in [("contrast", "Contrast"), ("highlights", "Highlights"), ("shadows", "Shadows"), ("whites", "Whites"), ("blacks", "Blacks")] {
+        e.add(basic_color_slider(ui, v, key, text, ""));
+    }
     basic_color_section(ui, tl!(crate::basic_color_panel::text::PRESENCE));
-    e.add(sliders(ui, v, &[("vibrance", tl!("Vibrance"), -100.0, 100.0, 0.0, "%", None), ("saturation", tl!("Saturation"), -100.0, 100.0, 0.0, "%", None)]));
+    e.add(basic_color_slider(ui, v, "vibrance", "Vibrance", "%"));
+    e.add(basic_color_slider(ui, v, "saturation", "Saturation", "%"));
     e
 }
 

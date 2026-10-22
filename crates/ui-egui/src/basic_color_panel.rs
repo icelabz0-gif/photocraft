@@ -25,10 +25,10 @@ pub const WIDTH: f32 = 352.0;
 /// window's height, so it is the measured height of that chrome, not a guess.
 const HEADER_HEIGHT: f32 = 43.0;
 
-/// The height of the panel's body: the mask controls, the three sections and the ten sliders
-/// (about 840 points). The body is this tall when the window has the room for it, and shorter —
-/// scrolling, never clipping — when it has not.
-pub const BODY_HEIGHT: f32 = 840.0;
+/// The height of the panel's body: the mask controls, the three sections and the ten one-line
+/// sliders (about 520 points). The body is this tall when the window has the room for it, and
+/// shorter — scrolling, never clipping — when it has not. Ten two-line rows took about 840.
+pub const BODY_HEIGHT: f32 = 520.0;
 
 /// Headroom on top of [`BODY_HEIGHT`], so that a small change in the panel's content does not
 /// start the body scrolling.
@@ -310,7 +310,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 hint.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, tl!(text::OPEN_IMAGE_TO_START)));
                 return;
             }
-            egui::ScrollArea::vertical().id_salt("basic-color-body").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+            let body = egui::ScrollArea::vertical().id_salt("basic-color-body").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 match &active {
                     Some(info) => {
@@ -340,6 +340,12 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 }
                 ui.add_space(2.0);
             });
+            // What the tests measure: the body's viewport and the height of all its content, so
+            // they can tell a body that scrolls from one that fits without reading pixels.
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(panel_id().with("body"), (body.inner_rect, body.content_size)));
+            #[cfg(not(test))]
+            let _ = body;
         });
     if !open {
         app.ui.panels.basic_color = false;
@@ -398,6 +404,12 @@ mod tests {
         card_frame(&Tokens::get(&h.ctx)).total_margin().sum().y
     }
 
+    /// The body's viewport and the size of everything inside it, recorded by [`window`]: a body
+    /// whose content is taller than its viewport scrolls.
+    fn body_metrics(h: &egui_kittest::Harness<'static, PhotocraftApp>) -> (egui::Rect, egui::Vec2) {
+        h.ctx.data(|d| d.get_temp::<(egui::Rect, egui::Vec2)>(panel_id().with("body"))).expect("the body was drawn")
+    }
+
     /// The panel must show every slider and every section heading when the window has the room
     /// for them: the body is as tall as the panel's content, so nothing needs scrolling.
     #[test]
@@ -418,6 +430,24 @@ mod tests {
         assert!(body >= BODY_HEIGHT - 1.0, "the body keeps the height it asks for: {body} in {rect:?}");
     }
 
+    /// Every one of the ten sliders and the three headings fits at a 1440×900 window, the size the
+    /// app opens at: no row needs scrolling there.
+    #[test]
+    fn every_slider_is_visible_at_1440_by_900() {
+        let h = harness(vec2(1440.0, 900.0));
+        let rect = panel_rect(&h);
+        assert!(rect.bottom() <= 900.0, "the panel stays inside the window: {rect:?}");
+        let (body, content) = body_metrics(&h);
+        assert!(content.y <= body.height() + 0.5, "the body does not scroll at 1440×900: {content:?} in {body:?}");
+        for name in SLIDERS.iter().chain(SECTIONS) {
+            let row = h.query_all_by_label(name).next().unwrap_or_else(|| panic!("the panel has a {name} row"));
+            assert!(body.contains_rect(row.rect()), "{name} is inside the body: {:?} in {body:?}", row.rect());
+        }
+        // The last row is not at the edge: its 20-point slider and field are inside too.
+        let last = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row").rect();
+        assert!(body.bottom() - last.bottom() >= 4.0, "Saturation's row is fully visible: {last:?} in {body:?}");
+    }
+
     /// The panel takes the room the window gives it and never grows past it: in a short window
     /// the body fills the space below the panel, in a tall one it is as tall as its content.
     #[test]
@@ -426,8 +456,16 @@ mod tests {
             let h = harness(vec2(1440.0, height));
             let rect = panel_rect(&h);
             assert!(rect.bottom() <= height, "the panel stays inside a {height} point window: {rect:?}");
-            if height < 1200.0 {
+            // The most the card asks for: the body plus its scroll headroom.
+            let card = HEADER_HEIGHT + frame_margin(&h) + BODY_HEIGHT + BODY_HEADROOM;
+            if height < rect.top() + card - 0.5 {
                 assert!((rect.bottom() - height).abs() < 1.0, "the panel fills a {height} point window: {rect:?}");
+            } else {
+                // With the room for it the body is exactly as tall as its content (never past
+                // the ask, never shorter than the height the constants promise).
+                assert!(rect.height() <= card + 1.0, "the card stays within its ask in a {height} point window: {rect:?}");
+                let body = rect.height() - HEADER_HEIGHT - frame_margin(&h);
+                assert!(body >= BODY_HEIGHT - 1.0, "the body keeps the height it asks for in a {height} point window: {body} in {rect:?}");
             }
             // The card is WIDTH wide, plus the frame's margins.
             assert!((rect.width() - (WIDTH + frame_margin(&h))).abs() < 1.0, "the panel keeps its width: {rect:?}");
@@ -440,8 +478,11 @@ mod tests {
     fn a_short_window_scrolls_the_body() {
         let mut h = harness(vec2(1440.0, 600.0));
         let rect = panel_rect(&h);
+        let (body, content) = body_metrics(&h);
         let saturation = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row");
-        assert!(!rect.contains_rect(saturation.rect()), "the body is too short for every slider: {:?} in {rect:?}", saturation.rect());
+        assert!(content.y > body.height() + 0.5, "the content is taller than the body: {content:?} in {body:?}");
+        // The label is centred in its 20-point row, so the row runs about 3 points below it.
+        assert!(saturation.rect().bottom() + 3.0 > body.bottom(), "the body is too short for every slider: {:?} in {body:?}", saturation.rect());
         // The wheel belongs to the scroll area under the pointer.
         h.hover_at(egui::pos2(rect.left() + 100.0, rect.top() + 120.0));
         h.event(egui::Event::MouseWheel {
@@ -451,9 +492,9 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
-        let rect = panel_rect(&h);
+        let (body, _) = body_metrics(&h);
         let saturation = h.query_all_by_label("Saturation").next().expect("the panel has a Saturation row");
-        assert!(rect.contains_rect(saturation.rect()), "scrolling brings the last slider into view: {:?}", saturation.rect());
+        assert!(body.contains_rect(saturation.rect()), "scrolling brings the last slider into view: {:?} in {body:?}", saturation.rect());
     }
 
     #[test]

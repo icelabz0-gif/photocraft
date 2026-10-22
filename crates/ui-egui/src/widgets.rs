@@ -1181,6 +1181,63 @@ pub fn slider_row_prec(
     r
 }
 
+/// The label column of a [`slider_row_compact`].
+pub const COMPACT_LABEL_W: f32 = 88.0;
+/// The value field of a [`slider_row_compact`].
+pub const COMPACT_FIELD_W: f32 = 52.0;
+/// A [`slider_row_compact`]'s height: the slider's own 18 points sit inside it.
+pub const COMPACT_ROW_H: f32 = 20.0;
+
+/// A one-line labelled slider row for dense panels (Lightroom's Basic panel):
+/// `Label   ────●────   [value]`, with the label's scrub, the slider's double-click reset and the
+/// field's typing and scrubbing all behaving like [`slider_row_prec`]. The label truncates with
+/// `…` in its column; the response is the slider's, changed by the field too, so a drag of either
+/// is one history step.
+pub fn slider_row_compact(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+    g: RowGestures,
+    decimals: Option<u32>,
+) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let total = ui.available_width();
+    // Not `ui.horizontal`: that assumes a 24 pt interactive line, and this row is 20.
+    let (mut r, field) = ui
+        .allocate_ui_with_layout(vec2(total, COMPACT_ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let field_w = COMPACT_FIELD_W;
+            // Keep the label column's 88 points when the panel has them; in a narrower host it
+            // gives way, but the slider keeps at least 60 points (its own minimum).
+            let label_w = COMPACT_LABEL_W.min((total - field_w - 2.0 * gap - 60.0).max(48.0));
+            let slider_w = (total - label_w - field_w - 2.0 * gap).max(60.0);
+            let label_resp = ui
+                .allocate_ui_with_layout(vec2(label_w, COMPACT_ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(tl!(label)).color(t.text_dim)).truncate())
+                })
+                .inner;
+            // The label scrubs the field across the slider in between (Photoshop's scrubby labels).
+            scrub_label_within(ui, &label_resp, f32::INFINITY);
+            let slider = ui
+                .allocate_ui_with_layout(vec2(slider_w, COMPACT_ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    slider_with(ui, value, range.clone(), None, g)
+                })
+                .inner;
+            let field = value_field_box(ui, value, range, suffix, vec2(field_w, COMPACT_ROW_H), 0.0, FieldOpts { decimals, ..Default::default() }).0;
+            (slider, field)
+        })
+        .inner;
+    if field.changed() {
+        r.mark_changed();
+    }
+    // A scrub of the field or its label is one drag, like the slider's, for history.
+    use egui::response::Flags;
+    r.flags |= field.flags & (Flags::DRAG_STARTED | Flags::DRAGGED | Flags::DRAG_STOPPED);
+    r
+}
+
 /// iOS-style toggle switch.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let t = Tokens::get(ui.ctx());
@@ -2054,6 +2111,49 @@ mod tests {
             assert!(((digits.0 + digits.1) / 2.0 - field.center().y).abs() <= 0.25, "{what}");
             assert!((digits.0 - unit.0).abs() <= 0.25, "{what}");
         }
+    }
+
+    /// The compact row is one line — label, slider, value field, 20 points plus the 6 pt row gap —
+    /// and the field's arrow-key edit reaches the caller through the row's combined response.
+    #[test]
+    fn compact_slider_row_is_one_line_and_reports_the_field_edit() {
+        use egui::accesskit::Role;
+        let mut h = Harness::new_ui_state(
+            |ui, s: &mut (f32, u32, f32, egui::Rect, egui::Rect)| {
+                let top = ui.cursor().min.y;
+                let r = super::slider_row_compact(
+                    ui,
+                    "Temperature",
+                    &mut s.0,
+                    -100.0..=100.0,
+                    "",
+                    super::RowGestures { reset: Some(0.0), ..Default::default() },
+                    None,
+                );
+                if r.changed() {
+                    s.1 += 1;
+                }
+                s.2 = ui.cursor().min.y - top;
+                s.3 = r.rect;
+                s.4 = egui::Rect::from_min_max(egui::pos2(ui.min_rect().left(), top), egui::pos2(ui.min_rect().right(), ui.cursor().min.y));
+            },
+            (0.0, 0, 0.0, egui::Rect::NOTHING, egui::Rect::NOTHING),
+        );
+        crate::PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run();
+        let (_, _, pitch, slider, row) = *h.state();
+        assert!(pitch <= 27.0, "a compact row is one 20 pt line plus the 6 pt row gap: {pitch}");
+        assert!(row.contains_rect(slider), "the slider sits inside the row: {slider:?} in {row:?}");
+        let label = h.get_by_label("Temperature").rect();
+        let field = h.get_by_role(Role::SpinButton).rect();
+        assert!(label.right() < slider.left() && slider.right() <= field.left(), "label, slider, field left to right: {label:?}, {slider:?}, {field:?}");
+        assert!(row.contains_rect(field), "the field sits inside the row: {field:?} in {row:?}");
+        h.get_by_role(Role::SpinButton).click();
+        h.run();
+        h.key_press_modifiers(Modifiers::NONE, Key::ArrowUp);
+        h.run();
+        assert_eq!(h.state().0, 1.0, "the arrow key steps the row's value");
+        assert!(h.state().1 >= 1, "the field's edit is reported by the row's response");
     }
 
     /// With the app's theme (its 24 pt interact height and 4 pt button padding), in a full-size
