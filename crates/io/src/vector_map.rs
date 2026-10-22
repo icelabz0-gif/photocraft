@@ -342,10 +342,14 @@ pub fn vstk_bytes(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32) ->
     };
     let content = Descriptor { class_id: Id::new(class), ..content };
     // The model keeps the dash lengths as multiples of the stroke width; PSD stores them as
-    // lengths in points, at the block's resolution.
+    // lengths in points, at the document's resolution. A stroke of no width has no width to
+    // measure against, so the reader and the writer both fall back to 1 px and the dash
+    // pattern survives the round trip.
     let res = if dpi > 0.0 { f64::from(dpi) } else { 72.0 };
     let width = f64::from(s.width.max(0.0));
-    let points = |multiples: f32| f64::from(multiples) * width * 72.0 / res;
+    let divisor = if width > 0.0 { width } else { 1.0 };
+    let to_points = 72.0 / res;
+    let points = |multiples: f32| f64::from(multiples) * divisor * to_points;
     let d = Descriptor::new("strokeStyle")
         .with("strokeStyleVersion", Value::Integer(2))
         .with("strokeEnabled", Value::Boolean(stroke.is_some()))
@@ -739,6 +743,17 @@ mod tests {
         let s = parse_vstk(&photoshop_vstk(0.0, &[6.0], 0.0), 72.0).unwrap().stroke.unwrap();
         assert_eq!(s.width, 0.0);
         assert!((s.dashes[0] - 6.0).abs() < 1e-6, "{:?}", s.dashes);
+    }
+
+    #[test]
+    fn a_stroke_of_no_width_keeps_its_dash_pattern() {
+        // A zero-width stroke has no width to measure its dashes against, so the reader and the
+        // writer both fall back to 1 px: the pattern survives the round trip.
+        let stroke = ShapeStroke { width: 0.0, dashes: vec![4.0, 2.0], dash_offset: 0.5, ..Default::default() };
+        let back = parse_vstk(&vstk_bytes(Some(&stroke), false, 72.0), 72.0).unwrap().stroke.unwrap();
+        assert_eq!(back.width, 0.0);
+        assert_eq!(back.dashes, stroke.dashes);
+        assert_eq!(back.dash_offset, stroke.dash_offset);
     }
 
     #[test]
