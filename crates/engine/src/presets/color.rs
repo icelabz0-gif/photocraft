@@ -239,9 +239,9 @@ fn new_preset(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let gi = group_index(&mut s.presets.color_presets, Some(str_param(p, "group").unwrap_or(USER_GROUP)));
     let name = match str_param(p, "name") {
-        // Uniqueness is per group, as in the contract: the same name may exist in another group
-        // and `apply`'s optional `group` narrows the lookup.
-        Some(name) => unique_name(std::slice::from_ref(&s.presets.color_presets[gi]), name),
+        // Names are unique across all groups (agents address presets by name); `apply`'s optional
+        // `group` still narrows where older data holds a duplicate.
+        Some(name) => unique_name(&s.presets.color_presets, name),
         None => next_look_name(&s.presets.color_presets),
     };
     s.presets.color_presets[gi].items.push(ColorPreset { name: name.clone(), layers });

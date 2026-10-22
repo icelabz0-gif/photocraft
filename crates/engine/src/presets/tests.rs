@@ -976,13 +976,13 @@ fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
         assert_eq!(keys, ["blend", "kind", "name", "opacity", "params"]);
     }
 
-    // A duplicate in the same group gets a number; another group may reuse the name.
+    // Names stay unique across all groups, while the requested group is honoured.
     let r = s.execute("color.presets.new", json!({"name": "Look A"})).unwrap();
     assert_eq!(r["name"], "Look A 2");
     s.execute("color.presets.edit", json!({"action": "newGroup", "name": "Other"})).unwrap();
     let r = s.execute("color.presets.new", json!({"name": "Look A", "group": "  Other  "})).unwrap();
     assert_eq!(r["group"], "Other");
-    assert_eq!(r["name"], "Look A", "uniqueness is per group");
+    assert_eq!(r["name"], "Look A 3", "the next free suffix across every group");
     // An omitted name takes the next free automatic one.
     let r = s.execute("color.presets.new", json!({})).unwrap();
     assert_eq!(r["name"], "Look 1");
