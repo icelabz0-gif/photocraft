@@ -45,6 +45,11 @@ pub struct PresetUi {
     /// In-place rename: (panel, preset or "group:<name>", text).
     #[serde(skip)]
     pub renaming: Option<(String, String, String)>,
+    /// Folders a panel asked to open although the first folder is the only one that starts open
+    /// (a preset just saved into another folder, a new group), by `panel/name`. Header clicks
+    /// clear the entry, so the folder closes like any other. Session-only: not saved.
+    #[serde(skip)]
+    pub(crate) open_groups: BTreeSet<String>,
 }
 
 /// Read `groupOrder` keeping what makes sense: non-object values, non-list entries and non-string
@@ -325,8 +330,9 @@ pub(crate) enum Ev {
 }
 
 fn group_open(st: &PresetUi, panel: &str, gi: usize, name: &str) -> bool {
-    // Swatch groups are small and all start open (Photoshop); other panels open the first only.
-    (gi == 0 || panel == crate::swatches_ui::PANEL) != st.toggled.contains(&format!("{panel}/{name}"))
+    let key = format!("{panel}/{name}");
+    // A panel can open a folder that is not the first (Color Presets after a save).
+    st.open_groups.contains(&key) || (gi == 0 || panel == crate::swatches_ui::PANEL) != st.toggled.contains(&key)
 }
 
 /// The footer's height (gap, size slider and buttons) before it has been measured.
@@ -417,7 +423,10 @@ pub(crate) fn browser(
                 ui.painter().text(pos2(hr.left() + 37.0, hr.center().y), Align2::LEFT_CENTER, &g.name, FontId::proportional(11.5), t.text);
                 if hresp.clicked() {
                     let k = format!("{panel}/{}", g.name);
-                    if !st.toggled.remove(&k) {
+                    if st.open_groups.remove(&k) {
+                        // Closing a folder a panel just opened.
+                        st.toggled.remove(&k);
+                    } else if !st.toggled.remove(&k) {
                         st.toggled.insert(k);
                     }
                 }

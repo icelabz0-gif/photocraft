@@ -3825,3 +3825,27 @@ curves	Smooth	Làm mượt
 	Create Basic Color layer failed: {error}	Tạo lớp Chỉnh màu thất bại: {error}
 	Reset failed: {error}	Đặt lại thất bại: {error}
 	Mask change failed: {error}	Đổi mặt nạ thất bại: {error}
+# Color Presets panel (Window › Color Presets), its window.toggle.colorPresets command and the
+# Basic Color panel's Presets… button
+	Color Presets	Preset màu
+	Save current look	Lưu look hiện tại
+	Create new color preset from the current look	Tạo preset màu mới từ look hiện tại
+	Open an image to apply or save a look.	Mở một ảnh để áp dụng hoặc lưu look.
+	No presets yet. Save the current look to create one.	Chưa có preset nào. Hãy lưu look hiện tại để tạo preset đầu tiên.
+	No visible color/tone layers to save.	Không có lớp màu/tông nào đang hiện để lưu.
+	Applied preset “{name}”.	Đã áp dụng preset “{name}”.
+	Apply preset failed: {error}	Áp dụng preset thất bại: {error}
+	Saved preset “{name}”.	Đã lưu preset “{name}”.
+	Saved preset “{name}”; skipped {count} unsupported layer(s).	Đã lưu preset “{name}”; bỏ qua {count} lớp không hỗ trợ.
+	Save preset failed: {error}	Lưu preset thất bại: {error}
+	Preset edit failed: {error}	Sửa preset thất bại: {error}
+	Apply to Images	Áp cho nhiều ảnh
+	Include subfolders	Gồm thư mục con
+	Run	Chạy
+	Running…	Đang chạy…
+	Select a preset first.	Hãy chọn một preset trước.
+	Choose a different output folder.	Hãy chọn thư mục đích khác thư mục nguồn.
+	Batch failed: every file reported an error.	Hàng loạt thất bại: mọi tệp đều báo lỗi.
+	{n} layers	{n} lớp
+	1 layer	1 lớp
+	Presets…	Preset…

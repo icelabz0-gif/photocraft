@@ -398,6 +398,9 @@ pub struct Panels {
     /// Window › Basic Color: a floating window around a Basic Color adjustment layer.
     #[serde(default)]
     pub basic_color: bool,
+    /// Window › Color Presets: the global colour/tone look library (a floating window).
+    #[serde(default)]
+    pub color_presets: bool,
     /// Window › Character / Paragraph: the Character | Paragraph dock group (#150).
     #[serde(default)]
     pub character: bool,
@@ -439,6 +442,7 @@ impl Default for Panels {
             brushes: false,
             retouch_ai: false,
             basic_color: false,
+            color_presets: false,
             character: false,
             toolbar_double: false,
             dock: true,
@@ -1312,6 +1316,9 @@ pub struct UiState {
     /// Basic Color: the floating panel's last command error.
     #[serde(default)]
     pub basic_color: crate::basic_color_panel::BasicColorState,
+    /// Color Presets: the batch fields, section state and status lines.
+    #[serde(default)]
+    pub color_presets: crate::color_presets_panel::ColorPresetsState,
     /// Marquee options-bar mode: 0 new, 1 add, 2 subtract, 3 intersect (modifier keys override).
     #[serde(default)]
     pub selection_mode: u8,
@@ -1440,6 +1447,7 @@ impl Default for UiState {
             brushes_panel: Default::default(),
             retouch_ai: Default::default(),
             basic_color: Default::default(),
+            color_presets: Default::default(),
             selection_mode: 0,
             tool_options: ToolOptions::default(),
             polygon: Vec::new(),

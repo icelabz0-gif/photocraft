@@ -59,6 +59,7 @@ pub(crate) mod text {
     pub const OPEN_IMAGE_TO_START: &str = "Open an image to start";
     pub const OTHER_LAYER: &str = "The active layer isn't a Basic Color layer. Create one above it, then paint the region to adjust.";
     pub const CREATE: &str = "Create Basic Color layer";
+    pub const PRESETS: &str = "Presets…";
     pub const RESET: &str = "Reset";
     pub const MASK: &str = "Mask";
     pub const NO_PIXEL_MASK: &str = "No pixel mask yet. Apply to whole image adds one; then paint to narrow it.";
@@ -87,6 +88,7 @@ pub(crate) mod text {
         OPEN_IMAGE_TO_START,
         OTHER_LAYER,
         CREATE,
+        PRESETS,
         RESET,
         MASK,
         NO_PIXEL_MASK,
@@ -288,6 +290,10 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::button(ui, "x", 20.0, false, tl!(text::CLOSE)).clicked() {
                         open = false;
+                    }
+                    // Color Presets lives in its own window; this only opens it, never toggles it off.
+                    if widgets::compact_button(ui, tl!(text::PRESETS), 20.0).clicked() {
+                        app.ui.panels.color_presets = true;
                     }
                 });
             });

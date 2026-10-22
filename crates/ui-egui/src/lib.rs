@@ -58,6 +58,7 @@ pub mod chrome_ui;
 pub mod cjk_fonts;
 pub mod clip_line_ui;
 pub mod color_picker_ui;
+pub mod color_presets_panel;
 pub mod color_range_ui;
 pub mod comps_ui;
 pub mod control;
@@ -2084,6 +2085,7 @@ impl eframe::App for PhotocraftApp {
         brush_panel::window(self, &ctx);
         retouch_ai_panel::window(self, &ctx);
         basic_color_panel::window(self, &ctx);
+        color_presets_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);
         type_panels_ui::windows(self, &ctx);

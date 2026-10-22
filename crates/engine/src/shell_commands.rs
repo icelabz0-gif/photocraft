@@ -59,6 +59,7 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("window.toggle.brushes", "Brushes", &["Window"], None),
     ("window.toggle.retouchAI", "Retouch AI", &["Window"], None),
     ("window.toggle.basicColor", "Basic Color", &["Window"], None),
+    ("window.toggle.colorPresets", "Color Presets", &["Window"], None),
     ("window.toggle.navigator", "Navigator", &["Window"], None),
     ("window.toggle.toolbar", "Tools", &["Window"], None),
     // Photoshop's Tab and ⇧Tab: all panels (Tools, options bar and the dock), or only the dock.
