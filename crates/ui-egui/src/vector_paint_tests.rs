@@ -489,3 +489,34 @@ fn options_bar_fill_swatch_recolours_the_shape_just_drawn() {
     h.state_mut().run("edit.undo", json!({})).unwrap();
     assert_eq!(shape(h.state()).fill, original.fill);
 }
+
+/// #8741: the options bar's Fill/Stroke swatch is rounded, so its transparency checker must be
+/// too; square checker cells showed their light corners past the rounded fill on dark themes.
+#[test]
+fn options_bar_swatch_checker_keeps_to_the_rounded_corners() {
+    let mut half = photocraft_doc::Color::BLACK;
+    half.alpha = 0.5;
+    for fill in [Some(photocraft_doc::Fill::Solid(half)), None] {
+        let mut h = Harness::builder().with_size(egui::vec2(120.0, 60.0)).build_ui_state(
+            |ui, fill: &mut Option<photocraft_doc::Fill>| {
+                swatch(ui, fill.as_ref(), [0.0, 0.0, 0.0, 1.0], "Fill");
+            },
+            fill.clone(),
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Pro);
+        h.run_steps(2);
+        let swatch = h.get_by_label("Fill").rect();
+        let panel = h.ctx.global_style().visuals.panel_fill;
+        let square: Vec<egui::Rect> = h
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                // The harness's own panel background behind the widget is not the swatch's.
+                egui::Shape::Rect(r) if swatch.contains_rect(r.rect) && r.corner_radius == egui::CornerRadius::ZERO && r.fill != panel => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert!(square.is_empty(), "{fill:?}: square shapes inside the rounded swatch {swatch:?}: {square:?}");
+    }
+}
