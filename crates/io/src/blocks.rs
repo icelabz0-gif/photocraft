@@ -188,7 +188,8 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
 /// PSD colour descriptors have no alpha. PhotoCraft writes `pcAl` (0..1) so shape fill
 /// opacity round-trips (#6180). Photoshop ignores the key.
 fn with_pc_alpha(mut c: Color, d: &Descriptor) -> Color {
-    if let Some(a) = num(d.get("pcAl")) {
+    // A hostile file's NaN or infinity would survive the clamp: keep the colour opaque instead.
+    if let Some(a) = num(d.get("pcAl")).filter(|a| a.is_finite()) {
         c.alpha = (a as f32).clamp(0.0, 1.0);
     }
     c
@@ -1021,6 +1022,18 @@ mod tests {
         let Fill::Solid(opaque) = super::fill_from_desc(&k, &d).unwrap() else { panic!("solid") };
         assert!((opaque.alpha - 1.0).abs() < 1e-6);
         assert!(super::color_to_desc(&c).get("pcAl").is_none(), "generic colour descriptors have no pcAl");
+    }
+
+    #[test]
+    fn non_finite_photocraft_alpha_is_ignored() {
+        use photocraft_color::Color;
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let d = super::color_to_desc(&Color::rgb(0.2, 0.4, 0.6)).with("pcAl", Value::Double(bad));
+            let c = super::color_from_desc(&d).unwrap();
+            assert_eq!(c.alpha, 1.0, "pcAl {bad}");
+        }
+        let d = super::color_to_desc(&Color::rgb(0.2, 0.4, 0.6)).with("pcAl", Value::Double(0.5));
+        assert!((super::color_from_desc(&d).unwrap().alpha - 0.5).abs() < 1e-6);
     }
 
     #[test]
