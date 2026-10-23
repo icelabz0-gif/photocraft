@@ -121,7 +121,8 @@ pub fn start() {
 
 /// Installs `globalThis.photocraft = { command }` for automation: `await photocraft.command(id,
 /// paramsJson)` resolves to the result as JSON text or rejects with the error (`crate::command`).
-/// Installed once the app exists, so its presence means commands can run.
+/// Installed once the app exists, so its presence means commands can run. `web.openUrl` and
+/// `web.exportBytes` move files in and out as bytes (`crate::transfer`); the downloads start here.
 fn expose_command(commands: Rc<RefCell<crate::command::Commands>>, ctx: egui::Context) {
     use js_sys::{Object, Promise, Reflect};
     use wasm_bindgen::{JsValue, closure::Closure};
@@ -136,6 +137,7 @@ fn expose_command(commands: Rc<RefCell<crate::command::Commands>>, ctx: egui::Co
             let Some(params) = params else { return fail("params must be JSON text, e.g. JSON.stringify({width: 1080})") };
             let Ok(mut queue) = commands.try_borrow_mut() else { return fail("PhotoCraft is busy; try again") };
             let (resolve, reject) = (resolve.clone(), reject.clone());
+            let wake = ctx.clone();
             queue.submit(
                 &id,
                 &params,
@@ -146,7 +148,20 @@ fn expose_command(commands: Rc<RefCell<crate::command::Commands>>, ctx: egui::Co
                     };
                 }),
             );
-            ctx.request_repaint();
+            for fetch in queue.take_fetches() {
+                let (commands, ctx) = (commands.clone(), ctx.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    let bytes = fetch_bytes(&fetch.url, None).await.map_err(|e| format!("couldn't download {}: {e}", fetch.url));
+                    // Borrows of the queue never span an await, so this one is free.
+                    match commands.try_borrow_mut() {
+                        Ok(mut queue) => queue.fetched(fetch.id, bytes),
+                        Err(_) => log::error!("photocraft.command: lost the download of {}", fetch.url),
+                    }
+                    ctx.request_repaint();
+                });
+            }
+            drop(queue);
+            wake.request_repaint();
         })
     });
     let api = Object::new();
@@ -405,7 +420,7 @@ impl eframe::App for WebShell {
         // The app drained the control channel above: settle the calls it answered. A command
         // running as a background job answers on a later frame, so keep frames coming meanwhile.
         if let Ok(mut commands) = self.commands.try_borrow_mut() {
-            commands.poll();
+            commands.poll(&mut self.app);
             if commands.waiting() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }

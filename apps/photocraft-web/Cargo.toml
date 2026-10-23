@@ -26,6 +26,7 @@ photocraft-doc = { workspace = true }
 photocraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }
+base64 = "0.22"
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

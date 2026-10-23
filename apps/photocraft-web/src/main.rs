@@ -24,6 +24,9 @@ mod preset_bridge;
 #[cfg(any(target_arch = "wasm32", test))]
 mod command;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod transfer;
+
 #[cfg(target_arch = "wasm32")]
 mod indexed_presets;
 
