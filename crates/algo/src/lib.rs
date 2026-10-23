@@ -25,6 +25,7 @@ mod blur2;
 pub mod camera_raw;
 pub mod color_to_alpha;
 pub mod content_aware;
+mod darkroom;
 mod denoise;
 pub mod dff;
 pub mod direct;
@@ -36,6 +37,7 @@ pub mod faces;
 pub mod features;
 mod fxutil;
 mod gallery;
+mod glitch;
 pub mod hdr;
 pub mod histogram;
 mod image;
@@ -86,6 +88,8 @@ pub mod warp;
 pub mod wideangle;
 
 pub use artistic::{GALLERY_CATEGORIES, GalleryEffect, GalleryFilter, GalleryParam, GalleryParamKind};
+pub use darkroom::NegativeMode;
+pub use glitch::{BeamDitherSpec, BeamMode, DitherAlgorithm};
 pub use image::{Edge, Image};
 pub use params_ext::*;
 
@@ -544,6 +548,47 @@ pub enum FilterParams {
         opacity_threshold: f32,
     },
 
+    // ---- Darkroom (ported from Photoslop) ----
+    /// Amount 0–100 %.
+    Sepia {
+        amount: f32,
+    },
+    /// Strength 1–100: luma kept, chroma blurred by three box passes of `strength / 10` px.
+    ChromaDenoise {
+        strength: f32,
+    },
+    /// Develops a scanned negative; `clip` % of pixels discarded at each end of the histogram.
+    FilmNegative {
+        mode: NegativeMode,
+        clip: f32,
+    },
+    // ---- Glitch (ported from Photoslop) ----
+    /// Luma band 0–255 whose contiguous runs are sorted along rows (or columns).
+    PixelSort {
+        low: f32,
+        high: f32,
+        vertical: bool,
+        /// Bright first.
+        reverse: bool,
+    },
+    /// Macroblock px (4–64), corrupted blocks 0–1, drift px, chromatic aberration px.
+    Datamosh {
+        block: u32,
+        amount: f32,
+        drift: u32,
+        aberration: f32,
+        seed: u32,
+    },
+    /// Pixel size 1–64, colour levels 2–8 per channel, 4×4 ordered dither.
+    RetroConsole {
+        size: u32,
+        levels: u32,
+        dither: bool,
+    },
+    /// One-bit rendering with a CRT beam model (or a classic dither).
+    BeamDither {
+        spec: BeamDitherSpec,
+    },
     // ---- Video ----
     /// Removes the even (or odd) lines and rebuilds them by interpolation (or duplication).
     DeInterlace {
@@ -686,6 +731,13 @@ impl FilterParams {
             FilterParams::HsbHsl { .. } => "HSB/HSL",
             FilterParams::ColorToAlpha { .. } => "Color to Alpha",
             FilterParams::DeInterlace { .. } => "De-Interlace",
+            FilterParams::Sepia { .. } => "Sepia",
+            FilterParams::ChromaDenoise { .. } => "Chroma Denoise",
+            FilterParams::FilmNegative { .. } => "Film Negative",
+            FilterParams::PixelSort { .. } => "Pixel Sort",
+            FilterParams::Datamosh { .. } => "Datamosh",
+            FilterParams::RetroConsole { .. } => "Retro Console",
+            FilterParams::BeamDither { .. } => "Beam Dither",
             FilterParams::NtscColors => "NTSC Colors",
             FilterParams::FilterGallery { effects } => match effects.as_slice() {
                 [one] => one.filter.name(),
@@ -699,6 +751,12 @@ impl FilterParams {
 fn halo_ext(p: &FilterParams) -> Halo {
     let r = |v: f32| Halo::Radius((v.max(0.0).ceil() as i32).saturating_add(1));
     match p {
+        FilterParams::Sepia { .. } => Halo::Radius(0),
+        FilterParams::ChromaDenoise { strength } => Halo::Radius(3 * darkroom::denoise_radius(*strength) + 1),
+        FilterParams::RetroConsole { size, .. } => Halo::Radius((*size).clamp(1, 4096) as i32 + 1),
+        // Whole-image work: sorted runs span the bounds, histograms and error diffusion read it all,
+        // and a mosh's motion vectors accumulate down every row above.
+        FilterParams::FilmNegative { .. } | FilterParams::PixelSort { .. } | FilterParams::Datamosh { .. } | FilterParams::BeamDither { .. } => Halo::Bounds,
         FilterParams::ColorHalftone { max_radius, .. } => r(max_radius * 3.0),
         FilterParams::Crystallize { cell_size, .. } => r(cell_size.max(1.0) * 3.0),
         FilterParams::Pointillize { cell_size, .. } => r(cell_size.max(1.0) * 2.0),
@@ -923,6 +981,11 @@ pub fn kernel(params: &FilterParams, src: &Image, out: Rect, ctx: &Ctx) -> Vec<f
             color_to_alpha::color_to_alpha(src, out, ctx, *color, *transparency_threshold, *opacity_threshold)
         }
         FilterParams::DeInterlace { eliminate_even, interpolate } => video::deinterlace(src, out, ctx, *eliminate_even, *interpolate),
+        FilterParams::Sepia { amount } => darkroom::sepia(src, out, ctx, *amount),
+        FilterParams::ChromaDenoise { strength } => darkroom::chroma_denoise(src, out, ctx, *strength),
+        FilterParams::Datamosh { block, amount, drift, aberration, seed } => glitch::datamosh(src, out, ctx, *block, *amount, *drift, *aberration, *seed),
+        FilterParams::RetroConsole { size, levels, dither } => glitch::retro_console(src, out, ctx, *size, *levels, *dither),
+        FilterParams::FilmNegative { .. } | FilterParams::PixelSort { .. } | FilterParams::BeamDither { .. } => glitch::run_prepared(params, src, out, ctx),
         FilterParams::NtscColors => video::ntsc(src, out, ctx),
         FilterParams::FilterGallery { effects } => artistic_fx::run(effects, src, out, ctx),
     }
@@ -1128,6 +1191,17 @@ fn apply_tiled_with_impl(
         }
         _ => None,
     };
+    // Global filters whose whole-image work (sorting runs, histograms, error diffusion) must run
+    // once per filter, not once per tile: prepared from the shared bounds image, gathered per tile.
+    let prepared = match &shared {
+        Some(s) if glitch::Prepared::handles(params) => {
+            if ctl.cancelled() {
+                return None;
+            }
+            glitch::Prepared::new(params, s, &ctx)
+        }
+        _ => None,
+    };
     let mut tiles = Vec::new();
     let mut y = area.y0;
     while y < area.y1 {
@@ -1174,8 +1248,9 @@ fn apply_tiled_with_impl(
                 None if ctl.cancelled() => None,
                 None => Some(kernel(params, src, *t, &ctx)),
             },
-            (None, None) => match *params {
-                FilterParams::UnsharpMask { amount, radius, threshold } => sharpen::exact::run(src, *t, &ctx, amount, radius, threshold, ctl),
+            (None, None) => match (params, &prepared) {
+                (FilterParams::UnsharpMask { amount, radius, threshold }, _) => sharpen::exact::run(src, *t, &ctx, *amount, *radius, *threshold, ctl),
+                (_, Some(p)) => Some(p.run(src, *t, &ctx)),
                 _ => Some(kernel(params, src, *t, &ctx)),
             },
         }) else {
@@ -1340,6 +1415,8 @@ mod tests;
 #[cfg(test)]
 mod tests_ext;
 
+#[cfg(test)]
+mod tests_glitch;
 #[cfg(test)]
 mod tests_mosaic;
 
