@@ -931,7 +931,8 @@ fn alt_choosing_an_adjustment_from_the_menu_reopens_the_last_settings() {
     let choose = |h: &mut Harness<'_, PhotocraftApp>, m: Modifiers| {
         h.get_by_label("Image").click();
         h.run_steps(3);
-        let adjustments = h.get_by_label_contains("Adjustments").rect().center();
+        // The Image menu's row, not the Adjustments panel's tab in the dock on the right.
+        let adjustments = h.get_all_by_label_contains("Adjustments").map(|n| n.rect()).min_by(|a, b| a.left().total_cmp(&b.left())).unwrap().center();
         h.hover_at(adjustments);
         h.run_steps(30);
         let at = h.get_by_label_contains("Levels…").rect().center();
