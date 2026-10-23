@@ -5,6 +5,7 @@ use photocraft_geom::{Affine, Size};
 use photocraft_gpu::Compositor;
 use std::time::Instant;
 
+/// Translate the fixture's paths and raster caches together, as a group drag preview does.
 fn moved(base: &Document, offset: i32) -> Document {
     let mut doc = base.clone();
     if let Some(group) = doc.layers.last_mut().and_then(Layer::children_mut) {
@@ -19,14 +20,15 @@ fn moved(base: &Document, offset: i32) -> Document {
     }
     doc
 }
+/// Measure synchronized drag frames; quick mode also verifies fresh-render parity.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quick = std::env::args().any(|a| a == "--quick");
     let size = if quick { Size::new(1600, 1200) } else { Size::new(6000, 4000) };
     let mut doc = Document::with_background("styled shapes", size, ColorMode::Rgb, SampleType::U8, Color::WHITE);
     let mut children = Vec::new();
     for i in 0..12 {
-        let x = 100.0 + f64::from(i % 4) * f64::from(size.width) / 5.0;
-        let y = 100.0 + f64::from(i / 4) * f64::from(size.height) / 4.0;
+        let x = 100.1 + f64::from(i % 4) * f64::from(size.width) / 5.0;
+        let y = 100.2 + f64::from(i / 4) * f64::from(size.height) / 4.0;
         let w = f64::from(size.width) / 7.0;
         let h = f64::from(size.height) / 6.0;
         let mut shape = ShapeLayer {
