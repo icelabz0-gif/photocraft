@@ -915,3 +915,41 @@ fn alt_adjustment_shortcut_reopens_the_last_confirmed_settings() {
     assert_eq!(logged(&h), ["image.adjustments.desaturate"], "a key assigned to another command is that command's");
     assert!(h.state().ui.dialogs.is_empty());
 }
+
+/// #8900: in Photoshop ⌥ held while choosing an Image › Adjustments item opens it at its last
+/// settings too; a plain click still opens it at the defaults.
+#[test]
+fn alt_choosing_an_adjustment_from_the_menu_reopens_the_last_settings() {
+    use photocraft_doc::ColorMode;
+    use photocraft_engine::adjust_params::{default_for, from_params, to_params};
+    let mut h = harness();
+    h.state_mut().session.edit_prefs(|p| {
+        p.dialogs.insert("image.adjustments.levels".into(), json!({"inBlack": 30, "gamma": 1.3}));
+    });
+    let levels = to_params(&from_params("levels", &json!({"inBlack": 30, "gamma": 1.3}), None, ColorMode::Rgb).unwrap());
+    let defaults = to_params(&default_for("levels", ColorMode::Rgb).unwrap());
+    let choose = |h: &mut Harness<'_, PhotocraftApp>, m: Modifiers| {
+        h.get_by_label("Image").click();
+        h.run_steps(3);
+        let adjustments = h.get_by_label_contains("Adjustments").rect().center();
+        h.hover_at(adjustments);
+        h.run_steps(30);
+        let at = h.get_by_label_contains("Levels…").rect().center();
+        h.hover_at(at);
+        h.run_steps(2);
+        h.event(egui::Event::ModifiersChanged(m));
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: m });
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: m });
+        h.run_steps(1);
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(3);
+        let d = h.state().ui.dialogs.last().expect("Levels opened").clone();
+        assert_eq!(d.fields["__adjust"], json!("levels"));
+        crate::dialogs::cancel(h.state_mut(), d.id).unwrap();
+        h.run_steps(2);
+        (d.fields["inBlack"].clone(), d.fields["gamma"].clone())
+    };
+    assert_eq!(choose(&mut h, Modifiers::NONE), (defaults["inBlack"].clone(), defaults["gamma"].clone()), "a click opens at the defaults");
+    assert_eq!(choose(&mut h, Modifiers::ALT), (levels["inBlack"].clone(), levels["gamma"].clone()), "⌥-click opens at the last settings");
+}
