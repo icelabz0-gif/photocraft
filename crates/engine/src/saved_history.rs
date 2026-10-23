@@ -53,7 +53,8 @@ pub(crate) fn restore(st: &mut DocState, saved: &SavedHistory) {
                 d.id = id;
                 d.saved_history = None;
             }
-            HistoryState { label: s.label.clone(), doc, layers: LayerTarget { active: s.active, selected: s.selected.clone() } }
+            // `History::restore` numbers the states.
+            HistoryState { label: s.label.clone(), doc, layers: LayerTarget { active: s.active, selected: s.selected.clone() }, id: 0 }
         })
         .collect();
     let current = LayerTarget { active: saved.current_active, selected: saved.current_selected.clone() };

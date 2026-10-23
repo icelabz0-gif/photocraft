@@ -1,9 +1,9 @@
 //! Undo history saved in the bundle (`history.json`, #6053): round trips, the size budget, and
 //! every way a history can be unusable without the document failing to open.
 
-mod common;
 use std::sync::Arc;
 
+use crate::common;
 use common::*;
 use photocraft_color::{Color, ColorMode, SampleType};
 use photocraft_doc::{Document, Layer, LayerId, SavedHistory, SavedState, Size};
