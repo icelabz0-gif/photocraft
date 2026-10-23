@@ -1356,3 +1356,16 @@ fn strokes_that_keep_their_coverage_do_not_warn() {
     let timed = s.execute("paint.stroke", json!({"points": [[20, 20], [380, 20]], "size": 10, "spacing": 5, "brush": {"spacingEnabled": false}})).unwrap();
     assert!(quiet(&timed), "{timed}");
 }
+
+/// #8389: whether the first dab covers the path is judged by that dab's diameter, not the brush
+/// size. With the default pressure sizing, a first point at pressure 0.2 makes a `size: 150` dab
+/// 30 px wide, so `spacing: 5` steps 150 px and a 50 px path reaches past the dab and still warns.
+#[test]
+fn a_light_first_point_is_judged_by_its_own_dab_diameter() {
+    let mut s = session(400, 400);
+    let r = s.execute("paint.stroke", json!({"points": [[100, 200, 0.2], [150, 200, 0.2]], "size": 150, "spacing": 5, "color": "#ff0000"})).unwrap();
+    assert_eq!(r["pitch"].as_f64(), Some(150.0), "{r}");
+    let warnings = stroke_warnings(&r);
+    assert_eq!(warnings.len(), 1, "{r}");
+    assert!(warnings[0].contains("30.0 px") && warnings[0].contains("150.0 px apart") && warnings[0].contains("50.0 px path"), "{r}");
+}
