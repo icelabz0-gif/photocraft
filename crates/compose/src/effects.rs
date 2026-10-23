@@ -466,19 +466,107 @@ fn dist_outside_by(s: &Map, m: Metric) -> Vec<f32> {
     })
 }
 
-/// A segment of the half-coverage contour, relative to its unit cell.
+/// A segment of the half-coverage contour, in map coordinates.
 #[derive(Clone, Copy)]
 struct StrokeEdge {
-    a: [f32; 2],
-    b: [f32; 2],
+    a: [f64; 2],
+    b: [f64; 2],
 }
 
 impl StrokeEdge {
-    fn distance(self, x: f32, y: f32) -> f32 {
+    fn distance_squared(self, x: f64, y: f64) -> f64 {
         let (vx, vy) = (self.b[0] - self.a[0], self.b[1] - self.a[1]);
         let length = vx * vx + vy * vy;
         let t = if length > 0.0 { ((x - self.a[0]) * vx + (y - self.a[1]) * vy) / length } else { 0.0 }.clamp(0.0, 1.0);
-        (x - self.a[0] - t * vx).hypot(y - self.a[1] - t * vy)
+        let (dx, dy) = (x - self.a[0] - t * vx, y - self.a[1] - t * vy);
+        dx * dx + dy * dy
+    }
+}
+
+/// Balanced bounds tree for exact nearest-segment queries. A nearest raster cell need not
+/// contain the nearest segment, even among its immediate neighbours on a smooth curve.
+struct StrokeEdges {
+    edges: Vec<StrokeEdge>,
+    nodes: Vec<StrokeEdgeNode>,
+}
+
+struct StrokeEdgeNode {
+    bounds: [f64; 4],
+    range: std::ops::Range<usize>,
+    children: Option<[usize; 2]>,
+}
+
+impl StrokeEdges {
+    fn new(mut edges: Vec<StrokeEdge>) -> Self {
+        fn build(edges: &mut [StrokeEdge], start: usize, nodes: &mut Vec<StrokeEdgeNode>, depth: usize) -> usize {
+            let bounds = edges.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |mut b, e| {
+                for p in [e.a, e.b] {
+                    b[0] = b[0].min(p[0]);
+                    b[1] = b[1].min(p[1]);
+                    b[2] = b[2].max(p[0]);
+                    b[3] = b[3].max(p[1]);
+                }
+                b
+            });
+            let at = nodes.len();
+            nodes.push(StrokeEdgeNode { bounds, range: start..start + edges.len(), children: None });
+            // The contour budget bounds the normal depth below 20; also cap it explicitly.
+            if edges.len() > 8 && depth < 24 {
+                let axis = usize::from(bounds[3] - bounds[1] > bounds[2] - bounds[0]);
+                let mid = edges.len() / 2;
+                edges.select_nth_unstable_by(mid, |a, b| (a.a[axis] + a.b[axis]).total_cmp(&(b.a[axis] + b.b[axis])));
+                let (left, right) = edges.split_at_mut(mid);
+                let children = [build(left, start, nodes, depth + 1), build(right, start + mid, nodes, depth + 1)];
+                if let Some(node) = nodes.get_mut(at) {
+                    node.children = Some(children);
+                }
+            }
+            at
+        }
+        let mut nodes = Vec::new();
+        build(&mut edges, 0, &mut nodes, 0);
+        Self { edges, nodes }
+    }
+
+    fn distance(&self, x: usize, y: usize) -> f32 {
+        let (x, y) = (x as f64, y as f64);
+        let lower = |b: [f64; 4]| {
+            let (dx, dy) = ((b[0] - x).max(0.0).max(x - b[2]), (b[1] - y).max(0.0).max(y - b[3]));
+            dx * dx + dy * dy
+        };
+        let mut best = f64::INFINITY;
+        // At most one pending sibling per tree level (build caps the depth at 24).
+        let mut stack = [(0usize, 0.0f64); 32];
+        let mut count = 1;
+        while count > 0 {
+            count -= 1;
+            let (at, bound) = stack[count];
+            if bound >= best {
+                continue;
+            }
+            let Some(node) = self.nodes.get(at) else { continue };
+            if let Some([a, b]) = node.children {
+                let da = self.nodes.get(a).map_or(f64::INFINITY, |n| lower(n.bounds));
+                let db = self.nodes.get(b).map_or(f64::INFINITY, |n| lower(n.bounds));
+                // Visit the nearer child first to tighten the pruning distance.
+                for (child, bound) in if da <= db { [(b, db), (a, da)] } else { [(a, da), (b, db)] } {
+                    if bound >= best {
+                        continue;
+                    }
+                    if let Some(slot) = stack.get_mut(count) {
+                        *slot = (child, bound);
+                        count += 1;
+                    } else {
+                        return self.edges.iter().fold(best, |d, e| d.min(e.distance_squared(x, y))).sqrt() as f32;
+                    }
+                }
+            } else if let Some(edges) = self.edges.get(node.range.clone()) {
+                for edge in edges {
+                    best = best.min(edge.distance_squared(x, y));
+                }
+            }
+        }
+        best.sqrt() as f32
     }
 }
 
@@ -535,7 +623,13 @@ fn stroke_dist_outside(s: &Map, metric: Metric, reach: f32) -> Vec<f32> {
             if crossings.len() == 4 && (values.iter().sum::<f32>() >= 2.0) != (values[0] >= 0.5) {
                 crossings.rotate_left(1);
             }
-            let segments: Vec<StrokeEdge> = crossings.chunks_exact(2).map(|p| StrokeEdge { a: p[0], b: p[1] }).collect();
+            let segments: Vec<StrokeEdge> = crossings
+                .chunks_exact(2)
+                .map(|p| StrokeEdge {
+                    a: [f64::from(p[0][0]) + x as f64, f64::from(p[0][1]) + y as f64],
+                    b: [f64::from(p[1][0]) + x as f64, f64::from(p[1][1]) + y as f64],
+                })
+                .collect();
             if !segments.is_empty() {
                 if cells.len() >= MAX_EDGE_CELLS {
                     return dist_outside_by(s, metric);
@@ -549,24 +643,9 @@ fn stroke_dist_outside(s: &Map, metric: Metric, reach: f32) -> Vec<f32> {
         return dist_outside_by(s, metric);
     }
     let seeds: Vec<bool> = slot.iter().map(|&k| k != 0).collect();
-    let (distance, nearest) = edt_nearest(&seeds, s.w, s.h);
-    let edge_distance = |x: usize, y: usize| {
-        let q = nearest[y * s.w + x] as usize;
-        let (qx, qy) = ((q % s.w) as i64, (q / s.w) as i64);
-        let mut best = f32::INFINITY;
-        // The nearest cell centre need not contain the nearest segment. Every segment lies
-        // inside its unit cell, so inspect its neighbours as well (including diagonal ones).
-        for cy in (qy - 2).max(0)..=(qy + 2).min(s.h as i64 - 1) {
-            for cx in (qx - 2).max(0)..=(qx + 2).min(s.w as i64 - 1) {
-                if let Some(edges) = (slot[cy as usize * s.w + cx as usize] as usize).checked_sub(1).and_then(|k| cells.get(k)) {
-                    for edge in edges {
-                        best = best.min(edge.distance((x as i64 - cx) as f32, (y as i64 - cy) as f32));
-                    }
-                }
-            }
-        }
-        best
-    };
+    let (distance, _) = edt_nearest(&seeds, s.w, s.h);
+    let edges = StrokeEdges::new(cells.into_iter().flatten().collect());
+    let edge_distance = |x: usize, y: usize| edges.distance(x, y);
     // Reconstruct only the samples belonging to that sharp contour. Retain every other source
     // sample as a distance seed: a nearby translucent feature must still receive its own stroke,
     // and a faint isolated sample must not become a detached white arc around an unfilled gap.

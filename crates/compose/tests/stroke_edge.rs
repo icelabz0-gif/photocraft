@@ -8,6 +8,108 @@ use photocraft_compose::{render, render_tiled};
 use photocraft_doc::LayerContent;
 
 #[test]
+fn contour_distance_keeps_subpixel_precision_on_wide_maps() {
+    use photocraft_compose::effects::{FieldKind, distance_field};
+    let width = 300_016;
+    let offset = 299_000;
+    let shape = |w: usize, edge: usize| {
+        (0..w * 4)
+            .map(|i| {
+                if i % w < edge {
+                    1.0
+                } else if i % w == edge {
+                    0.3
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    let wide = distance_field(FieldKind::StrokeContourOutside, shape(width, offset + 8), width, 4, 6.0);
+    let crop = distance_field(FieldKind::StrokeContourOutside, shape(24, 8), 24, 4, 6.0);
+    for y in 0..4 {
+        for x in 9..15 {
+            let (a, b) = (wide[y * width + offset + x], crop[y * 24 + x]);
+            assert!((a - b).abs() < 1e-5, "wide/cropped distance mismatch at {x},{y}: {a}/{b}");
+        }
+    }
+}
+
+#[test]
+fn smart_placement_does_not_generate_stroke_bumps() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let source = stroke_fixture::fixture(4, depth, false);
+        let pixels = source.layers[0].children().unwrap()[0].surface().unwrap();
+        let transform = photocraft_geom::Affine { m: [0.75, 0.0, 0.0, 0.75, 0.25, 0.25] };
+        let placed = photocraft_algo::warp::place_source(pixels, source.bounds(), &transform, None).unwrap();
+        let mut d = stroke_fixture::fixture(3, depth, true);
+        let group = d.layers.first_mut().unwrap();
+        let smart = group.children_mut().unwrap().first_mut().unwrap();
+        let LayerContent::Smart(sm) = &mut smart.content else { panic!("fixture smart object") };
+        sm.cache = Some(placed);
+        let image = render(&d, d.bounds());
+        // The analytic bar expanded by 18px does not cover this point. A negative ×
+        // negative sampling lobe used to produce a fully opaque white stroke here.
+        assert_eq!(stroke_fixture::coverage_at(164.75, 108.75, 3, 18.0), 0.0);
+        let rim = image.get(165, 109);
+        assert!(rim[0] * rim[3] < 1.0 / 255.0, "{depth:?}: generated lobe became white stroke: {rim:?}");
+        let tiled = render_tiled(&d, d.bounds(), 47);
+        assert!(image.px.iter().zip(&tiled.px).all(|(a, b)| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1.0 / 255.0)));
+    }
+}
+
+#[test]
+fn nearby_translucent_detail_is_not_discarded_as_resampling() {
+    let mut d = stroke_fixture::fixture(3, SampleType::U8, false);
+    let group = d.layers.first_mut().unwrap();
+    let smart = group.children_mut().unwrap().first_mut().unwrap();
+    let LayerContent::Smart(sm) = &mut smart.content else { panic!("fixture smart object") };
+    // A quarter-opaque separate detail at the same distance as a filter lobe.
+    // Increasing a spatial exclusion radius must not silently discard this feature.
+    sm.cache.as_mut().unwrap().write_pixel(294, 200, &[0.1, 0.5, 0.85, 0.25]);
+    let image = render(&d, d.bounds());
+    assert!(image.get(304, 186)[3] > 0.8, "nearby translucent detail lost its stroke: {:?}", image.get(304, 186));
+}
+
+#[test]
+fn circular_group_stroke_has_no_dents_from_the_distance_search() {
+    let mut d = stroke_fixture::fixture(3, SampleType::U8, false);
+    let group = d.layers.first_mut().unwrap();
+    let smart = group.children_mut().unwrap().first_mut().unwrap();
+    let LayerContent::Smart(sm) = &mut smart.content else { panic!("fixture smart object") };
+    let pixels = sm.cache.as_mut().unwrap();
+    let coverage = |x: u32, y: u32, radius: f64| {
+        let distance = (f64::from(x) + 0.5 - 294.25).hypot(f64::from(y) + 0.5 - 294.125);
+        if (distance - radius).abs() > 0.71 {
+            return f32::from(distance < radius);
+        }
+        let mut hits = 0;
+        for sy in 0..32 {
+            for sx in 0..32 {
+                let px = f64::from(x) + (f64::from(sx) + 0.5) / 32.0 - 294.25;
+                let py = f64::from(y) + (f64::from(sy) + 0.5) / 32.0 - 294.125;
+                hits += u32::from(px.hypot(py) < radius);
+            }
+        }
+        hits as f32 / 1024.0
+    };
+    for y in 0..588 {
+        for x in 0..588 {
+            pixels.write_pixel(x, y, &[0.1, 0.5, 0.85, coverage(x as u32, y as u32, 207.9)]);
+        }
+    }
+    let image = render(&d, d.bounds());
+    let mut worst = 0.0f32;
+    for y in 0..588 {
+        for x in 0..588 {
+            let expected = coverage(x, y, 225.9);
+            worst = worst.max((image.get(x as i32, y as i32)[3] - expected).abs());
+        }
+    }
+    assert!(worst < 0.15, "circle stroke coverage error {worst}");
+}
+
+#[test]
 fn stroke_retains_translucent_features_next_to_an_opaque_contour() {
     let mut d = stroke_fixture::fixture(1, SampleType::U8, false);
     let group = d.layers.first_mut().unwrap();

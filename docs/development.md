@@ -666,11 +666,15 @@ scripts/fetch-corpus.sh            # the same as cargo xtask corpus --all
 For shareable layer-style regression artwork, run `cargo run -p photocraft-io --example
 stroke_repro -- /tmp/stroke-repro`. It generates an original blue bar in a smart object inside
 a pass-through group with a white outside stroke and black drop shadow: `master.psd`, native
-`bar.psb`, and PNG previews. The printed layer ids work with `layer.showOnly` and
+`bar.psb`, and PNG previews. Find each PSD's layer ids with `photocraft-cli info`, then use `layer.showOnly` and
 `layer.smartObjects.replaceContents`; resize the master to 588 × 588 before replacing its
-contents to exercise native-content rerendering. `cargo test -p photocraft-compose --test
+contents to exercise native-content rerendering. `shifted-master.psd` and `shifted.png` also
+exercise a 0.75-scale placement with a quarter-pixel translation, where negative cubic lobes
+can create faint alpha samples that an outside stroke amplifies. `cargo test -p photocraft-compose --test
 stroke_edge` checks the outline against procedural pixel-area coverage at 8, 16 and 32 bits,
-including a resampled cache, rounded corners, translucent details, shadows and tiled renders.
+including native placement, circular contours, a resampled cache, rounded corners, translucent
+details, shadows and tiled renders. Smart placement keeps alpha empty when it has no positive
+source-tap support; an authored faint sample remains eligible regardless of its opacity.
 `cargo run --release -p photocraft-compose --example bench_stroke_edge -- 25` measures cold
 composition of the same artwork at 4900 × 4900 (24 MP).
 
@@ -697,7 +701,7 @@ effect descriptors. Findings so far: fill-layer gradients are framed by the laye
 Photoshop's gradient Smoothness is a Catmull-Rom blend and "Perceptual" interpolation is Oklab
 (baked into dense stops on import, `crates/io/src/gradient_bake.rs`); a shape layer's vector
 stroke is drawn above its clipped layers; linked effect patterns tile from the layer's `fxrp`
-reference point; sharp antialiased group outside strokes offset the subpixel coverage contour, while
+reference point; sharp antialiased group outside strokes use exact distances to subpixel contour segments, while
 hard/soft edges retain alpha-seeded distances (5 × 5 chamfer below 20 px, Euclidean above it);
 interior effects keep the layer's alpha; outside strokes blend onto the backdrop with
 their own modes, an upper stroke covering lower ones.

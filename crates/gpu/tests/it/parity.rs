@@ -28,6 +28,22 @@ fn smart_group_oblique_stroke_and_shadow_match_cpu() {
     }
 }
 
+#[test]
+fn fractionally_placed_smart_group_stroke_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let source = stroke_fixture::fixture(4, depth, false);
+        let pixels = source.layers[0].children().unwrap()[0].surface().unwrap();
+        let transform = photocraft_geom::Affine { m: [0.75, 0.0, 0.0, 0.75, 0.25, 0.25] };
+        let cache = photocraft_algo::warp::place_source(pixels, source.bounds(), &transform, None).unwrap();
+        let mut d = stroke_fixture::fixture(3, depth, true);
+        let smart = d.layers[0].children_mut().unwrap().first_mut().unwrap();
+        let LayerContent::Smart(sm) = &mut smart.content else { panic!("fixture smart object") };
+        sm.cache = Some(cache);
+        fx_check(&mut g, &d, &format!("fractionally placed smart group stroke, {depth:?}"));
+    }
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,

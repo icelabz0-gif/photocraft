@@ -8,6 +8,11 @@ use photocraft_raster::Surface;
 
 /// Pixel coverage of a rotated rectangle. Only edge pixels need supersampling.
 pub fn coverage(x: u32, y: u32, scale: u32, expanded: f64) -> f32 {
+    coverage_at(f64::from(x), f64::from(y), scale, expanded)
+}
+
+/// Pixel coverage at a fractional position, for a placed smart object's subpixel translation.
+pub fn coverage_at(x: f64, y: f64, scale: u32, expanded: f64) -> f32 {
     let s = f64::from(scale);
     let at = |x: f64, y: f64| {
         let (x, y) = (x - 98.0 * s, y - 98.0 * s);
@@ -15,7 +20,7 @@ pub fn coverage(x: u32, y: u32, scale: u32, expanded: f64) -> f32 {
         let (du, dv) = (u.abs() - 65.0 * s, v.abs() - 24.0 * s);
         expanded - (du.max(0.0).hypot(dv.max(0.0)) + du.max(dv).min(0.0))
     };
-    let centre = at(f64::from(x) + 0.5, f64::from(y) + 0.5);
+    let centre = at(x + 0.5, y + 0.5);
     if centre.abs() > 0.71 {
         return if centre > 0.0 { 1.0 } else { 0.0 };
     }
@@ -23,7 +28,7 @@ pub fn coverage(x: u32, y: u32, scale: u32, expanded: f64) -> f32 {
     const N: u32 = 32;
     for sy in 0..N {
         for sx in 0..N {
-            hits += u32::from(at(f64::from(x) + (f64::from(sx) + 0.5) / f64::from(N), f64::from(y) + (f64::from(sy) + 0.5) / f64::from(N)) >= 0.0);
+            hits += u32::from(at(x + (f64::from(sx) + 0.5) / f64::from(N), y + (f64::from(sy) + 0.5) / f64::from(N)) >= 0.0);
         }
     }
     hits as f32 / (N * N) as f32
