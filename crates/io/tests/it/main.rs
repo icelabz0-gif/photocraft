@@ -72,5 +72,6 @@ mod tiff_layers;
 mod tiff_pages;
 mod tiff_type_geometry;
 mod vector;
+mod vibrance_method;
 mod xcf;
 mod xmp_export;
