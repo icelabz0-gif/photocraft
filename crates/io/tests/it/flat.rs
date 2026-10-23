@@ -554,6 +554,58 @@ fn transparency_is_composited_over_white_for_formats_without_alpha() {
     assert!(!r.warnings.iter().any(|w| w.contains("composited")), "{:?}", r.warnings);
 }
 
+/// JPEG Options' Matte: transparent pixels take the matte colour and half-transparent ones blend
+/// with it, in the document's own colour model (CMYK as inks); opaque pixels keep theirs.
+#[test]
+fn transparency_is_composited_over_the_matte_colour() {
+    let red = photocraft_doc::Color::rgb(1.0, 0.0, 0.0);
+    let rgb: [&[f32]; 3] = [&[0.0, 0.0, 0.0, 0.0], &[0.0, 0.0, 1.0, 0.5], &[0.0, 0.63, 0.0, 1.0]];
+    let gray: [&[f32]; 2] = [&[0.0, 0.0], &[0.0, 0.5]];
+    let cmyk: [&[f32]; 2] = [&[1.0, 1.0, 1.0, 1.0, 0.0], &[0.0, 0.0, 0.0, 1.0, 0.5]];
+    let g = red.in_mode(ColorMode::Grayscale).c[0];
+    let k = red.in_mode(ColorMode::Cmyk).c;
+    let cases = [
+        (ColorMode::Rgb, &rgb[..], vec![vec![1.0, 0.0, 0.0], vec![0.5, 0.0, 0.5], vec![0.0, 0.63, 0.0]]),
+        (ColorMode::Grayscale, &gray[..], vec![vec![g], vec![g / 2.0]]),
+        (ColorMode::Cmyk, &cmyk[..], vec![k.to_vec(), vec![k[0] / 2.0, k[1] / 2.0, k[2] / 2.0, (k[3] + 1.0) / 2.0]]),
+    ];
+    for (mode, cols, want) in cases {
+        let what = format!("{mode:?}");
+        let opts = ExportOptions { matte: Some(red), ..ExportOptions::default() };
+        let r = export(&columns(mode, SampleType::U8, cols), "a.jpg", &opts).unwrap();
+        assert!(r.warnings.iter().any(|w| w.contains("composited over the matte colour")), "{what}: {:?}", r.warnings);
+        let back = import("a.jpg", &r.bytes).unwrap().document;
+        assert_colors(&column_pixels(&back, cols.len()), &want, 0.03, &what);
+    }
+}
+
+/// The matte colour is separated through the document's own CMYK profile, as the foreground
+/// colour is when it fills, not through the built-in coated one.
+#[test]
+fn cmyk_matte_is_separated_through_the_document_profile() {
+    use photocraft_color::convert::{CmykSpace, with_cmyk_space};
+    let profile = photocraft_cms::synth::cmyk_profile(&photocraft_cms::synth::CmykParams {
+        tvi: [0.26, 0.26, 0.26, 0.3],
+        grid_a2b: 5,
+        grid_b2a: 9,
+        ..Default::default()
+    })
+    .to_bytes();
+    let red = photocraft_doc::Color::rgb(1.0, 0.0, 0.0);
+    let space = CmykSpace::for_profile(Some(&profile));
+    assert!(space.is_some(), "the fixture profile is not the built-in one");
+    let own = with_cmyk_space(space.as_ref(), || red.in_mode(ColorMode::Cmyk).c);
+    let builtin = red.in_mode(ColorMode::Cmyk).c;
+    assert!(own.iter().zip(&builtin).any(|(a, b)| (a - b).abs() > 0.05), "{own:?} vs {builtin:?}: the two separations must differ");
+
+    let mut d = columns(ColorMode::Cmyk, SampleType::U8, &[&[1.0, 1.0, 1.0, 1.0, 0.0]]);
+    d.icc_profile = Some(profile);
+    let opts = ExportOptions { matte: Some(red), ..ExportOptions::default() };
+    let r = export(&d, "a.jpg", &opts).unwrap();
+    let back = import("a.jpg", &r.bytes).unwrap().document;
+    assert_colors(&column_pixels(&back, 1), &[own.to_vec()], 0.03, "CMYK matte");
+}
+
 /// Formats that can't embed a profile get sRGB values (what an untagged file means), converted
 /// through the colour engine, instead of values that only mean something under the dropped profile.
 #[test]
