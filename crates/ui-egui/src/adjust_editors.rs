@@ -290,8 +290,91 @@ fn basic_color_exposure(ui: &mut egui::Ui, v: &mut Value) -> Edit {
     Edit::of(&r)
 }
 
+/// Basic Color's two pages. The mixer is a tab rather than a section below the ten basic sliders
+/// so the Basic page keeps all ten sliders visible at 1440×900.
+const BASIC_COLOR_TABS: [&str; 2] = ["Basic", "Color Mixer"];
+/// The eight Color Mixer bands, in Lightroom's order and at its hue centres.
+const BASIC_COLOR_BANDS: [(&str, f32); 8] =
+    [("Red", 0.0), ("Orange", 30.0), ("Yellow", 60.0), ("Green", 120.0), ("Mint", 180.0), ("Blue", 240.0), ("Purple", 270.0), ("Pink", 300.0)];
+
+fn basic_color_tab(ui: &mut egui::Ui) -> usize {
+    let id = ui.id().with("basic-color-tab");
+    let mut tab = ui.data(|d| d.get_temp::<usize>(id)).unwrap_or(0).min(BASIC_COLOR_TABS.len() - 1);
+    ui.horizontal_wrapped(|ui| {
+        for (i, label) in BASIC_COLOR_TABS.iter().enumerate() {
+            if widgets::pill_tab(ui, label, tab == i).clicked() {
+                tab = i;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, tab));
+    tab
+}
+
+/// The Color Mixer's slider page: one of Hue / Saturation / Luminance, over the eight bands.
+fn basic_color_mixer(ui: &mut egui::Ui, v: &mut Value) -> Edit {
+    let id = ui.id().with("basic-color-mixer-tab");
+    let mut tab = ui.data(|d| d.get_temp::<usize>(id)).unwrap_or(0).min(2);
+    ui.horizontal_wrapped(|ui| {
+        for (i, label) in ["Hue", "Saturation", "Luminance"].iter().enumerate() {
+            if widgets::pill_tab(ui, label, tab == i).clicked() {
+                tab = i;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, tab));
+    let key = ["hslHue", "hslSat", "hslLum"][tab];
+    let mut values = basic_color_bands(v, key);
+    let mut e = Edit::default();
+    for (i, (name, centre)) in BASIC_COLOR_BANDS.iter().enumerate() {
+        let mut x = values[i].clamp(-100.0, 100.0);
+        let gestures = widgets::RowGestures { reset: Some(0.0), wheel_step: None, ..Default::default() };
+        let r = ui
+            .horizontal(|ui| {
+                let (swatch, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
+                ui.painter().rect_filled(swatch, 2.0, basic_color_band_color(*centre));
+                widgets::slider_row_compact(ui, name, &mut x, -100.0..=100.0, "", gestures, None)
+            })
+            .inner;
+        if r.changed() {
+            values[i] = x.round();
+        }
+        e.add(Edit::of(&r));
+    }
+    if e.changed {
+        v[key] = json!(values);
+    }
+    e
+}
+
+/// The eight values of one mixer array; a missing or malformed array reads as neutral.
+fn basic_color_bands(v: &Value, key: &str) -> [f32; 8] {
+    let a = v.get(key).and_then(Value::as_array);
+    std::array::from_fn(|i| a.and_then(|a| a.get(i)).and_then(Value::as_f64).map_or(0.0, |x| x as f32))
+}
+
+/// A saturated swatch for a mixer band at `hue` degrees.
+fn basic_color_band_color(hue: f32) -> Color32 {
+    let h = (hue.rem_euclid(360.0)) / 60.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    Color32::from_rgb((r * 220.0) as u8, (g * 220.0) as u8, (b * 220.0) as u8)
+}
+
 fn basic_color(ui: &mut egui::Ui, v: &mut Value) -> Edit {
     let mut e = Edit::default();
+    if basic_color_tab(ui) == 1 {
+        ui.add_space(2.0);
+        e.add(basic_color_mixer(ui, v));
+        return e;
+    }
     basic_color_section(ui, tl!(crate::basic_color_panel::text::WHITE_BALANCE));
     e.add(basic_color_slider(ui, v, "temperature", "Temperature", ""));
     e.add(basic_color_slider(ui, v, "tint", "Tint", ""));

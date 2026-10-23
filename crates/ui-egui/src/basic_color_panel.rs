@@ -25,10 +25,10 @@ pub const WIDTH: f32 = 352.0;
 /// window's height, so it is the measured height of that chrome, not a guess.
 const HEADER_HEIGHT: f32 = 43.0;
 
-/// The height of the panel's body: the mask controls, the three sections and the ten one-line
-/// sliders (about 520 points). The body is this tall when the window has the room for it, and
-/// shorter — scrolling, never clipping — when it has not. Ten two-line rows took about 840.
-pub const BODY_HEIGHT: f32 = 520.0;
+/// The height of the panel's body: the mask controls, the Basic/Color Mixer tabs, the three
+/// sections and the ten one-line Basic sliders (about 580 points). The body is this tall when the
+/// window has the room for it, and shorter — scrolling, never clipping — when it has not.
+pub const BODY_HEIGHT: f32 = 580.0;
 
 /// Headroom on top of [`BODY_HEIGHT`], so that a small change in the panel's content does not
 /// start the body scrolling.
@@ -62,12 +62,17 @@ pub(crate) mod text {
     pub const PRESETS: &str = "Presets…";
     pub const RESET: &str = "Reset";
     pub const MASK: &str = "Mask";
-    pub const NO_PIXEL_MASK: &str = "No pixel mask yet. Apply to whole image adds one; then paint to narrow it.";
+    pub const NO_PIXEL_MASK: &str = "No pixel mask yet. Apply to the whole image or auto-select a face; then paint to narrow it.";
     pub const PAINT_NEW_REGION: &str = "Paint a new region";
     pub const ADD_TO_REGION: &str = "Add to region";
+    pub const AUTO_FACE: &str = "Auto-select face";
     pub const APPLY_WHOLE: &str = "Apply to whole image";
-    pub const SHOW_MASK: &str = "Show mask";
-    pub const HIDE_MASK: &str = "Hide mask";
+    pub const SHOW_SELECTION: &str = "Show selection";
+    pub const HIDE_SELECTION: &str = "Hide selection";
+    pub const SELECTION_HINT: &str = "The selection overlay is only a guide: it is not saved or exported.";
+    pub const FACE_STATUS: &str = "Face selected ({faces}).";
+    pub const NO_FACE: &str = "No face found. Paint the region manually.";
+    pub const FACE_FAILED: &str = "Face selection failed: {error}";
     pub const HINT: &str = "Paint white to reveal, black to hide. Sliders affect only the painted region.";
 
     // Editor section labels (shared with `adjust_editors`).
@@ -94,9 +99,14 @@ pub(crate) mod text {
         NO_PIXEL_MASK,
         PAINT_NEW_REGION,
         ADD_TO_REGION,
+        AUTO_FACE,
         APPLY_WHOLE,
-        SHOW_MASK,
-        HIDE_MASK,
+        SHOW_SELECTION,
+        HIDE_SELECTION,
+        SELECTION_HINT,
+        FACE_STATUS,
+        NO_FACE,
+        FACE_FAILED,
         HINT,
         WHITE_BALANCE,
         TONE,
@@ -150,7 +160,8 @@ enum Action {
     Create,
     Reset { layer: LayerId },
     PaintNewRegion { layer: LayerId },
-    AddToRegion,
+    AddToRegion { layer: LayerId },
+    AutoFace { layer: LayerId },
     ApplyWhole { layer: LayerId },
     ToggleMask { layer: LayerId },
 }
@@ -178,6 +189,33 @@ fn paint_setup(app: &mut PhotocraftApp) {
     }
 }
 
+/// Show or hide the layer-mask rubylith without touching the document. The overlay is view state:
+/// no history step, no pixels, no export. `mode` is `overlay` or `off`.
+fn set_selection_view(app: &mut PhotocraftApp, layer: LayerId, mode: &str) -> Result<(), String> {
+    app.run("view.layerMask", json!({"layer": layer.0, "mode": mode})).map(|_| ())
+}
+
+fn show_selection(app: &mut PhotocraftApp, layer: LayerId) {
+    if let Err(error) = set_selection_view(app, layer, "overlay") {
+        failed(app, text::MASK_FAILED, &error);
+    }
+}
+
+fn auto_face(app: &mut PhotocraftApp, layer: LayerId) {
+    match app.run("layer.layerMask.fromFace", json!({"layer": layer.0, "faces": "all"})) {
+        Ok(result) => {
+            let faces = result.get("faces").and_then(serde_json::Value::as_u64).unwrap_or(0).to_string();
+            let message = crate::i18n::fmt(tl!(text::FACE_STATUS), &[("faces", &faces)]);
+            set_status(&mut app.ui.basic_color, message, false);
+            show_selection(app, layer);
+        }
+        Err(error) if error.contains("no face found") => {
+            set_status(&mut app.ui.basic_color, tl!(text::NO_FACE).to_string(), true);
+        }
+        Err(error) => failed(app, text::FACE_FAILED, &error),
+    }
+}
+
 fn apply(app: &mut PhotocraftApp, action: Action) {
     app.ui.basic_color.status.clear();
     app.ui.basic_color.status_error = false;
@@ -202,10 +240,17 @@ fn apply(app: &mut PhotocraftApp, action: Action) {
                 return;
             }
             paint_setup(app);
+            show_selection(app, layer);
         }
-        Action::AddToRegion => paint_setup(app),
+        Action::AddToRegion { layer } => {
+            paint_setup(app);
+            show_selection(app, layer);
+        }
+        Action::AutoFace { layer } => auto_face(app, layer),
         Action::ApplyWhole { layer } => {
             if let Err(error) = app.run("layer.layerMask.revealAll", json!({"layer": layer.0})) {
+                failed(app, text::MASK_FAILED, &error);
+            } else if let Err(error) = set_selection_view(app, layer, "off") {
                 failed(app, text::MASK_FAILED, &error);
             }
         }
@@ -225,29 +270,40 @@ fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, actions: &mut Vec<Action
     if !info.has_mask {
         // Vector mask only, or none: painting needs a pixel mask, so the paint controls wait.
         ui.add(egui::Label::new(egui::RichText::new(tl!(text::NO_PIXEL_MASK)).size(11.0).color(t.text_faint)).wrap());
-        if widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
-            actions.push(Action::ApplyWhole { layer: info.id });
-        }
+        ui.horizontal_wrapped(|ui| {
+            if widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
+                actions.push(Action::ApplyWhole { layer: info.id });
+            }
+            if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
+                actions.push(Action::AutoFace { layer: info.id });
+            }
+        });
         return;
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if widgets::secondary_button(ui, tl!(text::PAINT_NEW_REGION), 0.0).clicked() {
             actions.push(Action::PaintNewRegion { layer: info.id });
         }
         if widgets::secondary_button(ui, tl!(text::ADD_TO_REGION), 0.0).clicked() {
-            actions.push(Action::AddToRegion);
+            actions.push(Action::AddToRegion { layer: info.id });
         }
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
             actions.push(Action::ApplyWhole { layer: info.id });
         }
-        let mask_label = if info.overlay { tl!(text::HIDE_MASK) } else { tl!(text::SHOW_MASK) };
+        let mask_label = if info.overlay { tl!(text::HIDE_SELECTION) } else { tl!(text::SHOW_SELECTION) };
         if ui.selectable_label(info.overlay, mask_label).clicked() {
             actions.push(Action::ToggleMask { layer: info.id });
         }
     });
-    ui.add(egui::Label::new(egui::RichText::new(tl!(text::HINT)).size(10.5).color(t.text_faint)).wrap());
+    ui.horizontal_wrapped(|ui| {
+        if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
+            actions.push(Action::AutoFace { layer: info.id });
+        }
+    });
+    let hint = if info.overlay { tl!(text::SELECTION_HINT) } else { tl!(text::HINT) };
+    ui.add(egui::Label::new(egui::RichText::new(hint).size(10.5).color(t.text_faint)).wrap());
 }
 
 /// Window › Basic Color. Draws nothing when the menu closed it; never needs a document.
@@ -602,14 +658,54 @@ mod tests {
         let st = app.session.active().expect("document");
         let mask = st.doc.layer(id).and_then(|l| l.mask.as_ref()).expect("mask");
         assert_eq!(mask.surface.sample_channel(32, 32, 0), 0.0, "a new region starts hidden");
+        assert_eq!(
+            photocraft_engine::mask_view_cmds::current(st).map(|view| view.mode),
+            Some(photocraft_engine::mask_view_cmds::MaskViewMode::Overlay),
+            "starting a region shows the selection overlay"
+        );
 
+        apply(&mut app, Action::ToggleMask { layer: id });
+        let st = app.session.active().expect("document");
+        assert_eq!(photocraft_engine::mask_view_cmds::current(st), None, "hiding the selection turns the overlay off");
         apply(&mut app, Action::ToggleMask { layer: id });
         let st = app.session.active().expect("document");
         assert_eq!(
             photocraft_engine::mask_view_cmds::current(st).map(|view| view.mode),
             Some(photocraft_engine::mask_view_cmds::MaskViewMode::Overlay),
-            "Show mask follows the overlay view"
+            "showing the selection brings the overlay back"
         );
+    }
+
+    #[test]
+    fn color_mixer_tab_lists_every_band_and_its_three_pages() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        h.get_by_label("Color Mixer").click();
+        h.run_steps(3);
+        let (body, content) = body_metrics(&h);
+        for name in ["Red", "Orange", "Yellow", "Green", "Mint", "Blue", "Purple", "Pink"] {
+            let row = h.query_all_by_label(name).next().unwrap_or_else(|| panic!("the mixer has a {name} band"));
+            assert!(body.contains_rect(row.rect()), "{name} is inside the 1440×900 body: {:?} in {body:?}", row.rect());
+        }
+        for page in ["Hue", "Saturation", "Luminance"] {
+            assert!(h.query_all_by_label(page).next().is_some(), "the mixer has a {page} page");
+        }
+        assert!(content.y <= body.height() + 0.5, "the mixer fits at 1440×900: {content:?} in {body:?}");
+        h.get_by_label("Luminance").click();
+        h.run_steps(2);
+        assert!(h.query_all_by_label("Red").next().is_some(), "switching pages keeps the bands");
+        h.get_by_label("Basic").click();
+        h.run_steps(2);
+        for name in ["Temperature", "Tint", "Exposure", "Saturation", "Vibrance"] {
+            assert!(h.query_all_by_label(name).next().is_some(), "the Basic page returns with {name}");
+        }
+    }
+
+    #[test]
+    fn auto_face_explains_when_no_face_is_found() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        h.get_by_label(text::AUTO_FACE).click();
+        h.run_steps(3);
+        assert!(h.query_all_by_label(text::NO_FACE).next().is_some(), "the panel says no face was found");
     }
 
     #[test]
@@ -619,12 +715,24 @@ mod tests {
         for key in ["temperature", "tint", "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation"] {
             assert_eq!(params.get(key).and_then(serde_json::Value::as_f64), Some(0.0), "{key} defaults to 0");
         }
-        let changed = json!({"temperature": 40, "tint": -20, "exposure": 0.5, "contrast": 15, "highlights": -30, "shadows": 25, "whites": 10, "blacks": -5, "vibrance": 30, "saturation": -10});
+        for key in ["hslHue", "hslSat", "hslLum"] {
+            assert_eq!(params.get(key).and_then(serde_json::Value::as_array).map(Vec::len), Some(8), "{key} has eight bands");
+            assert!(params[key].as_array().unwrap().iter().all(|v| v.as_f64() == Some(0.0)), "{key} defaults to neutral");
+        }
+        let changed = json!({
+            "temperature": 40, "tint": -20, "exposure": 0.5, "contrast": 15, "highlights": -30, "shadows": 25,
+            "whites": 10, "blacks": -5, "vibrance": 30, "saturation": -10,
+            "hslHue": [10, 0, 0, 0, 0, 0, 0, -10], "hslSat": [0, 10, 0, 0, 0, 0, 0, 0], "hslLum": [0, 0, 10, 0, 0, 0, 0, 0],
+        });
         let adj = photocraft_engine::adjust_params::from_params("basicColor", &changed, None, photocraft_doc::ColorMode::Rgb).expect("values");
         let back = photocraft_engine::adjust_params::to_params(&adj);
         for (key, value) in changed.as_object().into_iter().flatten() {
-            let want = value.as_f64();
-            assert_eq!(back.get(key.as_str()).and_then(serde_json::Value::as_f64), want, "{key} round-trips");
+            if let Some(want) = value.as_f64() {
+                assert_eq!(back.get(key.as_str()).and_then(serde_json::Value::as_f64), Some(want), "{key} round-trips");
+            } else {
+                let numbers = |v: &serde_json::Value| v.as_array().map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect::<Vec<_>>());
+                assert_eq!(numbers(&back[key]), numbers(value), "{key} round-trips");
+            }
         }
     }
 

@@ -3815,12 +3815,19 @@ curves	Smooth	Làm mượt
 	Presence	Hiện diện
 	The active layer isn't a Basic Color layer. Create one above it, then paint the region to adjust.	Lớp đang chọn không phải lớp Chỉnh màu. Hãy tạo một lớp phía trên, rồi tô vùng cần chỉnh.
 	Create Basic Color layer	Tạo lớp Chỉnh màu
-	No pixel mask yet. Apply to whole image adds one; then paint to narrow it.	Chưa có mặt nạ pixel. Áp dụng cho toàn ảnh sẽ thêm một mặt nạ, sau đó tô để thu hẹp vùng.
+	No pixel mask yet. Apply to the whole image or auto-select a face; then paint to narrow it.	Chưa có mặt nạ pixel. Hãy áp dụng cho toàn ảnh hoặc tự chọn vùng mặt, sau đó tô để thu hẹp vùng.
 	Paint a new region	Tô vùng mới
 	Add to region	Thêm vào vùng
+	Auto-select face	Tự chọn vùng mặt
 	Apply to whole image	Áp dụng cho toàn ảnh
-	Show mask	Hiện mặt nạ
-	Hide mask	Ẩn mặt nạ
+	Show selection	Hiện vùng chọn
+	Hide selection	Ẩn vùng chọn
+	The selection overlay is only a guide: it is not saved or exported.	Lớp phủ vùng chọn chỉ để tham khảo: không được lưu và không xuất ra ảnh.
+	Face selected ({faces}).	Đã chọn vùng mặt ({faces} khuôn mặt).
+	No face found. Paint the region manually.	Không tìm thấy khuôn mặt. Hãy tô vùng thủ công.
+	Face selection failed: {error}	Chọn vùng mặt thất bại: {error}
+	Mint	Xanh mint
+	Pink	Hồng
 	Paint white to reveal, black to hide. Sliders affect only the painted region.	Tô màu trắng để hiện, màu đen để ẩn. Thanh trượt chỉ ảnh hưởng vùng đã tô.
 	Create Basic Color layer failed: {error}	Tạo lớp Chỉnh màu thất bại: {error}
 	Reset failed: {error}	Đặt lại thất bại: {error}
