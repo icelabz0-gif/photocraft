@@ -14,6 +14,20 @@ const TOL: f32 = 1.0 / 255.0 + 4.0 * f32::EPSILON;
 
 use crate::GPU_LOCK;
 
+#[path = "../../../compose/tests/support/stroke_fixture.rs"]
+mod stroke_fixture;
+
+#[test]
+fn smart_group_oblique_stroke_and_shadow_match_cpu() {
+    let Some(mut g) = gpu() else { return };
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for scale in [1, 3, 4] {
+            let d = stroke_fixture::fixture(scale, depth, true);
+            fx_check(&mut g, &d, &format!("smart group oblique stroke, {depth:?}, scale {scale}"));
+        }
+    }
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,

@@ -663,6 +663,17 @@ scripts/fetch-corpus.sh            # the same as cargo xtask corpus --all
 
 ## Rendering fidelity (PSD oracle)
 
+For shareable layer-style regression artwork, run `cargo run -p photocraft-io --example
+stroke_repro -- /tmp/stroke-repro`. It generates an original blue bar in a smart object inside
+a pass-through group with a white outside stroke and black drop shadow: `master.psd`, native
+`bar.psb`, and PNG previews. The printed layer ids work with `layer.showOnly` and
+`layer.smartObjects.replaceContents`; resize the master to 588 × 588 before replacing its
+contents to exercise native-content rerendering. `cargo test -p photocraft-compose --test
+stroke_edge` checks the outline against procedural pixel-area coverage at 8, 16 and 32 bits,
+including a resampled cache, rounded corners, translucent details, shadows and tiled renders.
+`cargo run --release -p photocraft-compose --example bench_stroke_edge -- 25` measures cold
+composition of the same artwork at 4900 × 4900 (24 MP).
+
 `cargo xtask test-corpus -p io -- --nocapture` compares our composite of every corpus PSD with
 Photoshop's own merged image (PASS ≤ 2/255) and checks that export → re-import renders the same,
 per source with its own floors: `corpus/psd`, the psd-tools set (also a truncation/corruption sweep
@@ -686,8 +697,9 @@ effect descriptors. Findings so far: fill-layer gradients are framed by the laye
 Photoshop's gradient Smoothness is a Catmull-Rom blend and "Perceptual" interpolation is Oklab
 (baked into dense stops on import, `crates/io/src/gradient_bake.rs`); a shape layer's vector
 stroke is drawn above its clipped layers; linked effect patterns tile from the layer's `fxrp`
-reference point; stroke distances follow a 5 × 5 chamfer metric (1, √2, √5) seeded at sub-pixel
-edge offsets; interior effects keep the layer's alpha; outside strokes blend onto the backdrop with
+reference point; sharp antialiased group outside strokes offset the subpixel coverage contour, while
+hard/soft edges retain alpha-seeded distances (5 × 5 chamfer below 20 px, Euclidean above it);
+interior effects keep the layer's alpha; outside strokes blend onto the backdrop with
 their own modes, an upper stroke covering lower ones.
 
 ## System printing
