@@ -202,6 +202,64 @@ fn transparency_is_straight_in_the_composite() {
     assert_docs_eq(&d, &back);
 }
 
+/// #8777: a CMYK TIFF that keeps its transparency stores paper (`0,0,0,0`) under the clear
+/// pixels, flat or layered. The composite comes from an RGBA render, where a clear pixel is
+/// black; converting that black to CMYK used to put `C176 M146 Y127 K238` there, so a reader
+/// that ignores the alpha sample printed a dark sheet instead of the artwork on paper.
+#[test]
+fn cmyk_transparency_is_paper_under_the_clear_pixels() {
+    let mut d = Document::new("t", photocraft_geom::Size::new(4, 4), ColorMode::Cmyk, SampleType::U8);
+    let fmt = d.pixel_format();
+    let mut ink = raster("Ink", fmt, photocraft_geom::Rect::new(0, 0, 2, 4), 0, false);
+    if let LayerContent::Raster(s) = &mut ink.content {
+        let px: Vec<f32> = (0..8).flat_map(|_| [0.2, 0.4, 0.6, 0.1, 1.0]).collect();
+        s.write_region(photocraft_geom::Rect::new(0, 0, 2, 4), &px);
+    }
+    d.layers.push(ink);
+    // A second, off-canvas layer keeps the flat export on its composite path instead of copying
+    // one layer's own samples.
+    d.layers.push(raster("Empty", fmt, photocraft_geom::Rect::new(8, 8, 9, 9), 0, false));
+    for layers in [false, true] {
+        let r = tiff(&d, layers);
+        let img = photocraft_codecs::decode(&r.bytes).unwrap();
+        assert!(img.layout().has_alpha(), "layers={layers}");
+        let px = img.data();
+        let at = |x: usize, y: usize| (y * 4 + x) * 5;
+        // Clear pixels: paper, and transparent.
+        assert_eq!(&px[at(2, 0)..at(2, 0) + 5], &[0, 0, 0, 0, 0], "layers={layers}");
+        assert_eq!(&px[at(3, 3)..at(3, 3) + 5], &[0, 0, 0, 0, 0], "layers={layers}");
+        // Painted pixels: the layer's ink, opaque.
+        assert_ne!(&px[at(0, 0)..at(0, 0) + 4], &[0, 0, 0, 0], "layers={layers}");
+        assert_eq!(px[at(0, 0) + 4], 255, "layers={layers}");
+    }
+}
+
+/// #8777, review follow-up: "clear" is judged at output precision, not on the float alpha. A
+/// 0.1 % layer renders an alpha of 0.001, which the 8-bit encoder stores as alpha byte 0 — the
+/// ink under that byte must be paper, otherwise a reader that ignores the alpha sample prints the
+/// invisible pixel's colour.
+#[test]
+fn cmyk_alpha_below_half_a_step_stores_paper() {
+    let mut d = Document::new("t", photocraft_geom::Size::new(4, 4), ColorMode::Cmyk, SampleType::U8);
+    let fmt = d.pixel_format();
+    let mut ink = raster("Ink", fmt, photocraft_geom::Rect::new(0, 0, 4, 4), 0, false);
+    if let LayerContent::Raster(s) = &mut ink.content {
+        let px: Vec<f32> = (0..16).flat_map(|_| [0.2, 0.4, 0.6, 0.1, 1.0]).collect();
+        s.write_region(photocraft_geom::Rect::new(0, 0, 4, 4), &px);
+    }
+    ink.opacity = 0.001;
+    d.layers.push(ink);
+    // An off-canvas layer keeps the flat export on its composite path.
+    d.layers.push(raster("Empty", fmt, photocraft_geom::Rect::new(8, 8, 9, 9), 0, false));
+    for layers in [false, true] {
+        let r = tiff(&d, layers);
+        let img = photocraft_codecs::decode(&r.bytes).unwrap();
+        assert!(img.layout().has_alpha(), "layers={layers}");
+        let px = img.data();
+        assert_eq!(&px[..5], &[0, 0, 0, 0, 0], "alpha byte is 0, so the ink is paper, layers={layers}");
+    }
+}
+
 #[test]
 fn big_documents_use_the_psb_signature() {
     // Forcing PSB stands in for a > 30000 px document.
