@@ -850,7 +850,8 @@ fn variable_font_axes() {
 /// #8797: a style that carries the PostScript name of a variable font's named condensed light
 /// instance lays out as wide as that instance's axis values, not at the default instance. Uses
 /// Bahnschrift (Windows) or Ubuntu Sans (Ubuntu) when installed, and skips otherwise; the
-/// synthesized-font test in `font_names_tests` covers the instance lookup everywhere.
+/// synthesized-font tests in `font_names_tests` cover the instance lookup and its layout width
+/// everywhere.
 #[test]
 fn postscript_name_of_a_variable_instance_lays_out_at_that_instance() {
     use photocraft_doc::text::FontVariation;

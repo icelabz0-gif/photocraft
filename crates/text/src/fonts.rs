@@ -486,18 +486,14 @@ impl FontDb {
     ///
     /// A PostScript name that no face has may name an instance of a variable face
     /// ("Bahnschrift-LightCondensed"): that face is selected and the instance's axis values are
-    /// added to the style's variations, keeping any axis the style sets itself (#8797).
+    /// added to the style's variations, keeping any axis the style sets itself (#8797). Faces are
+    /// tried in this order: exact PostScript name, named instance, then style, weight and italic.
     pub(crate) fn select_named_face(&mut self, style: &mut photocraft_doc::text::CharStyle) {
         let family = style.font_family.clone();
         let faces = self.faces(&family);
-        let index = style.postscript_name.as_ref().and_then(|ps| faces.iter().position(|f| f.postscript_name.as_ref() == Some(ps))).or_else(|| {
-            faces.iter().position(|f| {
-                !style.font_style.is_empty()
-                    && f.style.eq_ignore_ascii_case(&style.font_style)
-                    && f.weight.round() as u16 == style.weight
-                    && f.italic == style.italic
-            })
-        });
+        let index = style.postscript_name.as_ref().and_then(|ps| faces.iter().position(|f| f.postscript_name.as_ref() == Some(ps)));
+        // The named instance is tried before the style-and-weight fallback: a variable face's own
+        // style ("Regular") can match a populated `font_style` and would drop the instance's axes.
         let instance = match (index, &style.postscript_name) {
             (None, Some(ps)) => self.named_instance(&family, &faces, ps),
             _ => None,
@@ -509,7 +505,15 @@ impl FontDb {
                 }
             }
         }
-        let Some(index) = index.or(instance.map(|(i, _)| i)) else { return };
+        let index = index.or(instance.map(|(i, _)| i)).or_else(|| {
+            faces.iter().position(|f| {
+                !style.font_style.is_empty()
+                    && f.style.eq_ignore_ascii_case(&style.font_style)
+                    && f.weight.round() as u16 == style.weight
+                    && f.italic == style.italic
+            })
+        });
+        let Some(index) = index else { return };
         let Some(face) = faces.get(index) else { return };
         let key = (family.clone(), index);
         let alias = if let Some(alias) = self.face_aliases.get(&key) {

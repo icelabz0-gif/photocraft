@@ -260,8 +260,8 @@ fn fixed(v: f32) -> [u8; 4] {
 /// `source` rebuilt as a variable font with `wght` 100–900 and `wdth` 75–100 axes and two named
 /// instances, without redistributing a variable font (#8797): "Light Condensed" (300, 75) has no
 /// PostScript name of its own, so its name is derived as `InstanceTest-LightCondensed`;
-/// "Heavy" (900, 100) names itself `InstanceTest-Black`. Only `fvar` and `name` change, so the
-/// outlines do not vary; this checks which axis values a style gets, not how they draw.
+/// "Heavy" (900, 100) names itself `InstanceTest-Black`. Outlines do not vary, but an `HVAR` table
+/// (see [`width_hvar`]) narrows every advance on `wdth`, so layout width shows which instance drew.
 fn instance_font(source: &[u8]) -> Vec<u8> {
     let names = [
         (1u16, "Instance Test"),
@@ -308,7 +308,8 @@ fn instance_font(source: &[u8]) -> Vec<u8> {
         }
         fvar.extend(ps.to_be_bytes());
     }
-    // Rebuild the table directory: every table but `name` as it was, plus the new `name` and `fvar`.
+    // Rebuild the table directory: every table but `name` as it was, plus the new `name`, `fvar`
+    // and `HVAR`.
     let count = u16::from_be_bytes(source[4..6].try_into().unwrap()) as usize;
     let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..count)
         .map(|i| {
@@ -319,8 +320,11 @@ fn instance_font(source: &[u8]) -> Vec<u8> {
         })
         .filter(|(tag, _)| tag != b"name")
         .collect();
+    let table = |tag: &[u8; 4]| tables.iter().find(|(t, _)| t == tag).map(|(_, data)| data.as_slice()).unwrap();
+    let hvar = width_hvar(table(b"hhea"), table(b"hmtx"), table(b"maxp"));
     tables.push((*b"name", name));
     tables.push((*b"fvar", fvar));
+    tables.push((*b"HVAR", hvar));
     tables.sort_by_key(|(tag, _)| *tag);
     let mut out = source[0..4].to_vec();
     for n in [tables.len() as u16, 0, 0, 0] {
@@ -337,6 +341,44 @@ fn instance_font(source: &[u8]) -> Vec<u8> {
     for (_, data) in &tables {
         out.extend(data);
         out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+/// An `HVAR` table for [`instance_font`]'s axes (`wght`, then `wdth`) that takes 30% off every
+/// glyph's advance at `wdth` 75 and nothing at the default 100, scaled linearly between. Advances
+/// come from `hmtx`; glyph IDs map to deltas directly, as no advance mapping is given.
+fn width_hvar(hhea: &[u8], hmtx: &[u8], maxp: &[u8]) -> Vec<u8> {
+    let glyphs = u16::from_be_bytes(maxp[4..6].try_into().unwrap());
+    let metrics = u16::from_be_bytes(hhea[34..36].try_into().unwrap()) as usize;
+    let advance = |gid: usize| {
+        let at = 4 * gid.min(metrics - 1);
+        i32::from(u16::from_be_bytes(hmtx[at..at + 2].try_into().unwrap()))
+    };
+    let mut out = Vec::new();
+    // Header: version 1.0, item variation store at 20, no advance, LSB or RSB mappings.
+    for n in [1u16, 0] {
+        out.extend(n.to_be_bytes());
+    }
+    for n in [20u32, 0, 0, 0] {
+        out.extend(n.to_be_bytes());
+    }
+    // Item variation store: format 1, region list at 12, one item variation data at 28.
+    out.extend(1u16.to_be_bytes());
+    out.extend(12u32.to_be_bytes());
+    out.extend(1u16.to_be_bytes());
+    out.extend(28u32.to_be_bytes());
+    // One region over two axes as (start, peak, end) in F2Dot14: `wght` unused, `wdth` -1..0
+    // peaking at -1 (75).
+    for n in [2u16, 1, 0, 0, 0, 0xC000, 0xC000, 0] {
+        out.extend(n.to_be_bytes());
+    }
+    // Item variation data: one 16-bit delta per glyph for region 0.
+    for n in [glyphs, 1, 1, 0] {
+        out.extend(n.to_be_bytes());
+    }
+    for gid in 0..glyphs as usize {
+        out.extend((-(advance(gid) * 3 / 10) as i16).to_be_bytes());
     }
     out
 }
@@ -379,4 +421,50 @@ fn exact_static_face_gets_no_instance_axes() {
     db.select_named_face(&mut style);
     assert_ne!(style.font_family, "Numeric Test", "the exact face is selected through its alias");
     assert!(style.variations.is_empty(), "{:?}", style.variations);
+}
+
+/// A style whose `font_style` and weight also match the variable face itself ("Regular", 400) still
+/// gets the named instance its PostScript name gives: the instance is tried before the
+/// style-and-weight fallback, which would select the face at its default instance (#8797).
+#[test]
+fn named_instance_wins_over_a_matching_font_style() {
+    let mut db = FontDb::new();
+    db.register_font_data(instance_font(&INTER_REGULAR));
+    let mut style = CharStyle {
+        font_family: "Instance Test".into(),
+        font_style: "Regular".into(),
+        weight: 400,
+        postscript_name: Some("InstanceTest-LightCondensed".into()),
+        ..Default::default()
+    };
+    db.select_named_face(&mut style);
+    assert_ne!(style.font_family, "Instance Test", "the variable face is selected through its alias");
+    let mut axes: Vec<_> = style.variations.into_iter().map(|v| (v.axis, v.value)).collect();
+    axes.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(axes, vec![("wdth".to_string(), 75.0), ("wght".to_string(), 300.0)]);
+}
+
+/// #8797 end to end without an installed font: text whose style carries a named instance's
+/// PostScript name lays out as wide as that instance's axis values, which the synthesized `HVAR`
+/// makes narrower than the default instance. The style's `font_style` and weight match the
+/// variable face itself, so the default instance would be chosen if the instance were skipped.
+#[test]
+fn postscript_name_of_a_named_instance_lays_out_at_that_instance() {
+    use photocraft_doc::TextLayer;
+    use photocraft_doc::text::{FontVariation, TextRun};
+    let mut engine = crate::TextEngine::new();
+    engine.fonts.register_font_data(instance_font(&INTER_REGULAR));
+    let text = "Hamburgefonstiv 0123";
+    let mut width = |style: CharStyle| {
+        let layer = TextLayer { text: text.into(), runs: vec![TextRun { len: text.len(), style }], ..Default::default() };
+        let l = engine.layout(&layer, 96.0);
+        l.lines[0].x1 - l.lines[0].x0
+    };
+    let base = CharStyle { font_family: "Instance Test".into(), font_style: "Regular".into(), size_pt: 72.0, weight: 400, ..Default::default() };
+    let axes = vec![FontVariation { axis: "wght".into(), value: 300.0 }, FontVariation { axis: "wdth".into(), value: 75.0 }];
+    let family = width(base.clone());
+    let instance = width(CharStyle { postscript_name: Some("InstanceTest-LightCondensed".into()), ..base.clone() });
+    let explicit = width(CharStyle { variations: axes, ..base });
+    assert!(explicit < family * 0.8, "wdth 75 is narrower: {explicit} vs {family}");
+    assert!((instance - explicit).abs() < 0.5, "instance: {instance} px, its axes: {explicit} px, default instance: {family} px");
 }
