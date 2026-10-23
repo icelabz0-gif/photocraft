@@ -4499,3 +4499,9 @@ shape	Appearance	Aspetto
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Recently Used Colors	Colori usati di recente
+	Stop Color	Colore del punto
+	Select a shape layer to use a gradient	Seleziona un livello forma per usare una sfumatura
+	Shapes can't use patterns yet	Le forme non possono ancora usare pattern

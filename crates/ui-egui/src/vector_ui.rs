@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
 use crate::canvas::ViewXform;
+use crate::paint_picker::PaintChange;
 use crate::state::{Tool, ToolOptions};
 use crate::theme::Tokens;
 
@@ -1409,9 +1410,11 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
         o.shape_fill = has_fill;
         edit = Some(json!({"fill": if has_fill { json!(fg) } else { Value::Null }}));
     }
-    let fill_color = swatch(ui, fill.as_ref(), fg, tl!("Fill color"));
+    let lib = crate::paint_picker::library(&app.session, ui.ctx());
+    // A gradient can paint the selected shape; the next shape's defaults hold colours only.
+    let fill_color = swatch(ui, &lib, fill.as_ref(), fg, tl!("Fill color"), target.is_some());
     lbl(ui, tl!("Stroke:"));
-    let stroke_color = swatch(ui, stroke.as_ref().map(|s| &s.paint), bg, tl!("Stroke color"));
+    let stroke_color = swatch(ui, &lib, stroke.as_ref().map(|s| &s.paint), bg, tl!("Stroke color"), target.is_some());
     if crate::widgets::value_field(ui, &mut width, 0.0..=288.0, "px", 58.0).changed() {
         o.stroke_width = width;
         let mut p = json!({"width": width});
@@ -1482,15 +1485,26 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     }
     for (is_stroke, change) in [(false, fill_color), (true, stroke_color)] {
         let Some(change) = change else { continue };
-        if let Err(e) = set_tool_paint(app, is_stroke, change) {
+        if change == PaintChange::OpenPicker {
+            let (which, fallback) = if is_stroke { (crate::shape_fill_ui::Paint::Stroke, bg) } else { (crate::shape_fill_ui::Paint::Fill, fg) };
+            crate::shape_fill_ui::open_paint(app, which, target.as_ref().map(|s| s.layer), true, fallback);
+            continue;
+        }
+        if let PaintChange::Color(c) = change {
+            crate::paint_picker::remember(app, [c[0], c[1], c[2]]);
+        }
+        if let Err(e) = set_tool_paint(app, is_stroke, change.clone()) {
             app.ui.status = e;
             app.ui.status_error = true;
         }
         edit = Some(match (is_stroke, change) {
             (false, PaintChange::None) => json!({"fill": null}),
             (false, PaintChange::Color(color)) => json!({"fill": color, "coalesce": key("fill")}),
+            (false, PaintChange::Gradient(g)) => json!({"fill": g}),
             (true, PaintChange::None) => json!({"stroke": null}),
             (true, PaintChange::Color(color)) => json!({"stroke": {"color": color, "width": enabled_stroke_width(width)}, "coalesce": key("stroke")}),
+            (true, PaintChange::Gradient(g)) => json!({"stroke": {"color": g, "width": enabled_stroke_width(width)}}),
+            (_, PaintChange::OpenPicker) => continue,
         });
     }
     if let (Some(mut p), Some(s)) = (edit, &target) {
@@ -1544,20 +1558,18 @@ fn color_of(f: &photocraft_doc::Fill) -> Option<[f32; 4]> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum PaintChange {
-    Color([f32; 4]),
-    None,
-}
-
-fn enabled_stroke_width(width: f32) -> f32 {
+pub(crate) fn enabled_stroke_width(width: f32) -> f32 {
     if width.is_finite() && width > 0.0 { width } else { 3.0 }
 }
 
 /// Tool-bar paint changes affect the next shape; Properties edits the selected shape instead.
-fn set_tool_paint(app: &mut PhotocraftApp, stroke: bool, change: PaintChange) -> Result<(), String> {
+/// The next shape's defaults hold colours only: a gradient leaves them as they are.
+pub(crate) fn set_tool_paint(app: &mut PhotocraftApp, stroke: bool, change: PaintChange) -> Result<(), String> {
     if let PaintChange::Color(color) = change {
         app.run("tools.setColors", if stroke { json!({"background": color}) } else { json!({"foreground": color}) })?;
+    }
+    if matches!(change, PaintChange::Gradient(_) | PaintChange::OpenPicker) {
+        return Ok(());
     }
     if stroke {
         app.ui.tool_options.stroke_width = if change == PaintChange::None { 0.0 } else { enabled_stroke_width(app.ui.tool_options.stroke_width) };
@@ -1572,21 +1584,18 @@ fn rgba32(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(b(c[0]), b(c[1]), b(c[2]), b(c[3]))
 }
 
-fn picker_color(c: [f32; 4]) -> egui::ecolor::Hsva {
-    let linear = egui::ecolor::linear_from_gamma;
-    let display = c.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
-    egui::ecolor::Hsva::from_rgba_unmultiplied(linear(display[0]), linear(display[1]), linear(display[2]), display[3])
-}
-
-fn picker_rgba(hsva: egui::ecolor::Hsva) -> [f32; 4] {
-    let [r, g, b, a] = hsva.to_rgba_unmultiplied();
-    let gamma = egui::ecolor::gamma_from_linear;
-    [gamma(r), gamma(g), gamma(b), a]
-}
-
-/// The shared compact picker keeps the float RGB paint and its alpha. Color32 is only display
-/// data: opening the picker must never quantize an existing high-depth colour or enable paint.
-fn swatch(ui: &mut egui::Ui, fill: Option<&photocraft_doc::Fill>, fallback: [f32; 4], tip: &str) -> Option<PaintChange> {
+/// A shape paint swatch (Fill or Stroke) opening Photoshop's paint popover
+/// ([`crate::paint_picker`]). The swatch shows the float paint as it is: opening the popover never
+/// quantizes a high-depth colour or enables paint. `gradients` is false where a gradient can't be
+/// stored (the next shape's defaults).
+fn swatch(
+    ui: &mut egui::Ui,
+    lib: &crate::paint_picker::Library,
+    fill: Option<&photocraft_doc::Fill>,
+    fallback: [f32; 4],
+    tip: &str,
+    gradients: bool,
+) -> Option<PaintChange> {
     let t = Tokens::get(ui.ctx());
     let (r, resp) = ui.allocate_exact_size(vec2(30.0, 22.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, ui.is_enabled(), tip));
@@ -1633,77 +1642,15 @@ fn swatch(ui: &mut egui::Ui, fill: Option<&photocraft_doc::Fill>, fallback: [f32
     };
     ui.painter().rect_stroke(r, t.radius_sm, Stroke::new(1.0, border), egui::StrokeKind::Inside);
     let resp = resp.on_hover_text(tip);
-    let screen_id = resp.id.with("screen-color");
     let original = current.unwrap_or(fallback);
-    let sampled = |rgb: [f32; 3]| PaintChange::Color([rgb[0], rgb[1], rgb[2], original[3]]);
-    let mut out = crate::screen_picker::take(ui.ctx(), screen_id).map(sampled);
-    let cache = resp.id.with("shape-paint-hsva");
-    let mut hsva = ui
-        .data(|d| d.get_temp::<([f32; 4], egui::ecolor::Hsva)>(cache))
-        .filter(|(previous, _)| *previous == original)
-        .map_or_else(|| picker_color(original), |(_, hsva)| hsva);
-    if let Some(PaintChange::Color(color)) = out {
-        hsva = picker_color(color);
-    }
+    let mut out = None;
     crate::widgets::swatch_popup(&resp).show(|ui| {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(fill.is_none(), tl!("No Color")).clicked() && fill.is_some() {
-                out = Some(PaintChange::None);
-            }
-            if ui.selectable_label(current.is_some(), tl!("Solid")).clicked() && current.is_none() {
-                out = Some(PaintChange::Color(original));
-            }
-        });
-        ui.separator();
-        let before = picker_rgba(hsva);
-        if egui::color_picker::color_picker_hsva_2d(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend) {
-            let color = picker_rgba(hsva);
-            // egui's HSV gamma/linear round trip can move a float by an ulp without input.
-            if color.iter().zip(before).any(|(a, b)| (a - b).abs() > 0.000001) {
-                out = Some(PaintChange::Color(color));
-            }
-        }
-        ui.horizontal(|ui| {
-            let label = ui.label(egui::RichText::new("#").color(t.text_dim));
-            let id = resp.id.with("shape-paint-hex");
-            let selected = match out {
-                Some(PaintChange::Color(color)) => color,
-                _ => original,
-            };
-            // Keep incomplete typing across frames; deriving the field from the colour each
-            // frame would discard every keystroke until all six digits were present.
-            let mut text = ui
-                .data(|d| d.get_temp::<([f32; 4], String)>(id))
-                .filter(|(previous, _)| *previous == selected)
-                .map_or_else(|| hex(selected).trim_start_matches('#').to_ascii_uppercase(), |(_, text)| text);
-            let response = crate::widgets::text_field(ui, id, &mut text, "RRGGBB", 90.0, true).labelled_by(label.id);
-            if response.changed()
-                && let Some(rgb) = crate::color_picker_ui::parse_hex(&text)
-            {
-                let color = [rgb[0], rgb[1], rgb[2], selected[3]];
-                out = Some(PaintChange::Color(color));
-                hsva = picker_color(color);
-            }
-            if response.has_focus() {
-                let color = match out {
-                    Some(PaintChange::Color(color)) => color,
-                    _ => selected,
-                };
-                ui.data_mut(|d| d.insert_temp(id, (color, text)));
-            } else {
-                ui.data_mut(|d| d.remove::<([f32; 4], String)>(id));
-            }
-        });
-        if let Some(rgb) = crate::screen_picker::button(ui, screen_id) {
-            out = Some(sampled(rgb));
-            hsva = picker_color([rgb[0], rgb[1], rgb[2], original[3]]);
+        out = crate::paint_picker::body(ui, lib, fill, original, gradients);
+        if out == Some(PaintChange::OpenPicker) {
+            // The Color Picker dialog takes over, as Photoshop's does.
+            ui.close();
         }
     });
-    let cached_color = match out {
-        Some(PaintChange::Color(color)) => color,
-        _ => original,
-    };
-    ui.data_mut(|d| d.insert_temp(cache, (cached_color, hsva)));
     out
 }
 
@@ -1756,23 +1703,37 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
     // The shared collapsible section headers (#155).
     // Prefs "Appearance" is theme chrome (Giao diện); shape fill/stroke is Diện mạo.
     if crate::props_layout::section(ui, "appearance", crate::i18n::tr_ctx(crate::i18n::current(), "shape", "Appearance")) {
+        let lib = crate::paint_picker::library(&app.session, ui.ctx());
+        let fg = app.session.tools.foreground;
+        let mut picks: Vec<(bool, PaintChange)> = Vec::new();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tl!("Fill")).color(t.text_dim).size(12.0));
-            if let Some(change) = swatch(ui, sh.fill.as_ref(), app.session.tools.foreground, tl!("Set shape fill type")) {
+            if let Some(change) = swatch(ui, &lib, sh.fill.as_ref(), fg, tl!("Set shape fill type"), true) {
+                picks.push((false, change.clone()));
                 let fill = match change {
-                    PaintChange::None => Value::Null,
-                    PaintChange::Color(color) => json!(color),
+                    PaintChange::None => Some(Value::Null),
+                    PaintChange::Color(color) => Some(json!(color)),
+                    PaintChange::Gradient(g) => Some(g),
+                    PaintChange::OpenPicker => None,
                 };
-                edit = Some(json!({"fill": fill, "coalesce": coalesce("fill")}));
+                if let Some(fill) = fill {
+                    edit = Some(json!({"fill": fill, "coalesce": coalesce("fill")}));
+                }
             }
             ui.add_space(12.0);
             ui.label(egui::RichText::new(tl!("Stroke")).color(t.text_dim).size(12.0));
-            if let Some(change) = swatch(ui, sh.stroke.as_ref().map(|s| &s.paint), app.session.tools.foreground, tl!("Set shape stroke type")) {
+            if let Some(change) = swatch(ui, &lib, sh.stroke.as_ref().map(|s| &s.paint), fg, tl!("Set shape stroke type"), true) {
+                picks.push((true, change.clone()));
+                let width = enabled_stroke_width(sh.stroke.as_ref().map_or(0.0, |s| s.width));
                 let stroke = match change {
-                    PaintChange::None => Value::Null,
-                    PaintChange::Color(color) => json!({"color": color, "width": enabled_stroke_width(sh.stroke.as_ref().map_or(0.0, |s| s.width))}),
+                    PaintChange::None => Some(Value::Null),
+                    PaintChange::Color(color) => Some(json!({"color": color, "width": width})),
+                    PaintChange::Gradient(g) => Some(json!({"color": g, "width": width})),
+                    PaintChange::OpenPicker => None,
                 };
-                edit = Some(json!({"stroke": stroke, "coalesce": coalesce("stroke")}));
+                if let Some(stroke) = stroke {
+                    edit = Some(json!({"stroke": stroke, "coalesce": coalesce("stroke")}));
+                }
             }
             let mut w = sh.stroke.as_ref().map_or(0.0, |s| s.width);
             if crate::widgets::value_field(ui, &mut w, 0.0..=288.0, "px", 60.0).changed() {
@@ -1796,6 +1757,16 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
                 stroke["width"] = json!(3.0);
             }
             edit = Some(json!({"stroke": stroke, "coalesce": change.coalesce}));
+        }
+        for (is_stroke, change) in picks {
+            match change {
+                PaintChange::OpenPicker => {
+                    let which = if is_stroke { crate::shape_fill_ui::Paint::Stroke } else { crate::shape_fill_ui::Paint::Fill };
+                    crate::shape_fill_ui::open_paint(app, which, Some(id), false, fg);
+                }
+                PaintChange::Color(c) => crate::paint_picker::remember(app, [c[0], c[1], c[2]]),
+                PaintChange::None | PaintChange::Gradient(_) => {}
+            }
         }
     }
     if let Some(live) = &sh.live
@@ -3383,9 +3354,9 @@ mod tests {
         assert_eq!(get_radii(&app), [12.0; 4]);
     }
 
-    /// #534: dragging in a shape's fill picker, opened from the Properties panel at the right edge
-    /// of the window, keeps the picker in place (it flipped from side to side as its width
-    /// followed the colour readouts, which moved it under the pointer).
+    /// #534: using a shape's fill popover, opened from the Properties panel at the right edge of
+    /// the window, keeps it in place (it flipped from side to side as its width followed the
+    /// colour readouts, which moved it under the pointer).
     #[test]
     fn shape_colour_picker_stays_put_while_dragging() {
         use egui::{PointerButton, vec2};
@@ -3428,20 +3399,18 @@ mod tests {
             }
         };
         let before = fill(&h);
-        // Drag across the picker's colour area.
-        let start = opened.min + vec2(60.0, opened.height() * 0.5);
-        h.hover_at(start);
-        h.step();
-        press(&mut h, start, true);
-        for i in 1..=10 {
-            h.event(egui::Event::PointerMoved(start + vec2(i as f32 * 5.0, i as f32)));
-            h.step();
+        // Opening folders scrolls the list: the popover stays where it opened, inside the window.
+        for label in ["Pure", "Dark"] {
+            h.get_by_label(label).click();
+            h.run_steps(3);
             let r = popup(&h).expect("the picker stays open");
-            assert_eq!(r.left_top(), opened.left_top(), "step {i}: the picker moved from {opened:?} to {r:?}");
-            assert!(h.ctx.content_rect().contains_rect(r), "step {i}: {r:?} runs off the window");
+            assert_eq!(r.left_top(), opened.left_top(), "{label}: the picker moved from {opened:?} to {r:?}");
+            assert!(h.ctx.content_rect().contains_rect(r), "{label}: {r:?} runs off the window");
         }
-        press(&mut h, start, false);
-        assert_ne!(fill(&h), before, "the drag picked a colour");
+        h.get_by_label("Dark Red").click();
+        h.run_steps(2);
+        assert_eq!(popup(&h).map(|r| r.left_top()), Some(opened.left_top()), "picking keeps the popover open in place");
+        assert_ne!(fill(&h), before, "the swatch picked a colour");
     }
 
     /// The options bar edits the selected shape's fill and stroke.

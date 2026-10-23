@@ -3005,3 +3005,12 @@ curves	Smooth	平滑
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Color Picker	檢色器
+	Recently Used Colors	最近使用的顏色
+	Stop Color	色標顏色
+	Select a shape layer to use a gradient	選取一個形狀圖層以使用漸層
+	Shapes can't use patterns yet	形狀尚不支援圖樣
+	Solid Color	純色
+	Tint Color	色調顏色

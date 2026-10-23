@@ -4344,3 +4344,9 @@ navigator	Zoom	Zoom
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Recently Used Colors	Colores usados recientemente
+	Stop Color	Color de la parada
+	Select a shape layer to use a gradient	Seleccione una capa de forma para usar un degradado
+	Shapes can't use patterns yet	Las formas aún no pueden usar motivos

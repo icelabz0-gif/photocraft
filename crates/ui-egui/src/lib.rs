@@ -164,6 +164,7 @@ pub mod open_prompt;
 pub mod outline;
 mod page_keys;
 pub mod paint_mouse;
+pub(crate) mod paint_picker;
 pub mod palette;
 mod panel_docking;
 pub mod panels;
@@ -880,6 +881,9 @@ pub struct PhotocraftApp {
     pub(crate) pattern_fill_preview: Option<pattern_fill_ui::Preview>,
     /// Shape fill Color Picker preview (shape_fill_ui).
     pub(crate) shape_fill_preview: Option<shape_fill_ui::Preview>,
+    /// Colours a colour swatch widget's Color Picker returned with OK, waiting for the widget to
+    /// take them next frame (`color_picker_ui::widget_tick`): (widget id, sRGB).
+    pub(crate) widget_colors: Vec<(u64, [f32; 3])>,
     /// Liquify dialog, Puppet Warp and Perspective Warp sessions (distort_ui).
     pub(crate) distort: distort_ui::Distort,
     /// Gradient tool live-mode drags and previews (gradient_ui).
@@ -1118,6 +1122,7 @@ impl PhotocraftApp {
             solid_fill_preview: None,
             pattern_fill_preview: None,
             shape_fill_preview: None,
+            widget_colors: Vec::new(),
             distort: Default::default(),
             gradient: Default::default(),
             camera_raw: None,
@@ -2294,6 +2299,7 @@ impl eframe::App for PhotocraftApp {
         discard_ui::guard_window_close(self, ctx);
         // Background jobs: apply finished ones, keep frames coming, Esc cancels (before the
         // shortcuts see Esc).
+        color_picker_ui::widget_tick(self, ctx);
         if !screen_picker::tick(self, ctx) {
             jobs_ui::tick(self, ctx);
             #[cfg(not(target_arch = "wasm32"))]

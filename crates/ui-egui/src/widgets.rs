@@ -2854,10 +2854,11 @@ mod tests {
     }
 }
 
-/// A compact colour popup with the shared desktop eyedropper. Keep egui's colour cache so hue
-/// survives black/white and alpha edits, and keep linear and encoded call sites distinct.
-pub fn color_edit_button_srgba(ui: &mut Ui, color: &mut Color32) -> Response {
-    color_edit_button(ui, color, egui::color_picker::Alpha::BlendOrAdditive)
+/// A colour swatch that opens PhotoCraft's Color Picker dialog (HSB, RGB, Lab, CMYK, hex and the
+/// eyedropper), titled `title` as Photoshop's "Color Picker (…)", on its colour. OK sets the colour
+/// (the alpha stays), Cancel leaves it; the response is `changed` in the frame the colour arrives.
+pub fn color_edit_button_srgba(ui: &mut Ui, color: &mut Color32, title: &str) -> Response {
+    color_edit_button(ui, color, title, false)
 }
 pub(crate) fn color_swatch(ui: &mut Ui, color: Color32) -> Response {
     let t = Tokens::get(ui.ctx());
@@ -2879,151 +2880,130 @@ pub fn color_swatch_button(ui: &mut Ui, color: Color32, label: &str) -> Response
     ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     response.on_hover_text(label)
 }
-fn color_edit_button(ui: &mut Ui, color: &mut Color32, alpha: egui::color_picker::Alpha) -> Response {
-    let mut response = color_swatch(ui, *color);
-    let id = response.id.with("screen-color");
-    if let Some(rgb) = crate::screen_picker::take(ui.ctx(), id) {
-        *color = sampled_color(rgb, *color, alpha);
+fn color_edit_button(ui: &mut Ui, color: &mut Color32, title: &str, opaque: bool) -> Response {
+    let mut response = color_swatch_button(ui, *color, title);
+    if let Some(rgb) = crate::color_picker_ui::take_widget_color(ui.ctx(), response.id) {
+        *color = picked_color(rgb, *color, opaque);
         response.mark_changed();
     }
-    swatch_popup(&response).show(|ui| {
-        if egui::color_picker::color_picker_color32(ui, color, alpha) {
-            response.mark_changed();
-        }
-        if let Some(rgb) = crate::screen_picker::button(ui, id) {
-            *color = sampled_color(rgb, *color, alpha);
-            response.mark_changed();
-        }
-    });
+    if response.clicked() {
+        let [r, g, b, _] = color.to_srgba_unmultiplied();
+        crate::color_picker_ui::request_for_widget(ui.ctx(), response.id, title, [r, g, b].map(|v| f32::from(v) / 255.0));
+    }
     response
 }
-fn sampled_color(rgb: [f32; 3], original: Color32, alpha: egui::color_picker::Alpha) -> Color32 {
+fn picked_color(rgb: [f32; 3], original: Color32, opaque: bool) -> Color32 {
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    if matches!(alpha, egui::color_picker::Alpha::BlendOrAdditive) && original.is_additive() {
+    if !opaque && original.is_additive() {
         return Color32::from_rgb_additive(byte(rgb[0]), byte(rgb[1]), byte(rgb[2]));
     }
-    Color32::from_rgba_unmultiplied(
-        byte(rgb[0]),
-        byte(rgb[1]),
-        byte(rgb[2]),
-        if matches!(alpha, egui::color_picker::Alpha::Opaque) { 255 } else { original.a() },
-    )
+    Color32::from_rgba_unmultiplied(byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), if opaque { 255 } else { original.to_srgba_unmultiplied()[3] })
 }
-pub fn color_edit_button_srgb(ui: &mut Ui, rgb: &mut [u8; 3]) -> Response {
+/// [`color_edit_button_srgba`] for an opaque 8-bit sRGB colour.
+pub fn color_edit_button_srgb(ui: &mut Ui, rgb: &mut [u8; 3], title: &str) -> Response {
     let mut color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    let response = color_edit_button(ui, &mut color, egui::color_picker::Alpha::Opaque);
+    let response = color_edit_button(ui, &mut color, title, true);
     if response.changed() {
         *rgb = [color.r(), color.g(), color.b()];
     }
     response
 }
-/// Like egui's float RGB widget, this entry point stores linear RGB (not encoded hex values).
-pub fn color_edit_button_rgb(ui: &mut Ui, rgb: &mut [f32; 3]) -> Response {
-    let mut response = color_swatch(ui, Color32::from(egui::Rgba::from_rgb(rgb[0], rgb[1], rgb[2])));
-    let id = response.id.with("screen-color");
-    let to_linear = |color: [f32; 3]| color.map(egui::ecolor::linear_from_gamma);
-    if let Some(color) = crate::screen_picker::take(ui.ctx(), id) {
-        *rgb = to_linear(color);
+/// [`color_edit_button_srgba`] for a float colour stored as linear RGB (like egui's float RGB
+/// widget). The Color Picker works in encoded sRGB; opening it and pressing OK unchanged keeps the
+/// float value as it was.
+pub fn color_edit_button_rgb(ui: &mut Ui, rgb: &mut [f32; 3], title: &str) -> Response {
+    let mut response = color_swatch_button(ui, Color32::from(egui::Rgba::from_rgb(rgb[0], rgb[1], rgb[2])), title);
+    if let Some(color) = crate::color_picker_ui::take_widget_color(ui.ctx(), response.id) {
+        *rgb = color.map(egui::ecolor::linear_from_gamma);
         response.mark_changed();
     }
-    let rgba = egui::Rgba::from_rgb(rgb[0], rgb[1], rgb[2]);
-    let cache = response.id.with("linear-hsva");
-    let mut hsva = ui
-        .ctx()
-        .data(|d| d.get_temp::<(egui::Rgba, egui::ecolor::Hsva)>(cache))
-        .filter(|(previous, _)| *previous == rgba)
-        .map(|(_, hsva)| hsva)
-        .unwrap_or_else(|| egui::ecolor::Hsva::from(rgba));
-    swatch_popup(&response).show(|ui| {
-        if egui::color_picker::color_picker_hsva_2d(ui, &mut hsva, egui::color_picker::Alpha::Opaque) {
-            let color = egui::Rgba::from(hsva);
-            *rgb = [color.r(), color.g(), color.b()];
-            response.mark_changed();
-        }
-        if let Some(color) = crate::screen_picker::button(ui, id) {
-            *rgb = to_linear(color);
-            hsva = egui::ecolor::Hsva::from(egui::Rgba::from_rgb(rgb[0], rgb[1], rgb[2]));
-            response.mark_changed();
-        }
-    });
-    ui.ctx().data_mut(|d| d.insert_temp(cache, (egui::Rgba::from_rgb(rgb[0], rgb[1], rgb[2]), hsva)));
+    if response.clicked() {
+        let encoded = rgb.map(|c| if c.is_finite() { egui::ecolor::gamma_from_linear(c.clamp(0.0, 1.0)) } else { 0.0 });
+        crate::color_picker_ui::request_for_widget(ui.ctx(), response.id, title, encoded);
+    }
     response
 }
 
 #[cfg(test)]
-mod screen_color_tests {
+mod color_button_tests {
     use super::*;
-    use crate::screen_picker::{Capture, Pending};
     use egui_kittest::{Harness, kittest::Queryable};
-    #[test]
-    fn float_picker_keeps_precision_and_converts_screen_srgb_to_linear() {
-        let services = crate::Services {
-            screen_pick: Some(Box::new(|_| {
-                let (tx, receiver) = std::sync::mpsc::channel();
-                tx.send(Ok(Capture::Color(Some([0.5, 0.25, 1.0])))).unwrap();
-                Pending { receiver, cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) }
-            })),
-            ..Default::default()
-        };
-        let original = [0.123456, 0.234567, 0.345678];
-        let app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), services);
-        let mut h = Harness::builder().with_size(vec2(600.0, 500.0)).build_ui_state(
-            |ui, state: &mut (crate::PhotocraftApp, [f32; 3])| {
-                crate::screen_picker::tick(&mut state.0, ui.ctx());
-                color_edit_button_rgb(ui, &mut state.1);
+
+    type State<T> = (crate::PhotocraftApp, T, bool);
+
+    /// Draw `swatch` with the dialogs, the frame loop's [`crate::color_picker_ui::widget_tick`] first.
+    fn harness<T: 'static>(value: T, swatch: fn(&mut Ui, &mut T) -> Response) -> Harness<'static, State<T>> {
+        let app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        let mut h = Harness::builder().with_size(vec2(900.0, 600.0)).build_ui_state(
+            move |ui, state: &mut State<T>| {
+                crate::color_picker_ui::widget_tick(&mut state.0, ui.ctx());
+                state.2 = swatch(ui, &mut state.1).changed();
+                crate::dialogs::show(&mut state.0, ui.ctx());
             },
-            (app, original),
+            (app, value, false),
         );
+        crate::PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.run_steps(2);
-        assert_eq!(h.state().1, original);
-        h.get_by_role(egui::accesskit::Role::ColorWell).click();
-        h.run_steps(3);
-        for (actual, expected) in h.state().1.iter().zip(original) {
-            assert!((actual - expected).abs() < 0.000001, "opening the float popup must not quantize to 8 bits");
-        }
-        h.get_by_label("Pick screen color").click();
-        h.run_steps(3);
-        for (actual, expected) in h.state().1.iter().zip([0.21404114, 0.05087609, 1.0]) {
-            assert!((actual - expected).abs() < 0.000001);
-        }
+        h
     }
+
+    fn pick<T>(h: &mut Harness<'static, State<T>>, hex: &str, ok: bool) {
+        h.get_by_label("Color Picker (Glow Color)").click();
+        h.run_steps(3);
+        let d = h.state().0.ui.dialogs.last().expect("the swatch opens the Color Picker dialog");
+        assert_eq!(d.fields["__label"], "Color Picker (Glow Color)");
+        let id = d.id;
+        h.state_mut().0.ui.dialog_mut(id).unwrap().fields.insert("color".into(), serde_json::json!(hex));
+        h.run_steps(1);
+        h.get_by_label(if ok { "OK" } else { "Cancel" }).click();
+        h.run_steps(1);
+    }
+
     #[test]
-    fn compact_picker_delivers_screen_color_after_popup_closes_and_keeps_alpha() {
+    fn swatch_opens_the_full_picker_and_ok_sets_the_colour_once_keeping_alpha() {
         for (original, expected) in [
             (Color32::from_rgba_unmultiplied(40, 50, 60, 128), Color32::from_rgba_unmultiplied(255, 0, 128, 128)),
             (Color32::from_rgb_additive(40, 50, 60), Color32::from_rgb_additive(255, 0, 128)),
         ] {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let mut receiver = Some(rx);
-            let services = crate::Services {
-                screen_pick: Some(Box::new(move |_| Pending {
-                    receiver: receiver.take().unwrap(),
-                    cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                })),
-                ..Default::default()
-            };
-            let app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), services);
-            let mut h = Harness::builder().with_size(vec2(600.0, 500.0)).build_ui_state(
-                |ui, state: &mut (crate::PhotocraftApp, Color32, bool)| {
-                    crate::screen_picker::tick(&mut state.0, ui.ctx());
-                    state.2 = color_edit_button_srgba(ui, &mut state.1).changed();
-                },
-                (app, original, false),
-            );
-            h.get_by_role(egui::accesskit::Role::ColorWell).click();
+            let mut h = harness(original, |ui, c| color_edit_button_srgba(ui, c, "Color Picker (Glow Color)"));
+            pick(&mut h, "#336699", false);
             h.run_steps(3);
-            h.get_by_label("Pick screen color").click();
-            h.run_steps(2);
-            assert_eq!(h.state().1, original);
-            egui::Popup::close_all(&h.ctx);
-            tx.send(Ok(Capture::Color(Some([1.0, 0.0, 0.5])))).unwrap();
-            h.run_steps(1);
-            assert!(h.state().2);
-            assert_eq!(h.state().1.a(), original.a());
+            assert_eq!(h.state().1, original, "Cancel leaves the colour");
+            assert!(h.state().0.ui.dialogs.is_empty());
+            pick(&mut h, "#ff0080", true);
+            let mut changed = 0;
+            for _ in 0..4 {
+                h.step();
+                changed += usize::from(h.state().2);
+            }
+            assert_eq!(changed, 1, "the pick commits once");
             assert_eq!(h.state().1, expected);
-            h.run_steps(1);
-            assert!(!h.state().2, "the pick commits once");
+            assert_eq!(crate::paint_picker::recent_colors(&h.state().0.session).first().copied().map(crate::color_picker_ui::hex).as_deref(), Some("#ff0080"));
         }
+    }
+
+    #[test]
+    fn float_swatch_keeps_precision_until_a_new_colour_and_stores_linear() {
+        let original = [0.123456, 0.234567, 0.345678];
+        let mut h = harness(original, |ui, c| color_edit_button_rgb(ui, c, "Color Picker (Glow Color)"));
+        h.get_by_label("Color Picker (Glow Color)").click();
+        h.run_steps(3);
+        h.get_by_label("OK").click();
+        h.run_steps(4);
+        assert_eq!(h.state().1, original, "OK on the opening colour must not quantize to 8 bits");
+        pick(&mut h, "#8040ff", true);
+        h.run_steps(3);
+        for (actual, expected) in h.state().1.iter().zip([0.21586053, 0.051269468, 1.0]) {
+            assert!((actual - expected).abs() < 0.00001, "{actual} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn eight_bit_swatch_is_opaque() {
+        let mut h = harness([10u8, 20, 30], |ui, c| color_edit_button_srgb(ui, c, "Color Picker (Glow Color)"));
+        pick(&mut h, "#abcdef", true);
+        h.run_steps(3);
+        assert_eq!(h.state().1, [0xab, 0xcd, 0xef]);
     }
 }
 

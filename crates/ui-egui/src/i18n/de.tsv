@@ -3393,3 +3393,12 @@ curves	Smooth	Glätten
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Color Picker	Farbwähler
+	Recently Used Colors	Zuletzt verwendete Farben
+	Stop Color	Farbe der Farbunterbrechung
+	Select a shape layer to use a gradient	Wählen Sie eine Formebene, um einen Verlauf zu verwenden
+	Shapes can't use patterns yet	Formen können noch keine Muster verwenden
+	Solid Color	Volltonfarbe
+	Tint Color	Tönungsfarbe

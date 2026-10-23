@@ -4127,3 +4127,9 @@ cameraRaw	Dehaze	Odstranění oparu
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Recently Used Colors	Nedávno použité barvy
+	Stop Color	Barva zarážky
+	Select a shape layer to use a gradient	Pro přechod vyberte vrstvu tvaru
+	Shapes can't use patterns yet	Tvary zatím nemohou používat vzorky

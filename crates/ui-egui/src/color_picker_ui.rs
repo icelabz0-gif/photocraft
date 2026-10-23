@@ -751,8 +751,82 @@ pub fn take_add_swatch(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     }
 }
 
-/// OK: set the foreground or background colour.
+/// A colour swatch widget asked for the Color Picker on its colour ([`request_for_widget`]).
+#[derive(Clone)]
+struct WidgetRequest {
+    widget: u64,
+    title: String,
+    rgb: [f32; 3],
+}
+
+fn widget_requests() -> egui::Id {
+    egui::Id::new("color-picker-widget-requests")
+}
+
+fn widget_results() -> egui::Id {
+    egui::Id::new("color-picker-widget-results")
+}
+
+/// A colour swatch (`widgets::color_edit_button*`) was clicked: open the Color Picker titled
+/// `title` on `rgb` next frame ([`widget_tick`], which has the app). OK hands the colour back to the
+/// swatch through [`take_widget_color`]; Cancel leaves it alone.
+pub fn request_for_widget(ctx: &egui::Context, widget: egui::Id, title: &str, rgb: [f32; 3]) {
+    let rgb = rgb.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 });
+    ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<WidgetRequest>>(widget_requests()).push(WidgetRequest { widget: widget.value(), title: title.to_string(), rgb })
+    });
+    ctx.request_repaint();
+}
+
+/// The colour the Color Picker of swatch `widget` returned with OK, once.
+pub fn take_widget_color(ctx: &egui::Context, widget: egui::Id) -> Option<[f32; 3]> {
+    ctx.data_mut(|d| {
+        let results = d.get_temp_mut_or_default::<Vec<(u64, [f32; 3])>>(widget_results());
+        let i = results.iter().position(|(w, _)| *w == widget.value())?;
+        Some(results.remove(i).1)
+    })
+}
+
+/// Each frame, before the panels: hand colours confirmed last frame to their swatches, and open
+/// the Color Picker a swatch asked for.
+pub fn widget_tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    if !app.widget_colors.is_empty() {
+        let done = std::mem::take(&mut app.widget_colors);
+        ctx.data_mut(|d| {
+            let results = d.get_temp_mut_or_default::<Vec<(u64, [f32; 3])>>(widget_results());
+            // A swatch that is gone never takes its colour: keep only the newest one per swatch.
+            results.retain(|(w, _)| !done.iter().any(|(x, _)| x == w));
+            results.extend(done);
+            let excess = results.len().saturating_sub(16);
+            results.drain(..excess);
+        });
+        ctx.request_repaint();
+    }
+    let requests = ctx.data_mut(|d| {
+        let r = d.get_temp::<Vec<WidgetRequest>>(widget_requests());
+        d.remove::<Vec<WidgetRequest>>(widget_requests());
+        r
+    });
+    // One picker per click; a second click before it opened asks for the same thing.
+    if let Some(r) = requests.and_then(|r| r.into_iter().last()) {
+        let mut f = fields_with_web(app, "widget", &r.title, r.rgb);
+        f.insert("__widget".into(), json!(r.widget));
+        app.ui.open_dialog(DialogKind::Command, f);
+    }
+}
+
+/// OK: apply the colour to what the picker was opened for, and add it to the Recently Used
+/// Colors, as Photoshop does for a colour picked in the Color Picker.
 pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
+    let r = confirm_target(app, f)?;
+    if let Some(rgb) = f.get("color").and_then(Value::as_str).and_then(parse_hex) {
+        crate::paint_picker::remember(app, rgb);
+    }
+    Ok(r)
+}
+
+/// OK: set the foreground or background colour, or whatever else the picker was opened for.
+fn confirm_target(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
     if crate::type_panels_ui::color_picker::owns(f) {
         return crate::type_panels_ui::color_picker::confirm(app, f);
     }
@@ -781,6 +855,15 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
         };
         let d = app.ui.dialog_mut(dialog).ok_or("the dialog this colour was for is closed")?;
         set_field(&mut d.fields, field, json!(color))?;
+        return Ok(json!({ "color": color }));
+    }
+    if target == "widget" {
+        let widget = f.get("__widget").and_then(Value::as_u64).ok_or("the Color Picker has no swatch to set")?;
+        let rgb = parse_hex(color).ok_or("not a colour")?;
+        // OK on the colour it opened with leaves the swatch's own (possibly finer) value alone.
+        if f.get("color") != f.get("__orig") {
+            app.widget_colors.push((widget, rgb));
+        }
         return Ok(json!({ "color": color }));
     }
     if target == "cropShield" {

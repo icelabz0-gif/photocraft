@@ -1,6 +1,8 @@
 # Shape stroke options
 
-Updated 2026-10-15: retain stroke paint and options when width reaches zero (#6191).
+Updated 2026-10-21: Photoshop's Fill/Stroke popover (paint types, Recently Used Colors, swatch
+folders, full Color Picker). 2026-10-15: retain stroke paint and options when width reaches zero
+(#6191).
 
 PhotoCraft's Shape tool options bar has a Stroke Options button beside the existing width
 and colour controls. It sets defaults for new Rectangle, Ellipse, Triangle, Polygon, Line
@@ -8,8 +10,16 @@ and Custom Shape layers. Pen in Shape mode uses the same style defaults; open Pe
 their existing foreground colour and minimum 1 px width. To edit an existing shape,
 use Properties → Appearance → Stroke Options.
 
-Fill and Stroke swatches are clickable and open the existing compact colour picker. Choosing
-a colour preserves its alpha; No Color removes the corresponding paint. Tool-bar fill uses
+Fill and Stroke swatches open Photoshop's paint popover (`paint_picker.rs`, updated
+2026-10-21): the paint types No Color, Solid Color, Gradient and Pattern along the top, the
+Color Picker button at the top right, then Recently Used Colors (15, newest first, kept between
+sessions in `Preferences::recent_colors`) over the swatch library's folders. Gradient lists the
+gradient presets and paints the selected shape (the next shape's defaults hold colours only, so it
+is off without a selected shape); Pattern is shown but off until shapes render pattern paint. The
+Color Picker button opens the full Color Picker dialog (HSB, RGB, Lab, CMYK, hex, eyedropper),
+titled Color Picker (Fill Color) or (Stroke Color), with a live canvas preview; OK is one undo
+step and also turns No Color or a gradient into that solid colour. Choosing a colour preserves
+its alpha; No Color removes the corresponding paint. Tool-bar fill uses
 the foreground colour and stroke uses the background colour, as before. Choosing a stroke
 colour or style deliberately enables a 3 px stroke when no stroke is present. The style button
 remains available with no stroke, but opening or dismissing it alone does not enable one.

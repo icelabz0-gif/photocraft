@@ -3591,3 +3591,10 @@ curves	Smooth	매끄럽게
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Shape Fill/Stroke popover and colour swatches opening the Color Picker
+	Color Picker	색상 선택기
+	Recently Used Colors	최근 사용한 색상
+	Stop Color	정지점 색상
+	Select a shape layer to use a gradient	그레이디언트를 사용하려면 모양 레이어를 선택하세요
+	Shapes can't use patterns yet	모양에는 아직 패턴을 사용할 수 없습니다
