@@ -546,6 +546,10 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             };
             *slot = !*slot;
             let on = *slot;
+            if id == "view.show.grid" && on {
+                // Like the other Show items, enabling Grid also restores hidden Extras.
+                app.ui.view.extras = true;
+            }
             if id == "view.rulers" {
                 crate::prefs_ui::remember_rulers(app, on);
             }
@@ -1289,8 +1293,19 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
     }
     if let Some(id) = clicked {
         let ctx = ui.ctx().clone();
-        let id = alt_click(id, ctx.input(|i| i.modifiers.alt));
-        if let Err(e) = invoke(app, &ctx, &id, json!({})) {
+        let alt = ctx.input(|i| i.modifiers.alt);
+        // ⌥ while choosing an Image › Adjustments item opens it at its last settings (#8900).
+        let r = if alt && crate::adjust_dialog::has_dialog(&id) {
+            let opened = crate::adjust_dialog::open_last(app, &id).map(|_| Value::Null).ok_or_else(|| "no document".to_string());
+            // Edit › Search's recents, as `invoke` notes a plain click.
+            if opened.is_ok() {
+                crate::palette::note_recent(&ctx, &id);
+            }
+            opened
+        } else {
+            invoke(app, &ctx, &alt_click(id, alt), json!({}))
+        };
+        if let Err(e) = r {
             app.ui.status = e;
             app.ui.status_error = true;
         }
@@ -1645,6 +1660,27 @@ pub fn apply_workspace(app: &mut PhotocraftApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn showing_grid_restores_hidden_extras() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        let ctx = egui::Context::default();
+        app.ui.extras.grid = false;
+        app.ui.view.extras = false;
+
+        assert_eq!(invoke(&mut app, &ctx, "view.show.grid", json!({})).unwrap(), json!(true));
+        assert_eq!(checked(&app, "view.show.grid"), Some(true));
+        assert!(app.ui.view.extras, "showing Grid must make the overlay visible when Extras was hidden");
+
+        assert_eq!(invoke(&mut app, &ctx, "view.show.grid", json!({})).unwrap(), json!(false));
+        assert!(!app.ui.extras.grid);
+        assert!(app.ui.view.extras);
+
+        app.ui.extras.grid = true;
+        app.ui.view.extras = false;
+        assert_eq!(invoke(&mut app, &ctx, "view.show.grid", json!({})).unwrap(), json!(false));
+        assert!(!app.ui.view.extras, "hiding Grid must leave hidden Extras alone");
+    }
 
     #[test]
     fn sync_with_system_menu_keeps_saved_slots_and_its_checkmark_across_palettes() {
