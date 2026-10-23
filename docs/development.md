@@ -40,7 +40,7 @@ cargo run --release -p photocraft -- --control 7878 --control-token-file .privat
   --automation-read-root work --automation-write-root work
 cargo test --workspace                                     # everything
 cargo xtask test                                           # tests (nextest when installed) + doctests
-cargo xtask ci                                             # fmt + clippy + tests + doctests + layers + wasm
+cargo xtask ci                                             # the CI gate: fmt, clippy, layers, scorecard, tests, panic_hunt, doctests, wasm, i18n report
 cargo xtask stats                                          # tests and lines per crate
 cargo xtask parity                                         # Photoshop menu coverage -> docs/parity-checklist.md
 ```
@@ -110,7 +110,7 @@ CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo test --workspace     # runs the Japa
 - **UI:** the Japanese fonts (BIZ UDPGothic Regular first) are the first Japanese fallback in the lazy CJK loader (`crates/ui-egui/src/cjk_fonts.rs`), ahead of the system Japanese fonts and in the same locale script order, appended last to every egui family with the usual baseline alignment.
 - **Type tool:** the text engine registers them in `FontDb::new` (so also with no system fonts) and puts them first in the Japanese slot of the locale-ordered fallback list: BIZ UDPGothic for sans runs, Shippori Mincho / BIZ UDMincho for serif runs.
 - **Web:** the wasm32 build never embeds craft-fonts, even with `CRAFT_FONTS_DIR` set: measured on 2026-10-06, the UI face alone took the release wasm from 24.19 MB to 28.87 MB, over the 24 MiB gate in `packaging/web/package.sh`. Instead it loads fonts served next to it, on demand: `fonts/manifest.txt` beside `index.html`, in craft-fonts' manifest format (`crates/text/src/served.rs`; hosting: `packaging/web/README.md` › Fonts). `PHOTOCRAFT_WEB_FONTS_DIR="$PWD/../craft-fonts" packaging/web/package.sh` puts craft-fonts there. Served families are in the font menus and are fetched when picked or when a document's text needs them; they aren't in the script fallback list yet, so Japanese text set in a Latin font still needs a Japanese font picked (#1615).
-- Tests that need the fonts skip with a message when `CRAFT_FONTS` is empty; CI runs them again with `CRAFT_FONTS_DIR` set, in its own Linux job (`test (with craft-fonts)`). Desktop releases check out craft-fonts at the commit pinned in `.github/workflows/release.yml` (`CRAFT_FONTS_REF`; ci.yml pins the same commit) and ship each font's `OFL.txt` as `OFL-<family>.txt`.
+- Tests that need the fonts skip with a message when `CRAFT_FONTS` is empty; CI's Linux gate builds with `CRAFT_FONTS_DIR` set and `CRAFT_FONTS_REQUIRED=1`, so they run there. Desktop releases check out craft-fonts at the commit pinned in `.github/workflows/release.yml` (`CRAFT_FONTS_REF`; ci.yml pins the same commit) and ship each font's `OFL.txt` as `OFL-<family>.txt`.
 
 ## One instance per user
 
@@ -261,6 +261,16 @@ Tools:
 - `jobs_list` (running background jobs with progress, then recently finished ones with their result or error), `jobs_cancel` (one job by id, or every running job)
 - bridge only: `ui_inspect`, `ui_screenshot`, `ui_pointer`, `ui_menu_invoke`, `ui_set`, `control_call`
 
+`doc_export_layers` in workspace headless mode returns `{files, count, skipped}`. `count` is
+only the number of files written. Each skipped top-level layer is reported as
+`{layer, name, reason}` (session id, original name, explanation); `skipped` is `[]` when every
+layer exports. Hidden layers are reported when `visible_only` is true (the default; `visibleOnly` in the engine/serve params), and
+standalone adjustments are reported because they have no pixels of their own. Groups still
+export merged, so their children are not separate skips. Filename numbering is unchanged;
+encoding or write failures remain errors. The engine command and trusted-local exports add
+the same `skipped` array to their existing `{files}` response. See the
+[`doc.exportLayers` protocol entry](control-protocol.md#headless-server) for details.
+
 Claude Code (`.mcp.json` in the repo root, or `claude mcp add`):
 
 ```json
@@ -331,7 +341,11 @@ the live command registry (`menus::is_live`) and rewrites [`docs/parity-checklis
 `crates/ui-egui/src/i18n/mod.rs` registry, in stable language-code order. Its English-key set is
 derived from UI `tl!` literals, the menu catalog and UI command table, and menu command labels in
 the engine source. Catalog rows are validated for malformed and duplicate keys; unused legacy
-translations do not affect the denominator. Unregistered locale TSV files are ignored.
+translations do not affect the denominator. Unregistered locale TSV files are ignored. After the
+counts it lists, per language, the source keys the catalog lacks (one line for a language with
+none). A missing translation shows in English and fails nothing: `cargo xtask ci` runs the report
+as its last step so the list appears in the log, and only prints a warning if the report itself
+can't run.
 
 ## Testing strategy
 
