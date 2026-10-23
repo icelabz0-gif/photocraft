@@ -99,13 +99,14 @@ pub fn liquify_faces(cmd: &str, p: &Value) -> Result<Vec<FaceSpec>> {
     Ok(out)
 }
 
-/// The landmarks and sliders of each face: given ones as they are, the others from `detect`
-/// (called at most once).
+/// The landmarks and sliders of each face that changes something: given ones as they are, the
+/// others from `detect` (called at most once). Faces with neutral sliders are left out, so they
+/// never start detection or fail on a face that isn't there.
 pub fn resolve_faces(cmd: &str, specs: &[FaceSpec], detect: impl FnOnce() -> Result<Vec<Landmarks>>) -> Result<Vec<(Landmarks, FaceSliders)>> {
     let mut found: Option<Vec<Landmarks>> = None;
     let mut detect = Some(detect);
     let mut out = Vec::with_capacity(specs.len());
-    for f in specs {
+    for f in specs.iter().filter(|f| !f.sliders.is_neutral()) {
         let lm = match f.landmarks {
             Some(lm) => lm,
             None => {
@@ -119,6 +120,24 @@ pub fn resolve_faces(cmd: &str, specs: &[FaceSpec], detect: impl FnOnce() -> Res
         out.push((lm, f.sliders));
     }
     Ok(out)
+}
+
+/// `p` with the landmarks `resolve_faces` used written into each face that changes something, so a
+/// smart filter replays the same warp without detecting again. `specs` is `liquify_faces(p)`, one
+/// per entry of `p["faces"]`; `faces` is what `resolve_faces` made of them.
+fn with_resolved_landmarks(p: &Value, specs: &[FaceSpec], faces: &[(Landmarks, FaceSliders)]) -> Value {
+    let mut out = p.clone();
+    let Some(list) = out.get_mut("faces").and_then(Value::as_array_mut) else { return out };
+    let mut resolved = faces.iter();
+    for (v, spec) in list.iter_mut().zip(specs) {
+        if spec.sliders.is_neutral() {
+            continue;
+        }
+        let (Some((lm, _)), Value::Object(o)) = (resolved.next(), v) else { break };
+        o.remove("face");
+        o.insert("landmarks".into(), json!(lm));
+    }
+    out
 }
 
 /// Landmarks of the faces in `surf` over `canvas`, best first.
@@ -368,11 +387,13 @@ fn liquify(s: &mut Session, p: &Value) -> Result<Value> {
     if field.is_identity() && !smart {
         return Ok(json!({"layer": id.0, "changed": false}));
     }
+    // A smart filter stores the landmarks it was made with, not face indices to detect again.
+    let stored = with_resolved_landmarks(p, &specs, &faces);
     let r = run_on_layer(
         s,
         LIQUIFY,
         "Liquify",
-        p,
+        &stored,
         false,
         &|surf, sel, _| {
             let out = apply_liquify(surf, &field);
