@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { workspace = true }
 craft-print = { workspace = true }
 craft-ui = { workspace = true }
 photocraft-geom = { workspace = true }
@@ -43,6 +44,7 @@ flate2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }
+tempfile = "3"
 # Safe native UI-language APIs (Windows/macOS); no subprocess or web dependency.
 sys-locale = "=0.3.2"
 

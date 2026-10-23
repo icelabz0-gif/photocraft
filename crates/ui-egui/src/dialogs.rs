@@ -394,6 +394,13 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     ui.add_space(8.0);
                     about_tab_body(app, ui, chosen);
                 }
+                DialogKind::Command if crate::telegram::owns(&fields) => {
+                    // Title and OK stay on screen. The rest scrolls when the window is shorter than the form.
+                    let room = (ctx.content_rect().height() - DIALOG_CHROME).max(120.0);
+                    egui::ScrollArea::vertical().id_salt(id.with("body")).max_height(room).show(ui, |ui| {
+                        crate::telegram::body(app, ui, &mut fields);
+                    });
+                }
                 DialogKind::Command if crate::guide_layout_ui::owns(&fields) => outcome = crate::guide_layout_ui::body(app, ui, &mut fields, interactive),
                 DialogKind::Command if crate::brush_preset_dialog::owns(&fields) => {
                     outcome = crate::brush_preset_dialog::body(app, ui, &mut fields, interactive)
@@ -737,7 +744,9 @@ pub fn is_route_marker(key: &str) -> bool {
 /// the engine (a disk-change save, Export As, Save for Web, Print), so automation is judged for
 /// that command rather than for the dialog's `__command`.
 fn file_command(fields: &Fields) -> Option<&'static str> {
-    if crate::disk_change_prompt::owns(fields) {
+    if crate::telegram::owns(fields) {
+        Some("file.sendTelegram")
+    } else if crate::disk_change_prompt::owns(fields) {
         Some("file.save")
     } else if fields.contains_key("__export") {
         Some("file.export.exportAs")
@@ -769,6 +778,9 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
             return Err("confirm or cancel the guide color picker first".into());
         }
         crate::guide_layout_ui::validate(app, &d.fields)?;
+    }
+    if let Some(d) = app.ui.dialogs.iter().find(|d| d.id == id).filter(|d| crate::telegram::owns(&d.fields)) {
+        crate::telegram::validate(app, &d.fields)?;
     }
     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
     match d.kind {
@@ -805,6 +817,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
         DialogKind::Command if crate::crop_presets::owns(&d.fields) => crate::crop_presets::confirm(app, &d.fields),
         DialogKind::Command if crate::variables_ui::owns(&d.fields) => crate::variables_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::file_ui::owns(&d.fields) => crate::file_ui::confirm(app, &d.fields),
+        DialogKind::Command if crate::telegram::owns(&d.fields) => crate::telegram::confirm(app, &d.fields),
         DialogKind::Command if crate::new_guide_ui::owns(&d.fields) => crate::new_guide_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::color_picker_ui::owns(&d.fields) => crate::color_picker_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::color_range_ui::owns(&d.fields) => crate::color_range_ui::confirm(app, &d.fields),
@@ -894,6 +907,12 @@ pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 /// schema dialog for filters, the Color Range dialog for `select.colorRange`, otherwise a bare
 /// confirm dialog.
 pub fn open_command_dialog(app: &mut PhotocraftApp, command: &str, label: &str) -> u64 {
+    if command == "file.sendTelegram"
+        && let Ok(value) = crate::telegram::command(app)
+        && let Some(id) = value.get("dialog").and_then(serde_json::Value::as_u64)
+    {
+        return id;
+    }
     if command == "view.newGuideLayout" {
         return crate::guide_layout_ui::open(app);
     }
@@ -1247,6 +1266,22 @@ mod tests {
         }
         h.run_steps(3);
         assert_eq!(angle(&h), Some(270.0));
+    }
+
+    #[test]
+    fn a_tall_share_dialog_keeps_its_title_and_buttons_in_a_short_window() {
+        use egui_kittest::kittest::Queryable;
+        let size = egui::vec2(900.0, 520.0);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(size).build_ui_state(|ui, app| show(app, ui.ctx()), app);
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        open_command_dialog(h.state_mut(), "file.sendTelegram", "Send to Telegram");
+        h.run_steps(4);
+        for label in ["Send to Telegram", "OK", "Cancel"] {
+            let r = h.get_by_label(label).rect();
+            assert!(r.top() >= 0.0 && r.bottom() <= size.y, "{label} at {r:?} is outside the {size:?} window");
+        }
     }
 
     #[test]

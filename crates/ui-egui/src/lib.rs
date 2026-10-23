@@ -221,6 +221,7 @@ pub mod swatches_ui;
 pub mod symmetry_ui;
 mod tab_strip;
 pub mod targa_options_ui;
+pub mod telegram;
 pub mod texel_guard;
 pub mod text_field_menu;
 pub mod theme;
@@ -673,7 +674,25 @@ pub struct Services {
     /// while AppKit's run loop is still going crashes or hangs Touch Bar Macs (#1575, #1458).
     /// Without one, eframe closes the window and the app ends with it.
     pub quit: Option<QuitFn>,
+    /// POST a Telegram `sendDocument` body. `None` on the web. The URL holds the bot token;
+    /// the implementation must not log it. Returns Telegram's JSON reply.
+    pub telegram_send: Option<TelegramSendFn>,
+    /// GET a Telegram bot method (`getUpdates`). Same secrecy rule as [`Self::telegram_send`].
+    pub telegram_get: Option<TelegramGetFn>,
+    pub telegram_download: Option<TelegramDownloadFn>,
+    /// The desktop settings file for File › Send to Telegram (not preferences: those are visible
+    /// to agents). `None` on the web.
+    pub load_telegram: Option<LoadTextFn>,
+    pub save_telegram: Option<SaveTextFn>,
 }
+
+/// POST `body` (`content_type`) to `url` for [`Services::telegram_send`]. `Send + Sync` so a
+/// send can finish on a background thread while the window keeps drawing.
+pub type TelegramSendFn = std::sync::Arc<dyn Fn(&str, &str, &[u8]) -> Result<String, String> + Send + Sync>;
+/// GET `url` for [`Services::telegram_get`].
+pub type TelegramGetFn = std::sync::Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+/// Download a file the bot was sent. Arguments: bot token, file id. At most 20 MB.
+pub type TelegramDownloadFn = std::sync::Arc<dyn Fn(&str, &str) -> Result<Vec<u8>, String> + Send + Sync>;
 
 /// A document histogram being computed off the UI thread: (document, revision, receiver of
 /// (document, compute ms, histograms)).
@@ -686,6 +705,12 @@ pub struct PhotocraftApp {
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
+    /// File › Send to Telegram. Not part of [`UiState`]: the control channel must not see the token.
+    pub telegram: telegram::Settings,
+    /// The Telegram token being edited. Kept outside `UiState` so dialog inspection cannot expose it.
+    pub(crate) telegram_token_draft: String,
+    /// A send whose HTTP request is still running. Polled from the frame loop.
+    pub(crate) telegram_job: Option<telegram::Job>,
     /// Canvas caches per (document, display): CPU textures hold monitor values; the GPU
     /// canvas state is shared (`canvas::GPU_OUTPUT`).
     canvases: HashMap<(DocId, u32), canvas::CanvasCache>,
@@ -1011,6 +1036,9 @@ impl PhotocraftApp {
             session,
             ui: UiState::default(),
             services,
+            telegram: telegram::Settings::default(),
+            telegram_token_draft: String::new(),
+            telegram_job: None,
             canvases: HashMap::new(),
             navigator_textures: HashMap::new(),
             display_memo: HashMap::new(),
@@ -1161,6 +1189,9 @@ impl PhotocraftApp {
         // Saved preferences are in place before the first frame; recovery starts in upkeep.
         prefs_ui::load(&mut app);
         layers_panel_ui::restore_options(&mut app);
+        if let Some(text) = app.services.load_telegram.as_mut().and_then(|load| load()) {
+            app.telegram = telegram::settings_from_json(&text);
+        }
         // After the saved preferences, which say whether the set was already offered.
         kys_import::offer_import(&mut app);
         notices::wayland_file_drop_guidance(&mut app);
@@ -1790,12 +1821,12 @@ impl PhotocraftApp {
         if self.save_options_open() {
             return Err(SAVE_OPTIONS_OPEN.into());
         }
-        let r = self.write_save(path, None, choices)?;
-        // JPEG Options are recorded only where they change something
-        // ([`jpeg_options_ui::plain_save_step`]); the Targa and DDS answers as given.
+        let r = self.write_save(path.clone(), None, choices)?;
+        // Preserve main's JPEG journaling and retain the path for Telegram notification.
         let mut step = jpeg_options_ui::plain_save_step(choices.jpeg);
         FormatChoices { jpeg: None, ..choices }.record(&mut step);
         self.session.journal.push(("file.save".into(), step));
+        telegram::arm_after_save(self, &path, telegram::WriteKind::Save, &r);
         Ok(r)
     }
 
@@ -1809,6 +1840,7 @@ impl PhotocraftApp {
         }
         choices.record(&mut step);
         self.session.journal.push(("file.saveAs".into(), step));
+        telegram::arm_after_save(self, &path, telegram::WriteKind::SaveAs, &r);
         Ok(r)
     }
 
@@ -2294,6 +2326,7 @@ impl eframe::App for PhotocraftApp {
         discard_ui::guard_window_close(self, ctx);
         // Background jobs: apply finished ones, keep frames coming, Esc cancels (before the
         // shortcuts see Esc).
+        crate::telegram::poll(self, ctx);
         if !screen_picker::tick(self, ctx) {
             jobs_ui::tick(self, ctx);
             #[cfg(not(target_arch = "wasm32"))]

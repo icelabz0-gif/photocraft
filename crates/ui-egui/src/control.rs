@@ -1343,7 +1343,7 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         dialogs.push(json!({"id": SHELL_DIALOG, "kind": kind, "title": crate::workspace_ui::title(kind), "fields": fields}));
     }
     dialogs.extend(crate::discard_ui::inspect(app));
-    json!({
+    let mut snapshot = json!({
         "window": {"width": screen.width(), "height": screen.height(), "pixelsPerPoint": ctx.pixels_per_point()},
         "tool": app.ui.tool,
         "toolOptions": app.ui.tool_options,
@@ -1404,7 +1404,24 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         "distort": app.distort.describe(),
         "jobs": crate::jobs_ui::inspect(app),
         "cameraRaw": app.camera_raw.as_ref().map(|d| d.describe(&app.ui.camera_raw_scope, &app.ui.camera_raw_preview)),
-    })
+    });
+    redact_inspected_tokens(&mut snapshot);
+    snapshot
+}
+
+fn redact_inspected_tokens(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in ["token", "botToken", "refreshToken", "accessToken"] {
+                object.remove(key);
+            }
+            for value in object.values_mut() {
+                redact_inspected_tokens(value);
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(redact_inspected_tokens),
+        _ => {}
+    }
 }
 
 pub fn save_screenshot(app: &mut PhotocraftApp, image: &egui::ColorImage, path: Option<&str>) -> Value {
@@ -1441,6 +1458,21 @@ pub fn save_screenshot(app: &mut PhotocraftApp, image: &egui::ColorImage, path: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_inspect_redacts_token_fields_added_to_dialogs() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let mut fields = serde_json::Map::new();
+        fields.insert("token".into(), json!("secret"));
+        fields.insert("nested".into(), json!({"refreshToken": "also-secret", "visible": true}));
+        app.ui.open_dialog(crate::state::DialogKind::Command, fields);
+
+        let snapshot = inspect(&app, &egui::Context::default());
+        let dialog = &snapshot["dialogs"][0]["fields"];
+        assert!(dialog.get("token").is_none());
+        assert!(dialog["nested"].get("refreshToken").is_none());
+        assert_eq!(dialog["nested"]["visible"], true);
+    }
 
     fn call(app: &mut PhotocraftApp, ctx: &egui::Context, method: &str, params: Value) -> Value {
         let (req, _rx) = ControlRequest::new(method, params);
