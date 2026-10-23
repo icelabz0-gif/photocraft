@@ -315,13 +315,22 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
     if let Some(i) = ds.additional.iter().position(|(r, _)| *r == target) {
         let (_, anchors) = ds.additional.remove(i);
         if let Some(old) = ds.target {
-            ds.additional.push((old, std::mem::take(&mut ds.anchors)));
+            let old_anchors = std::mem::take(&mut ds.anchors);
+            if !old_anchors.is_empty() {
+                ds.additional.push((old, old_anchors));
+            }
         }
         ds.target = Some(target);
         ds.anchors = anchors;
     }
     if ds.target != Some(target) {
         *ds = DirectSelection { target: Some(target), ..Default::default() };
+    }
+    let keeps_group = target != PathRef::Pen
+        && (mods.shift || matches!(&hit, Hit::Handle(..)) || matches!(&hit, Hit::Anchor(k) if !mods.alt && !convert && ds.anchors.contains(k)));
+    if !keeps_group {
+        ds.additional.clear();
+        ds.additional_bases.clear();
     }
     let edit = match hit {
         Hit::Handle(k, h) => {
@@ -492,8 +501,27 @@ fn release(app: &mut PhotocraftApp, target: PathRef, base: &Path, edit: &Edit, s
 /// A click on empty canvas deselects.
 fn marquee(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], add: bool) {
     let rect = [start[0], start[1], end[0], end[1]];
-    let hits: Vec<_> = candidates(app).into_iter().map(|(r, path)| (r, edit::anchors_in(&path, rect))).filter(|(_, a)| !a.is_empty()).collect();
+    let mut hits: Vec<_> = candidates(app).into_iter().map(|(r, path)| (r, edit::anchors_in(&path, rect))).filter(|(_, a)| !a.is_empty()).collect();
     let ds = &mut app.ui.direct_selection;
+    // The uncommitted Pen path is edited locally; it cannot share a document command.
+    let document_selected = add
+        && ((ds.target.is_some_and(|t| t != PathRef::Pen) && !ds.anchors.is_empty())
+            || ds.additional.iter().any(|(t, anchors)| *t != PathRef::Pen && !anchors.is_empty()));
+    if document_selected || hits.iter().any(|(t, _)| *t != PathRef::Pen) {
+        hits.retain(|(t, _)| *t != PathRef::Pen);
+        ds.additional.retain(|(t, _)| *t != PathRef::Pen);
+        if ds.target == Some(PathRef::Pen) {
+            ds.target = None;
+            ds.anchors.clear();
+            if !ds.additional.is_empty() {
+                let (target, anchors) = ds.additional.remove(0);
+                ds.target = Some(target);
+                ds.anchors = anchors;
+            }
+        }
+    } else if hits.iter().any(|(t, _)| *t == PathRef::Pen) && ds.target != Some(PathRef::Pen) {
+        *ds = DirectSelection::default();
+    }
     if !add {
         let target = if hits.is_empty() { ds.target } else { None };
         *ds = DirectSelection { target, ..Default::default() };
@@ -520,11 +548,13 @@ fn marquee(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], add: bool) {
     ds.segment = None;
 }
 
+/// Serialize nonempty document selections; transient Pen paths never target engine work paths.
 fn anchor_targets(ds: &DirectSelection) -> Vec<Value> {
     ds.target
         .iter()
         .map(|t| (*t, &ds.anchors))
         .chain(ds.additional.iter().map(|(t, a)| (*t, a)))
+        .filter(|(target, anchors)| *target != PathRef::Pen && !anchors.is_empty())
         .map(|(target, anchors)| {
             let mut p = target.params();
             p["anchors"] = json!(anchors);
@@ -538,7 +568,8 @@ fn anchor_targets(ds: &DirectSelection) -> Vec<Value> {
 /// in progress. Returns true when a key was used.
 pub fn arrow_keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
     let ds = &app.ui.direct_selection;
-    let Some(target) = ds.target.filter(|_| app.ui.tool == Tool::DirectSelection && !ds.anchors.is_empty() && ds.drag.is_none()) else {
+    let selected = !ds.anchors.is_empty() || ds.additional.iter().any(|(t, anchors)| *t != PathRef::Pen && !anchors.is_empty());
+    let Some(target) = ds.target.filter(|t| *t != PathRef::Pen && app.ui.tool == Tool::DirectSelection && selected && ds.drag.is_none()) else {
         return false;
     };
     let anchors = ds.anchors.clone();

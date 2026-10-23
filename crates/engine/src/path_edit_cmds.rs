@@ -66,6 +66,7 @@ fn edit_path(s: &mut Session, cmd: &str, p: &Value, label: &str, f: impl FnOnce(
     Ok(json!({ "name": name, "path": path }))
 }
 
+/// Move one path or atomically stage every selected path before publishing the document edit.
 fn move_anchors(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "path.moveAnchors";
     if let Some(targets) = p.get("targets") {
@@ -264,6 +265,7 @@ mod tests {
         s.active().unwrap().doc.work_path.clone().unwrap()
     }
 
+    /// A malformed later target must preserve both document contents and Undo history.
     #[test]
     fn multi_path_anchor_move_rejects_bad_targets_without_partial_edits() {
         let mut s = session();
