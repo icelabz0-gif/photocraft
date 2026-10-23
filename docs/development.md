@@ -93,6 +93,8 @@ the opted-in test; an unset variable leaves the ordinary behavior tests availabl
 After review, remove only the two generated PNGs and their owned temporary directory. The same
 Rust test and variable work on Windows with the native shell's environment-variable syntax.
 
+**GPU tests without a GPU.** The GitHub runners have no GPU, so CI runs the GPU tests on software adapters: WARP (DX12) on Windows, and on Linux llvmpipe over GL in the Test step. llvmpipe over GL can't render `Rgba32Float`, so the GPU parity tests skip their comparison there; the Linux job's "GPU tests on lavapipe" step installs Mesa's Vulkan driver (`mesa-vulkan-drivers`) and runs the `gpu` test group again, on lavapipe, and fails if any test printed a skip. To run them the same way on a Linux machine without a GPU: `sudo apt install mesa-vulkan-drivers`, then `cargo nextest run -p photocraft-gpu` (wgpu picks lavapipe over GL once it is installed).
+
 ## Fonts (craft-fonts)
 
 Font assets shared by the Crafting Apps live in [storytold/craft-fonts](https://github.com/storytold/craft-fonts), never in this repo: don't commit font files here (Inter and JetBrains Mono in `assets/fonts/` are the only exceptions; new fonts go to craft-fonts). The rules are in `craftrules/standards/fonts.md` in a sibling `craftrules` checkout (see below); that repository is not public, so outside contributors can ask a maintainer for the rules that apply to their change.

@@ -7,7 +7,8 @@
 #
 # GPU tests: each test is its own process here, so the in-process `gpu_lock()` mutexes no longer
 # serialize them. Too many concurrent wgpu devices time out (`PollError: ... Wait timed out`), so
-# this group caps them at 4.
+# this group caps them at 4. ci.yml's "GPU tests on lavapipe" step runs this filter again: keep them
+# the same.
 [test-groups]
 gpu = { max-threads = 4 }
 

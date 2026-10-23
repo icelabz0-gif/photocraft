@@ -225,6 +225,30 @@ jobs:
           cargo nextest run --profile ci --workspace --locked --features heif "${targets[@]}"
         shell: bash
 
+      # The GPU tests again, on Mesa's lavapipe (Vulkan, a software adapter). The runner has no GPU,
+      # so Test ran them on llvmpipe over GL, which can't render Rgba32Float: the GPU parity tests
+      # passed there without comparing anything. lavapipe can, so here they compare. The filter is
+      # the `gpu` group of .config/nextest.toml, and the build is Test's (same features and targets).
+      # The step fails if a test printed a skip; the timing tests' software-adapter `SKIP` is
+      # intended (a software adapter has no GPU/CPU time split to measure).
+      - name: GPU tests on lavapipe
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+          gpu='package(photocraft-gpu) | (package(photocraft-ui-egui) & (kind(test) | test(/canvas|gpu|mip|type_tool|background_redraw::|floating_group_titles|swap_arrow::tests::rendered_glyph/)))'
+          cargo nextest run --profile ci --workspace --locked --features heif --lib --bins --tests -E "$gpu" \
+            --success-output immediate --color never 2>&1 | tee "$RUNNER_TEMP/gpu-tests.log"
+          if ! grep -q "GPU parity backend: Vulkan" "$RUNNER_TEMP/gpu-tests.log"; then
+            echo "::error::the GPU parity tests did not run on Vulkan (lavapipe)"
+            exit 1
+          fi
+          if grep -qE "skipping|no (GPU )?adapter" "$RUNNER_TEMP/gpu-tests.log"; then
+            grep -E "skipping|no (GPU )?adapter" "$RUNNER_TEMP/gpu-tests.log" | sort | uniq -c
+            echo "::error::GPU tests skipped on lavapipe (lines above)"
+            exit 1
+          fi
+        shell: bash
+
       # Every command against adversarial params must return Err, never panic or hang (AGENTS.md
       # Rule 9). It is `#[ignore]`d (slow), so Test skips it. Same packages, features and targets as
       # Test, so nothing rebuilds: `--test panic_hunt` would drop the other crates' dev-dependency
