@@ -70,12 +70,15 @@ fn traces_a_straight_edge_through_a_gradient_polarity_change() {
     let read = Cell::new(0);
     // The contrast stays high, but the edge changes from dark-to-light to light-to-dark halfway
     // down. The horizontal seam intersects it; the guide stays on the vertical contour.
-    let mut f = image(|x, y| {
-        let left = x < 32;
-        let top = y < 32;
-        let white = left != top;
-        grey(if white { 255 } else { 0 })
-    }, &read);
+    let mut f = image(
+        |x, y| {
+            let left = x < 32;
+            let top = y < 32;
+            let white = left != top;
+            grey(if white { 255 } else { 0 })
+        },
+        &read,
+    );
     let mut t = Tracer::new(Rect::new(0, 0, 64, 64));
     let path = t.trace(&mut f, [32.0, 5.0], [32.0, 59.0], &[[32.0, 32.0]], Settings::default());
     assert_eq!(path.first(), Some(&[32.0, 5.0]));
