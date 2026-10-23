@@ -634,6 +634,8 @@ impl Layouter {
             // fetches it (`served`); it joins the fallback stack once it arrives.
             crate::served::request_for_text(&ptext);
             let fallback: Vec<String> = fonts.fallback_stack().map(str::to_string).collect();
+            let si0 = style_at(prange.start);
+            let si_end = run_starts.partition_point(|&rs| rs < content_end).max(si0 + 1).min(out.styles.len());
             // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px).
             let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32]| -> Layout<RunBrush> {
                 let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
@@ -645,7 +647,6 @@ impl Layouter {
                 }
                 // Paragraph-start style as the default (covers the direction mark and empty
                 // paragraphs), then every run piece intersecting this paragraph.
-                let si0 = style_at(prange.start);
                 for p in style_props(&out.styles[si0], k, &fallback, si0 as u32, small_caps[si0]) {
                     b.push_default(p);
                 }
@@ -665,7 +666,7 @@ impl Layouter {
                         }
                     }
                 }
-                for (ri, st) in out.styles.iter().enumerate() {
+                for (ri, st) in out.styles.iter().enumerate().take(si_end).skip(si0) {
                     let rs = run_starts[ri];
                     let (a, z) = (rs.max(prange.start), (rs + runs[ri].len).min(content_end));
                     if a >= z {
@@ -728,8 +729,7 @@ impl Layouter {
             // width divided by it (#5565). Mixed scales break at the largest, so no line
             // overflows the box.
             let break_scale = if is_box {
-                let si0 = style_at(prange.start);
-                (0..out.styles.len())
+                (si0..si_end)
                     .filter(|&ri| {
                         let rs = run_starts.get(ri).copied().unwrap_or(0);
                         let end = rs.saturating_add(runs.get(ri).map_or(0, |r| r.len));
