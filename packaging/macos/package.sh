@@ -97,14 +97,13 @@ notarize() {
   fi
 }
 
-# Stapling fetches the ticket from Apple's CDN (CloudKit). Right after notarization that lookup can
-# drop the connection ("The network connection was lost", error 68) even though the ticket exists,
-# so retry a few times before failing the release.
+# Stapling and validating both look the ticket up in Apple's CloudKit service. Right after
+# notarization that lookup can drop the connection ("The network connection was lost", error 68)
+# even though the ticket exists, so retry the pair a few times before failing the release.
 staple() {
   local file="$1" attempt
   for attempt in 1 2 3 4 5; do
-    if xcrun stapler staple "$file"; then
-      xcrun stapler validate "$file"
+    if xcrun stapler staple "$file" && xcrun stapler validate "$file"; then
       return
     fi
     if [ "$attempt" = 5 ]; then
