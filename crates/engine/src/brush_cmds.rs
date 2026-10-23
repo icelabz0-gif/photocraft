@@ -6,7 +6,7 @@
 //! (`{"scattering": {"enabled": true}}`). Strokes are deterministic: the jitter seed is the `seed`
 //! param or a hash of the points, so a journaled command replays to identical pixels.
 
-use photocraft_doc::LayerContent;
+use photocraft_doc::{ColorTable, LayerContent};
 use photocraft_geom::Rect;
 use photocraft_paint::mixer::{MixerSettings, apply_mixer_stroke};
 use photocraft_paint::replace::{Limits, ReplaceMode, ReplaceSettings, Sampling, apply_color_replacement, color_replacement_effect};
@@ -258,6 +258,17 @@ fn stroke_target(s: &Session, p: &Value, brush: BrushSettings) -> Result<(Option
     Ok((id, brush, num(p, "zoom").unwrap_or(1.0)))
 }
 
+/// Capture the indexed palette for a pixel-layer target once when a live publisher starts.
+///
+/// Indexed documents keep expanded RGB surfaces, so previews must explicitly constrain only layer
+/// pixels; masks and channels remain grayscale/alpha targets even when the document is Indexed.
+pub(crate) fn indexed_table_for(doc: &photocraft_doc::Document, p: &Value) -> Result<Option<ColorTable>> {
+    if doc.mode != photocraft_color::ColorMode::Indexed || crate::channel_cmds::target_of(p) != crate::channel_cmds::Target::Pixels {
+        return Ok(None);
+    }
+    doc.color_table.clone().map(Some).ok_or_else(|| EngineError::Other("Indexed document has no color table".into()))
+}
+
 /// Erasing a layer with locked transparency (e.g. the Background) can't remove opacity, so it
 /// paints the background colour instead (Photoshop).
 fn erase_locked(brush: &mut BrushSettings, lock: bool, bg: [f32; 4]) {
@@ -441,6 +452,7 @@ pub struct LiveStroke {
     /// What the symmetric preview drew last, once a mirror differs from the stroke, and how many
     /// passes it merged (a mirror joining redraws every tile).
     union_live: Option<(photocraft_paint::UnionLive, usize)>,
+    indexed_table: Option<ColorTable>,
     pre: Surface,
     sel: Option<Surface>,
     lock: bool,
@@ -515,6 +527,7 @@ impl LiveStroke {
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let base = (st.doc.id, st.revision);
         let mut doc = (*st.doc).clone();
+        let indexed_table = indexed_table_for(&doc, p)?;
         let sel = doc.selection.clone();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, layer, p)?;
         erase_locked(&mut brush, lock, s.tools.background);
@@ -535,6 +548,7 @@ impl LiveStroke {
             mirrors,
             mirror_distinct,
             union_live: None,
+            indexed_table,
             pre,
             sel,
             lock,
@@ -611,6 +625,9 @@ impl LiveStroke {
                     .chain(self.mirrors.iter_mut().zip(&self.mirror_distinct).filter(|(_, d)| **d).map(|(r, _)| r))
                     .collect();
                 dmg = dmg.union(&StrokeRenderer::composite_union_live(&mut renderers, &mut live, full, &self.pre, surf, self.sel.as_ref(), self.lock));
+                if let Some(table) = self.indexed_table.as_ref() {
+                    crate::indexed_edit::constrain_surface(surf, Some(&self.pre), table, dmg)?;
+                }
                 self.tail = old.union(&live.bounds());
                 self.union_live = Some((live, passes));
                 return Ok(dmg);
@@ -627,6 +644,9 @@ impl LiveStroke {
             if let Some(mut tail) = self.renderer.tail_preview() {
                 self.tail = tail.composite(&self.pre, surf, self.sel.as_ref(), self.lock, false);
                 dmg = dmg.union(&self.tail);
+            }
+            if let Some(table) = self.indexed_table.as_ref() {
+                crate::indexed_edit::constrain_surface(surf, Some(&self.pre), table, dmg)?;
             }
             Ok(dmg)
         })

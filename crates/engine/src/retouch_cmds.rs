@@ -13,7 +13,7 @@ use photocraft_algo::inpaint::{self, CompleteParams};
 use photocraft_algo::poisson;
 use photocraft_algo::retouch::{ToneRange, dodge_burn, local_blur, local_sharpen, sponge};
 use photocraft_color::{BlendMode, PixelFormat, SampleType};
-use photocraft_doc::{Document, LayerContent, LayerId};
+use photocraft_doc::{ColorTable, Document, LayerContent, LayerId};
 use photocraft_geom::Rect;
 use photocraft_paint::retouch::{Footprint, Region, Smudge, alpha_index, apply_coverage, apply_dab_stroke};
 use photocraft_paint::{BrushSettings, Stroke, StrokePoint};
@@ -431,6 +431,7 @@ pub struct LiveRetouch {
     renderer: photocraft_paint::StrokeRenderer,
     pre: std::sync::Arc<Document>,
     pre_surf: Surface,
+    indexed_table: Option<ColorTable>,
     id: Option<LayerId>,
     params: Value,
     paint: LivePaint,
@@ -484,6 +485,7 @@ impl LiveRetouch {
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let (pre, base) = (st.doc.clone(), (st.doc.id, st.revision));
         let mut doc = (*pre).clone();
+        let indexed_table = crate::brush_cmds::indexed_table_for(&pre, p)?;
         let sel = doc.selection.clone();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         let pre_surf = surf.clone();
@@ -499,10 +501,11 @@ impl LiveRetouch {
             doc: std::sync::Arc::new(doc),
             cmd: cmd.into(),
             renderer,
-            pre,
             pre_surf,
-            id,
+            indexed_table,
+            pre,
             params: p.clone(),
+            id,
             paint,
             mode,
             opacity,
@@ -588,6 +591,10 @@ impl LiveRetouch {
             self.tail = self.composite(r, &cov)?;
             dmg = dmg.union(&self.tail);
         }
+        if let Some(table) = self.indexed_table.as_ref() {
+            let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
+            crate::indexed_edit::constrain_surface(surf, Some(&self.pre_surf), table, dmg)?;
+        }
         Ok(dmg)
     }
 
@@ -600,7 +607,7 @@ impl LiveRetouch {
             return Err(bad(&self.cmd, "periodic painting requires a clone source"));
         };
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
-        periodic::Composite {
+        let dmg = periodic::Composite {
             target: surf,
             before: &self.pre_surf,
             tile: self.pre.bounds(),
@@ -609,7 +616,11 @@ impl LiveRetouch {
             lock: self.lock,
             mode: self.mode,
         }
-        .draw(dirty, &self.brush, &self.points, |r| clone_sample(&self.pre, self.id, &self.pre_surf, *which, r, map, true, cmd))
+        .draw(dirty, &self.brush, &self.points, |r| clone_sample(&self.pre, self.id, &self.pre_surf, *which, r, map, true, cmd))?;
+        if let Some(table) = self.indexed_table.as_ref() {
+            crate::indexed_edit::constrain_surface(surf, Some(&self.pre_surf), table, dmg)?;
+        }
+        Ok(dmg)
     }
 
     /// Redraw `r` from the pre-stroke pixels with the clone source through coverage `cov`.
@@ -1166,8 +1177,9 @@ pub struct LiveDab {
     done: usize,
     effect: DabEffect,
     halo: i32,
-    pre_surf: Surface,
     work: WorkPixels,
+    pre_surf: Surface,
+    indexed_table: Option<ColorTable>,
     id: Option<LayerId>,
     params: Value,
     opacity: f32,
@@ -1227,6 +1239,7 @@ impl LiveDab {
         effect: impl FnOnce(&Surface) -> DabEffect,
     ) -> Result<Self> {
         let sel = doc.selection.clone();
+        let indexed_table = crate::brush_cmds::indexed_table_for(&doc, p)?;
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         let pre_surf = surf.clone();
         let effect = effect(&pre_surf);
@@ -1241,6 +1254,7 @@ impl LiveDab {
             halo,
             work: WorkPixels::new(&pre_surf, precise),
             pre_surf,
+            indexed_table,
             id,
             params: p.clone(),
             opacity: stroke.brush.opacity,
@@ -1307,6 +1321,7 @@ impl LiveDab {
         }
         self.bounds = self.bounds.union(&dmg).union(&tail_rect);
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
+        let published = shown.union(&tail_rect);
         if !shown.is_empty() {
             let (orig, work) = (Region::read(&self.pre_surf, shown), self.work.read(&self.pre_surf, shown));
             photocraft_paint::retouch::mix_back(surf, &orig, &work, shown, self.opacity, self.sel.as_ref(), self.lock);
@@ -1315,7 +1330,10 @@ impl LiveDab {
             photocraft_paint::retouch::mix_back(surf, &Region::read(&self.pre_surf, r), &work, r, self.opacity, self.sel.as_ref(), self.lock);
             self.tail = r;
         }
-        Ok(shown.union(&tail_rect))
+        if let Some(table) = self.indexed_table.as_ref() {
+            crate::indexed_edit::constrain_surface(surf, Some(&self.pre_surf), table, published)?;
+        }
+        Ok(published)
     }
 }
 

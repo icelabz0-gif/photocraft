@@ -63,6 +63,7 @@ pub mod history_menu_cmds;
 pub mod history_select_cmds;
 pub mod history_source_cmds;
 pub mod image_cmds;
+mod indexed_edit;
 pub mod inspect;
 pub mod installed_profiles;
 pub mod jobs;
@@ -844,6 +845,7 @@ impl Session {
         if let (Some(k), Some(id)) = (restrict, active) {
             channel_cmds::restrict_to_color(&before, &mut doc, id, k);
         }
+        indexed_edit::constrain_document(&before, &mut doc)?;
         st.doc = Arc::new(doc);
         st.active_layer = active;
         fix_selection(st);
