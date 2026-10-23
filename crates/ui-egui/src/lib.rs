@@ -152,6 +152,8 @@ pub mod move_lock;
 pub mod move_mods;
 pub mod move_ui;
 pub mod native_menu;
+#[cfg(network_print)]
+mod network_glue;
 pub mod new_doc_ui;
 pub mod new_guide_ui;
 pub mod new_layer_ui;
@@ -836,6 +838,9 @@ pub struct PhotocraftApp {
     /// Selection outline cache: (doc, revision, segments).
     /// Live filter preview (proxy document with the filter applied).
     pub(crate) filter_preview: Option<filter_dialog::FilterPreview>,
+    /// Print > Network printer: the destination's state, workers and the tracked print (`network_glue`).
+    #[cfg(network_print)]
+    pub(crate) net_print: network_glue::NetTasks,
     pub(crate) smart_filter_targets: smart_filter_dialog::Targets,
     #[cfg(not(target_arch = "wasm32"))]
     filter_preview_worker: filter_preview_worker::Worker,
@@ -1080,6 +1085,8 @@ impl PhotocraftApp {
             proxy_uploaded: None,
             outline_cache: None,
             filter_preview: None,
+            #[cfg(network_print)]
+            net_print: Default::default(),
             smart_filter_targets: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             filter_preview_worker: Default::default(),
@@ -2466,6 +2473,8 @@ impl eframe::App for PhotocraftApp {
         wide_angle_ui::show(self, &ctx);
         canvas::extra_windows(self, &ctx);
         notices::show(self, &ctx);
+        #[cfg(network_print)]
+        self.frame_network(&ctx);
         gpu_status::show_fallback(self, &ctx);
         kys_import::show_offer(self, &ctx);
         if self.titlebar_modal_drag(chrome) {
