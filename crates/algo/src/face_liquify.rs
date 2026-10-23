@@ -164,8 +164,9 @@ pub fn face_warps(lm: &Landmarks, s: &FaceSliders) -> Vec<LocalWarp> {
         push(s.eye_size.get(i), &|a| f.warp(c, 0.45, [1.0 + 0.3 * a, 1.0 + 0.3 * a], 0.0, [0.0, 0.0]));
         push(s.eye_width.get(i), &|a| f.warp(c, 0.45, [1.0 + 0.3 * a, 1.0], 0.0, [0.0, 0.0]));
         push(s.eye_height.get(i), &|a| f.warp(c, 0.45, [1.0, 1.0], 0.0, [0.0, -0.12 * a]));
-        // Positive tilt raises the outer corner.
-        push(s.eye_tilt.get(i), &|a| f.warp(c, 0.45, [1.0, 1.0], side * 0.35 * a, [0.0, 0.0]));
+        // Positive tilt raises the outer corner: the content moves toward the warp's map, and a
+        // clockwise turn by `side · angle` would carry the outer corner (at `side · u`) down.
+        push(s.eye_tilt.get(i), &|a| f.warp(c, 0.45, [1.0, 1.0], -side * 0.35 * a, [0.0, 0.0]));
         push(s.eye_distance, &|a| f.warp(c, 0.5, [1.0, 1.0], 0.0, [side * 0.1 * a, 0.0]));
     }
     push(s.nose_height, &|a| f.warp(nose, 0.55, [1.0, 1.0], 0.0, [0.0, -0.12 * a]));
@@ -250,6 +251,22 @@ mod tests {
         assert!(source(&f, [50.0, 88.0])[1] < 88.0 - 0.5, "the chin moved down");
         let f = field(FaceSliders { chin_height: -100.0, ..Default::default() });
         assert!(source(&f, [50.0, 84.0])[1] > 84.0 + 0.5, "the chin moved up");
+    }
+
+    #[test]
+    fn positive_eye_tilt_raises_the_outer_corners() {
+        // Content from below an outer corner now shows at it: the corner moved up. The inner
+        // corners go the other way.
+        let f = field(FaceSliders { eye_tilt: EyeSlider::Both(100.0), ..Default::default() });
+        for (outer, inner) in [([36.0, 50.0], [44.0, 50.0]), ([64.0, 50.0], [56.0, 50.0])] {
+            assert!(source(&f, outer)[1] > outer[1] + 0.3, "outer {outer:?}: {:?}", source(&f, outer));
+            assert!(source(&f, inner)[1] < inner[1] - 0.3, "inner {inner:?}: {:?}", source(&f, inner));
+        }
+        // Negative tilt lowers them.
+        let f = field(FaceSliders { eye_tilt: EyeSlider::Both(-100.0), ..Default::default() });
+        for outer in [[36.0, 50.0], [64.0, 50.0]] {
+            assert!(source(&f, outer)[1] < outer[1] - 0.3, "outer {outer:?}: {:?}", source(&f, outer));
+        }
     }
 
     #[test]
