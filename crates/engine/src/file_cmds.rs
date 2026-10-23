@@ -743,7 +743,9 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     // The placed contents are not opened for editing: a saved undo history (#6053) stays behind,
     // in the layer as in the embedded file, which would otherwise carry the earlier pixel states
     // into every file this document is saved to. Other files are embedded as they are.
-    let bytes = if src.saved_history.take().is_some() && photocraft_format::is_pcraft(&bytes) {
+    // A linked place stores only the path, so its bytes are not re-encoded.
+    let had_history = src.saved_history.take().is_some();
+    let bytes = if had_history && linked.is_none() && photocraft_format::is_pcraft(&bytes) {
         // Written as a `.pcraft` save writes it, with its thumbnail and composite previews.
         photocraft_io::export(&src, photocraft_format::EXTENSION, &photocraft_io::ExportOptions::default())
             .map(|r| r.bytes)
