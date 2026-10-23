@@ -206,8 +206,6 @@ fn curve_of(a: &Adjustment) -> Vec<[f32; 2]> {
     }
 }
 
-/// Issue #43: pressing on a point selects it (no new point), Delete/Backspace and ⌘/Ctrl-click
-/// remove points, dragging off the graph removes one, endpoints stay.
 /// #8984: the Curves graph in Properties grows with the panel instead of stopping at 300
 /// points, stays square, and edits where it is clicked at its new size.
 #[test]
@@ -229,6 +227,8 @@ fn curves_graph_grows_with_the_properties_panel() {
     assert!((c[1][0] - 127.5).abs() < 2.0 && (c[1][1] - 127.5).abs() < 2.0, "{c:?}");
 }
 
+/// Issue #43: pressing on a point selects it (no new point), Delete/Backspace and ⌘/Ctrl-click
+/// remove points, dragging off the graph removes one, endpoints stay.
 #[test]
 fn curves_points_are_added_selected_and_deleted() {
     let mut h = app_harness("curves", "rgb", 8);
