@@ -597,7 +597,8 @@ pub(crate) fn export_flat_with(doc: &Document, format: Format, opts: &ExportOpti
     if img.layout().has_alpha() && !format.caps().alpha {
         // Flattened over white, as saving a transparent document without transparency does,
         // unless JPEG Options picked another matte.
-        img = matte_over(&img, opts.matte)?;
+        let space = photocraft_compose::cmyk_space(doc);
+        img = photocraft_color::convert::with_cmyk_space(space.as_ref(), || matte_over(&img, opts.matte))?;
         if opts.matte.is_some() {
             warnings.push(format!("transparency composited over the matte colour for {format:?}"));
         } else {

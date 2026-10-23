@@ -431,6 +431,16 @@ fn save_a_copy_composites_a_jpeg_over_the_matte_asked_for() {
     }
 }
 
+/// Every command that reads `matte` through `SaveOpts::from_params` lists it, as the agents read
+/// the parameters from the command list.
+#[test]
+fn every_command_taking_the_jpeg_matte_lists_it() {
+    for id in ["file.saveACopy", "file.export.layersToFiles", "file.automate.batch", "file.scripts.imageProcessor"] {
+        let params = crate::commands::find(id).unwrap().params;
+        assert!(params.contains(r#""matte":"none|foreground|background|white|black|gray""#), "{id}");
+    }
+}
+
 /// A `jpegFormat` other than the three names is a bad parameter, reported before anything is
 /// written.
 #[test]
