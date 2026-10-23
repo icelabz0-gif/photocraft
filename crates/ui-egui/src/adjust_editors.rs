@@ -367,9 +367,15 @@ const CURVE_SIDE: (f32, f32) = (120.0, 300.0);
 /// The Curves graph's side (#8984): the width it is given, in the Properties panel and in the
 /// resizable dialog, and no taller than the window leaves room for beside the other rows.
 fn curve_side(ui: &egui::Ui) -> f32 {
-    let tallest = (ui.ctx().content_rect().height() - CURVES_CHROME).max(CURVE_SIDE.1);
+    let tallest = curve_side_max(ui.ctx());
     let width = ui.available_width();
     if width.is_finite() { width.clamp(CURVE_SIDE.0, tallest) } else { CURVE_SIDE.1 }
+}
+
+/// The largest the Curves graph gets in this window: as tall as the window leaves room for beside
+/// the dialog's other rows, and never under the old 300 points. The Curves dialog is no wider.
+pub(crate) fn curve_side_max(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - CURVES_CHROME).max(CURVE_SIDE.1)
 }
 
 fn curve_graph(full: Rect, side: f32) -> Rect {

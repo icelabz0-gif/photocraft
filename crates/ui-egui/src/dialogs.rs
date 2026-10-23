@@ -207,11 +207,21 @@ fn size_id(place: egui::Id) -> egui::Id {
     place.with("size")
 }
 
+/// The largest a resizable dialog of `fields` with smallest size `min` is dragged to: the window
+/// less a margin, and for Curves no wider than its graph can grow (#8984), so no blank column.
+fn resizable_max(ctx: &egui::Context, fields: &serde_json::Map<String, Value>, min: egui::Vec2) -> egui::Vec2 {
+    let mut max = (ctx.content_rect().size() - egui::vec2(40.0, 40.0)).max(min);
+    if is_curves(fields) {
+        max.x = max.x.min(crate::adjust_editors::curve_side_max(ctx)).max(min.x);
+    }
+    max
+}
+
 fn show_modal<T>(
     modal: egui::Modal,
     ctx: &egui::Context,
     id: egui::Id,
-    resizable: Option<(egui::Vec2, egui::Vec2)>,
+    resizable: Option<(egui::Vec2, egui::Vec2, egui::Vec2)>,
     interactive: bool,
     contents: impl FnOnce(&mut egui::Ui) -> T,
 ) -> egui::ModalResponse<T> {
@@ -220,8 +230,7 @@ fn show_modal<T>(
         if !interactive {
             ui.disable();
         }
-        if let Some((size, min)) = resizable {
-            let max = (ctx.content_rect().size() - egui::vec2(40.0, 40.0)).max(min);
+        if let Some((size, min, max)) = resizable {
             // No stroke: Resize outlines its contents 2 points out, an inner box inside the
             // dialog's frame that left the title and buttons flush against it (#8199).
             egui::Resize::default().id(id.with("resize")).with_stroke(false).default_size(size.min(max)).min_size(min).max_size(max).show(ui, contents)
@@ -306,7 +315,10 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let resizable = resizable_dialog(&fields);
         // Curves reopens at the size it was left at (#8984).
         let remembered = if is_curves(&fields) { ctx.data_mut(|m| m.get_persisted::<egui::Vec2>(size_id(place))) } else { None };
-        let resize = resizable.map(|size| (remembered.unwrap_or(size), resizable_min(&fields)));
+        let resize = resizable.map(|size| {
+            let min = resizable_min(&fields);
+            (remembered.unwrap_or(size), min, resizable_max(ctx, &fields, min))
+        });
         let mut given = None;
         let modal = show_modal(modal, ctx, id, resize, interactive, |ui| {
             sizing = ui.is_sizing_pass();
@@ -600,7 +612,12 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         // The picker has a larger frame margin; include that whole frame in the canvas hit guard.
         shown.push(if color_picker { modal.response.rect } else { modal.inner });
         // The size Curves was given (dragged or grown to fit) is the one it reopens at (#8984).
-        if let (false, true, Some(size)) = (sizing, is_curves(&fields), given.filter(|g| g.is_finite()))
+        // A size at the window's limit is the window's, not the user's: a large remembered size
+        // squeezed into a small window is kept for a larger one.
+        if let (false, true, Some(size), Some((opened, _, max))) = (sizing, is_curves(&fields), given.filter(|g| g.is_finite()), resize)
+            && size != opened.min(max)
+            && size.x < max.x - 0.5
+            && size.y < max.y - 0.5
             && remembered != Some(size)
         {
             ctx.data_mut(|m| m.insert_persisted(size_id(place), size));

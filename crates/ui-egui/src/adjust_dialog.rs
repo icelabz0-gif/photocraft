@@ -657,6 +657,27 @@ mod tests {
         assert!(graph.height() <= 700.0 - 360.0, "{graph:?}");
         assert!(window.height() <= 700.0, "{window:?}");
         assert!(window.contains_rect(h.get_by_label("OK").rect()));
+        // The size the window squeezed it to is not remembered: a larger window gets 1200 again.
+        let kept = h.ctx.data_mut(|m| m.get_persisted::<egui::Vec2>(egui::Id::new(("dialog-place", "image.adjustments.curves")).with("size")));
+        assert_eq!(kept, Some(egui::vec2(1200.0, 1200.0)));
+        // Dragged far wider, the dialog stops where the graph stops: no blank column.
+        let corner = window.max - egui::vec2(12.0, 12.0);
+        h.event(egui::Event::PointerMoved(corner));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerMoved(corner + egui::vec2(600.0, 0.0)));
+        h.step();
+        h.event(egui::Event::PointerButton {
+            pos: corner + egui::vec2(600.0, 0.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(5);
+        let graph = h.ctx.data(|d| d.get_temp::<egui::Rect>(dialog_mem("curves").with("curves-graph"))).unwrap();
+        let window = h.ctx.memory(|m| m.area_rect(egui::Id::new(("dialog", id)))).unwrap();
+        assert!(window.right() - graph.right() < 40.0, "no blank column: window {window:?}, graph {graph:?}");
     }
 
     #[test]
