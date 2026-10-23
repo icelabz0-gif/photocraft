@@ -50,27 +50,6 @@ Only the fixed registry beside the EXE can bind opaque IDs to files; requests ca
 
 No runnable profile example is supplied because no export/digest/shape/licence/QDQ calibration/HTP compatibility has been verified. Supply only a separately reviewed specific export, including the real upstream source/licence, digest, preprocessing/geometry and model-quality evidence. A zero/fabricated digest or random downloaded model is not an example of support.
 
-## How to install and test with PhotoCraft (No MSIX, No Certificates)
-
-This companion runs as a standard native executable adapter. It requires **no MSIX installation, no developer mode, and no self-signed certificates**.
-
-1. Download the ARM64 PhotoCraft main program (`photocraft-windows-arm64`) and the self-contained QNN worker artifact (`photocraft-onnx-qnn-arm64`) from GitHub Actions.
-2. Extract `photocraft-onnx-qnn-arm64` to a local folder. It contains `photocraft-onnx-qnn.exe`, `adapter.json`, `qnn-models.json`, all Qualcomm runtime DLLs, and `Register-Model.ps1`.
-3. To configure an ONNX model before installation:
-   ```powershell
-   .\Register-Model.ps1 -ModelPath .\path\to\model.onnx -InputName "input" -OutputName "output" -Width 512 -Height 512
-   ```
-   This automatically copies the model into `models/`, computes its SHA256 digest, configures `qnn-models.json`, and adds it to `adapter.json`.
-4. Launch PhotoCraft on your Windows 11 ARM64 Copilot+ PC.
-5. In PhotoCraft, navigate to: **Filter > Plug-ins > Compatibility Adapters…**
-6. Click **Browse…** (or paste the absolute path) to select the `adapter.json` in the extracted worker folder.
-7. Click **Inspect** to review the declared capabilities (`org.photocraft.qnn.subject` on `qnn.htp`).
-8. Check **I trust this package and understand it is not sandboxed**, then click **Install disabled**.
-9. In the installed adapters list, check **Enabled**, then click **Check availability**.
-   - If a model is configured: reports **Ready**.
-   - If no model is configured: reports **Needs model**.
-10. Open an RGB image and select **Select > Subject**!
-
 ## Explicit v1 transition boundaries
 
 This is **not** the proposed v2 resource store. No model acquisition, network download, immutable resource manifests, per-model probe/prepare, eviction, caching, arbitrary tensors, multiple outputs, custom operators, EPContext, protected Adobe assets or Photoshop binary-plugin loader is implemented.

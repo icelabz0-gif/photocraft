@@ -89,18 +89,19 @@ jobs:
         run: |
           ./examples/onnx_qnn_worker/Tests/ProcessSmoke.ps1 -WorkerDirectory ./artifacts/publish-qnn-arm64 -ResultsPath ./artifacts/qnn-evidence/process-smoke.json 2>&1 |
             Tee-Object ./artifacts/qnn-evidence/process-smoke.log
-      - name: Record ARM64 test package scope
+      - name: Enforce hard-closed runtime redistribution gate
         if: always()
         run: |
+          if (Test-Path ./artifacts/photocraft-onnx-qnn-arm64.zip) { throw 'Unreviewed runtime ZIP must never be produced/uploaded by this draft.' }
           @"
-          ## ARM64 test package scope
-          - Complete self-contained publish generated for direct Copilot+ PC testing without MSIX or certificates.
+          ## ARM64 draft scope and legal gate
+          - Complete self-contained publish remains ONLY on this ephemeral runner.
           - Native/DSP and all notices/docs are inventoried with SHA-256; host install records use BLAKE3 instead.
           - Real process smoke covers startup, exit and no-model/error frames, not ORT/HTP/NPU inference.
-          - Package includes photocraft-onnx-qnn.exe, adapter.json, qnn-models.json, Register-Model.ps1 and all QNN runtime dependencies.
+          - Qualcomm PDF/privacy/third-party redistribution review is BLOCKED. No release or runtime binary upload exists.
           - A green workflow is not model compatibility, quality, NPU placement or legal approval.
           "@ >> $env:GITHUB_STEP_SUMMARY
-      - name: Upload explicit evidence allowlist
+      - name: Upload explicit evidence allowlist ONLY (NEVER runtime or restored packages)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -115,13 +116,5 @@ jobs:
             artifacts/qnn-evidence/process-smoke.json
             artifacts/qnn-evidence/publish.log
             artifacts/qnn-evidence/process-smoke.log
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload self-contained ARM64 QNN worker package
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: photocraft-onnx-qnn-arm64
-          path: artifacts/publish-qnn-arm64/**
           if-no-files-found: error
           retention-days: 14

@@ -128,7 +128,6 @@ try {
     foreach ($doc in @('README.md', 'LEGAL-REVIEW.md', 'UPSTREAM-VERIFICATION.md')) {
         Copy-Verified (Join-Path $PSScriptRoot $doc) (Join-Path $publish "docs/$doc")
     }
-    Copy-Verified (Join-Path $PSScriptRoot 'Register-Model.ps1') (Join-Path $publish 'Register-Model.ps1')
     # No runnable model, no fabricated hashes/shapes, no model download and no v2 resource store.
     [IO.File]::WriteAllText((Join-Path $publish 'qnn-models.json'), '{"schemaVersion":1,"defaultModel":null,"profiles":[]}', [Text.UTF8Encoding]::new($false))
 
