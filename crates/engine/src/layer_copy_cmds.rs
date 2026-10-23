@@ -59,6 +59,17 @@ fn center(r: Rect) -> [f64; 2] {
     [(f64::from(r.x0) + f64::from(r.x1)) / 2.0, (f64::from(r.y0) + f64::from(r.y1)) / 2.0]
 }
 
+/// Restore missing shape caches, or refresh every shape for a changed canvas, including groups.
+fn prepare_shapes(layers: &mut [Layer], doc: &Document, new_canvas: bool) {
+    for layer in layers {
+        match &mut layer.content {
+            LayerContent::Shape(shape) if new_canvas || shape.cache.is_none() => crate::vector_cmds::refresh_shape(doc, shape),
+            LayerContent::Group(group) => prepare_shapes(&mut group.children, doc, new_canvas),
+            _ => {}
+        }
+    }
+}
+
 /// Readies `copies` (a scratch document of the source's colour holding duplicated layers) for
 /// landing in `dest`: smart objects get fresh contents ids, keeping only the sharing within the
 /// batch (contents ids belong to a document, so the copies never join objects already in `dest`,
@@ -106,15 +117,6 @@ pub(crate) fn adapt_copies(s: &Session, copies: &mut Document, dest: &Document) 
             let f = surf.format().with_sample(dest.depth);
             *surf = surf.convert(f);
         });
-    }
-    fn prepare_shapes(layers: &mut [Layer], doc: &Document, new_canvas: bool) {
-        for layer in layers {
-            match &mut layer.content {
-                LayerContent::Shape(shape) if new_canvas || shape.cache.is_none() => crate::vector_cmds::refresh_shape(doc, shape),
-                LayerContent::Group(group) => prepare_shapes(&mut group.children, doc, new_canvas),
-                _ => {}
-            }
-        }
     }
     let new_canvas = copies.bounds() != dest.bounds();
     prepare_shapes(&mut copies.layers, dest, new_canvas);
@@ -188,11 +190,14 @@ fn copy_to_document(s: &mut Session, p: &Value) -> Result<Value> {
     if let (Some(name), [l]) = (p.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()), copies.layers.as_mut_slice()) {
         l.name = name.to_string();
     }
+    // Measure in source space: destination refresh may clip a shape before it is moved.
+    // Missing caches must participate too, including shapes nested inside groups.
+    prepare_shapes(&mut copies.layers, &sdoc, false);
+    let bounds = copies.layers.iter().filter_map(crate::layer_multi_cmds::layer_bounds).fold(Rect::EMPTY, |a, b| a.union(&b));
+    let content = if bounds.is_empty() { sdoc.bounds() } else { bounds };
     adapt_copies(s, &mut copies, &ddoc)?;
     // Placement: centred on the destination's canvas, centred on a point, or offset from where
     // the layers are in the source (default: the same canvas position).
-    let bounds = copies.layers.iter().filter_map(crate::layer_multi_cmds::layer_bounds).fold(Rect::EMPTY, |a, b| a.union(&b));
-    let content = if bounds.is_empty() { sdoc.bounds() } else { bounds };
     let (dx, dy) = if p.get("center").and_then(Value::as_bool).unwrap_or(false) {
         let (c, d) = (center(content), center(ddoc.bounds()));
         (d[0] - c[0], d[1] - c[1])
