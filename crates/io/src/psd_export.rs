@@ -647,7 +647,7 @@ impl Ex {
                     }
                     if matches!(a, photocraft_doc::Adjustment::HueCurves { .. }) {
                         self.warnings.push(format!(
-                            "layer \"{}\": Hue Curves has no PSD equivalent and was saved as a Color Lookup that renders the same; save as .pcraft to keep the curves editable",
+                            "layer \"{}\": Hue Curves has no PSD equivalent and was saved as a Color Lookup that approximates it (narrow hue edits can be softened); save as .pcraft to keep the curves editable",
                             l.name
                         ));
                     }
