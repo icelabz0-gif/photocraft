@@ -219,6 +219,14 @@ pub enum Adjustment {
     Vibrance {
         vibrance: f32,
         saturation: f32,
+        /// Legacy white balance of the PSD `vibA` descriptor (-100..=100, like `vibrance`).
+        /// Kept so that opening and saving a PSD no longer loses it; not rendered yet (the
+        /// CPU/GPU evaluators treat it as 0). Photoshop omits the key whose value is 0.
+        #[serde(default)]
+        temperature: f32,
+        /// Legacy green-magenta shift of the PSD `vibA` descriptor; kept like `temperature`.
+        #[serde(default)]
+        tint: f32,
     },
     /// Master hue / saturation / lightness (or the Colorize colour) plus six hue ranges.
     HueSaturation {

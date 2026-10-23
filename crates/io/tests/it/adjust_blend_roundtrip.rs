@@ -66,7 +66,7 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
             true,
         ),
         (Adjustment::Exposure { exposure: 0.75, offset: -0.0125, gamma: 0.9 }, true),
-        (Adjustment::Vibrance { vibrance: 60.0, saturation: -25.0 }, true),
+        (Adjustment::Vibrance { vibrance: 60.0, saturation: -25.0, temperature: 0.0, tint: 0.0 }, true),
         (Adjustment::HueSaturation { hue: 40.0, saturation: -30.0, lightness: 10.0, colorize: false, ranges: HueRange::defaults() }, true),
         (Adjustment::HueSaturation { hue: 200.0, saturation: 50.0, lightness: -10.0, colorize: true, ranges: HueRange::defaults() }, true),
         (

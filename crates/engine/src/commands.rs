@@ -457,6 +457,11 @@ fn new_adjustment(s: &mut Session, adj: Adjustment, p: &Value, cmd: &str) -> Res
 
 /// Apply `adj` in place to the targeted layer mask, the targeted alpha channel or Quick Mask, or else the active layer's pixels, as one history step named `label`.
 fn destructive_adjust(s: &mut Session, label: &str, adj: Adjustment, p: &Value) -> Result<Value> {
+    if matches!(&adj, Adjustment::Vibrance { temperature, tint, .. } if *temperature != 0.0 || *tint != 0.0) {
+        return Err(EngineError::Other(
+            "Vibrance temperature/tint rendering is unsupported; use an adjustment layer to preserve these settings without baking pixels".into(),
+        ));
+    }
     if is_mask_target(p) {
         // The targeted layer mask (#780): ⌘I inverts it, as in Photoshop.
         let id = layer_param(s, &Value::Null)?;
@@ -1369,7 +1374,11 @@ fn build() -> Vec<CommandSpec> {
             r##"{"points":json,"red":json,"green":json,"blue":json,"pencil":bool=false,"smooth":0..10=0,"eyedropper":json} (curves as [[in,out],…] in 0..255, 2..19 points: points = composite; red/green/blue, gray, cyan/magenta/yellow/black or lightness/a/b per channel; pencil = drawn curves (Draw to modify the curve): each curve is 256 output levels in 0..255 (point curves given are drawn in, and turning pencil off fits points to the drawing); smooth = Smooth passes over the drawn curves; eyedropper = the dialog's Set Black/Neutral Gray/White Point picker {"point":"black|gray|white","at":[x,y],"size":1..101=1} or {"point",…,"color":[r,g,b] 0..1}, RGB and Grayscale (no gray) only, applied over the given curves)"##,
         ),
         ("exposure", "Exposure…", r##"{"exposure":-20..20=0,"offset":-0.5..0.5=0,"gamma":0.01..9.99=1}"##),
-        ("vibrance", "Vibrance…", r##"{"vibrance":-100..100=0,"saturation":-100..100=0}"##),
+        (
+            "vibrance",
+            "Vibrance…",
+            r##"{"vibrance":-100..100=0,"saturation":-100..100=0,"temperature":-100..100=0,"tint":-100..100=0} (temperature/tint: preserved on adjustment layers and smart filters, not rendered yet; nonzero values are unsupported for destructive raster/mask/channel edits)"##,
+        ),
         (
             "hueSaturation",
             "Hue/Saturation…",

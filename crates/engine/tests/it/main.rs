@@ -78,3 +78,5 @@ mod unsupported_smart_filters;
 mod wand_transparent_copy;
 mod working_rgb_profile;
 mod xmp_charref;
+
+mod vibrance_unsupported;

@@ -151,6 +151,15 @@ pub(crate) fn unequal_resolution_warning(x: f64, y: f64) -> Option<String> {
         .then(|| format!("the vertical resolution ({y:.2} ppi) differs from the horizontal ({x:.2} ppi); the document keeps {x:.2} ppi for both"))
 }
 
+fn vibrance_balance_warning(name: &str, adjustment: &Adjustment) -> Option<String> {
+    match adjustment {
+        Adjustment::Vibrance { temperature, tint, .. } if *temperature != 0.0 || *tint != 0.0 => Some(format!(
+            "layer \"{name}\": its Vibrance temperature ({temperature}) and tint ({tint}) are preserved, but their rendering is unsupported; the displayed image omits this balance effect"
+        )),
+        _ => None,
+    }
+}
+
 /// Warnings about a loaded document's layers that render without their stored effect, for
 /// sources that carry no import warnings of their own (a crafted `.pcraft`): a Color Lookup
 /// whose table can't be applied silently renders as the identity instead (#1763).
@@ -159,6 +168,20 @@ pub fn open_warnings(doc: &Document) -> Vec<String> {
     // Iterative, so no document's nesting can make this recurse.
     let mut stack: Vec<&Layer> = doc.layers.iter().rev().collect();
     while let Some(l) = stack.pop() {
+        if let LayerContent::Adjustment(adjustment) = &l.content
+            && let Some(warning) = vibrance_balance_warning(&l.name, adjustment)
+        {
+            out.push(warning);
+        }
+        if let LayerContent::Smart(smart) = &l.content {
+            for filter in &smart.smart_filters {
+                if let Some(adjustment) = smart_map::vibrance_adjustment(filter)
+                    && let Some(warning) = vibrance_balance_warning(&l.name, &adjustment)
+                {
+                    out.push(warning);
+                }
+            }
+        }
         if let LayerContent::Adjustment(Adjustment::ColorLookup { name: _, size, lut, .. }) = &l.content {
             match lut.as_deref().zip(photocraft_doc::adjust::lut3d_len(*size)) {
                 Some((table, len)) if table.len() >= len => {}

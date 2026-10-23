@@ -109,3 +109,87 @@ fn short_color_lookup_table_warns_on_open() {
     let (_, warnings) = reopen(none, "x.pcraft", &ExportOptions::default());
     assert!(warnings.iter().any(|w| w.contains("Teal Look") && w.contains("no usable table")), "{warnings:?}");
 }
+
+#[test]
+fn preserved_vibrance_balance_warns_on_psd_psb_and_native_open() {
+    for (temperature, tint) in [(0.0, 0.0), (25.0, 0.0), (0.0, -30.0), (15.0, 20.0)] {
+        for path in ["x.psd", "x.psb", "x.pcraft"] {
+            let adj = Adjustment::Vibrance { vibrance: 12.0, saturation: -4.0, temperature, tint };
+            let (doc, warnings) = reopen(adj.clone(), path, &ExportOptions { force_psb: path.ends_with("psb"), ..Default::default() });
+            assert_eq!(doc.layers[0].content, LayerContent::Adjustment(adj));
+            let notes: Vec<_> = warnings.iter().filter(|w| w.contains("Teal Look") && w.contains("Vibrance temperature")).collect();
+            assert_eq!(notes.len(), usize::from(temperature != 0.0 || tint != 0.0), "{path}: {warnings:?}");
+            for note in notes {
+                assert!(note.contains("preserved") && note.contains("rendering is unsupported"), "{note}");
+            }
+        }
+    }
+}
+
+fn smart_document(filter: photocraft_doc::SmartFilter) -> Document {
+    let mut doc = Document::new("smart", Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    let mut pixels = Surface::new(doc.pixel_format());
+    pixels.fill_rect(doc.bounds(), &[0.3, 0.6, 0.1, 1.0]);
+    let mut source = Document::new("source", Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    source.layers.push(Layer::new("paint", LayerContent::Raster(pixels.clone())));
+    let bytes = photocraft_format::save_to_bytes(&source, &Default::default()).unwrap();
+    let mut smart = photocraft_doc::SmartObject::new(
+        photocraft_doc::SmartSource::Embedded { file_name: "source.pcraft".into(), bytes: std::sync::Arc::new(bytes) },
+        photocraft_geom::Affine::IDENTITY,
+        Some(pixels),
+    );
+    smart.smart_filters.push(filter);
+    doc.layers.push(Layer::new("Smart Teal Look", LayerContent::Smart(smart)));
+    doc
+}
+
+#[test]
+fn native_smart_vibrance_balance_warns_without_changing_filter() {
+    for (temperature, tint) in [(0, 0), (25, 0), (0, -30), (15, 20)] {
+        let filter = photocraft_doc::SmartFilter {
+            command: "image.adjustments.vibrance".into(),
+            params: serde_json::json!({"vibrance": 12, "saturation": -4, "temperature": temperature, "tint": tint}),
+            blend: photocraft_color::BlendMode::Normal,
+            opacity: 0.75,
+            visible: true,
+        };
+        let doc = smart_document(filter.clone());
+        let out = export(&doc, "x.pcraft", &ExportOptions::default()).unwrap();
+        let back = import("x.pcraft", &out.bytes).unwrap();
+        let LayerContent::Smart(smart) = &back.document.layers[0].content else { panic!("not smart") };
+        assert_eq!(smart.smart_filters, vec![filter]);
+        let notes: Vec<_> = back.warnings.iter().filter(|w| w.contains("Smart Teal Look") && w.contains("Vibrance temperature")).collect();
+        assert_eq!(notes.len(), usize::from(temperature != 0 || tint != 0), "{:?}", back.warnings);
+        assert!(notes.iter().all(|w| w.contains("preserved") && w.contains("rendering is unsupported")));
+    }
+}
+
+#[test]
+fn opaque_smart_vibrance_warns_on_psd_psb_and_native_open_without_losing_descriptor() {
+    for (temperature, tint) in [(0, 0), (25, 0), (0, -30), (15, 20)] {
+        let descriptor = Descriptor::new("vibA")
+            .with("vibrance", Value::Integer(12))
+            .with("Strt", Value::Integer(-4))
+            .with("temperature", Value::Integer(temperature))
+            .with("tint", Value::Integer(tint))
+            .with("futureSetting", Value::Integer(77));
+        let item = Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Vibrance")))
+            .with("filterID", Value::Integer(i32::from_be_bytes(*b"vibA")))
+            .with("Fltr", Value::Descriptor(descriptor.clone()));
+        let filter = smart_map::filter_from_item(&item);
+        assert_eq!(filter.command, smart_map::UNSUPPORTED_FILTER);
+        for path in ["x.psd", "x.psb", "x.pcraft"] {
+            let doc = smart_document(filter.clone());
+            let out = export(&doc, path, &ExportOptions { force_psb: path.ends_with("psb"), ..Default::default() }).unwrap();
+            let back = import(path, &out.bytes).unwrap();
+            let LayerContent::Smart(smart) = &back.document.layers[0].content else { panic!("not smart: {path}") };
+            assert_eq!(smart.smart_filters.len(), 1);
+            assert_eq!(smart.smart_filters[0].command, smart_map::UNSUPPORTED_FILTER);
+            let written = smart_map::item_for_filter(&smart.smart_filters[0]).unwrap();
+            assert_eq!(written.get("Fltr"), Some(&Value::Descriptor(descriptor.clone())), "{path}");
+            let notes: Vec<_> = back.warnings.iter().filter(|w| w.contains("Smart Teal Look") && w.contains("Vibrance temperature")).collect();
+            assert_eq!(notes.len(), usize::from(temperature != 0 || tint != 0), "{path}: {:?}", back.warnings);
+        }
+    }
+}

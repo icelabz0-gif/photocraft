@@ -52,6 +52,28 @@ pub use displace::{embed_map as displace_embed_map, embedded_map as displace_emb
 /// filter's name, Photoshop filter id and descriptor (`psd`, hex); it renders as a pass-through.
 pub const UNSUPPORTED_FILTER: &str = "psd.unsupportedFilter";
 
+/// Read preserved balance settings for an open warning without promoting an opaque filter
+/// to a supported command or changing its descriptor.
+pub(crate) fn vibrance_adjustment(filter: &SmartFilter) -> Option<photocraft_doc::Adjustment> {
+    if filter.command == "image.adjustments.vibrance" {
+        let number = |key: &str| match filter.params.get(key) {
+            None => Some(0.0),
+            Some(value) => value.as_f64().map(|value| value as f32).filter(|value| value.is_finite()),
+        };
+        return Some(photocraft_doc::Adjustment::Vibrance { vibrance: 0.0, saturation: 0.0, temperature: number("temperature")?, tint: number("tint")? });
+    }
+    if filter.command != UNSUPPORTED_FILTER {
+        return None;
+    }
+    let raw = filter.params.get("psd")?.as_str().and_then(from_hex)?;
+    let item = Descriptor::from_bytes(&raw).ok()?;
+    let descriptor = get_desc(&item, "Fltr")?;
+    if !descriptor.class_id.is("vibA") {
+        return None;
+    }
+    crate::adjust_map::vibrance_from_descriptor(descriptor)
+}
+
 /// The smart filter stack of a placed layer, as stored in `filterFX`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterStack {
@@ -1682,6 +1704,27 @@ mod tests {
         }
         let d = sold_descriptor(&sold).unwrap();
         assert!(matches!(d.get("warp"), Some(Value::Descriptor(w)) if w.class_id == Id::Str(b"warp".to_vec())));
+    }
+
+    #[test]
+    fn vibrance_warning_inspection_keeps_opaque_filters_and_rejects_malformed_data() {
+        for class in ["vibA", "other"] {
+            for value in [Value::Integer(25), Value::Double(f64::NAN), Value::Double(f64::INFINITY), Value::Boolean(true)] {
+                let good = matches!(value, Value::Integer(25)) && class == "vibA";
+                let item = Descriptor::new("filterFX").with("Fltr", Value::Descriptor(Descriptor::new(class).with("temperature", value)));
+                let filter = filter_from_item(&item);
+                let before = filter.clone();
+                assert_eq!(vibrance_adjustment(&filter).is_some(), good);
+                assert_eq!(filter, before);
+                let back = item_for_filter(&filter).unwrap();
+                let Value::Descriptor(original) = item.get("Fltr").unwrap() else { panic!("descriptor") };
+                let Value::Descriptor(restored) = back.get("Fltr").unwrap() else { panic!("descriptor") };
+                assert_eq!(restored.to_bytes(), original.to_bytes());
+            }
+        }
+        assert!(vibrance_adjustment(&sf(UNSUPPORTED_FILTER, json!({"psd": "zz"}))).is_none());
+        assert!(vibrance_adjustment(&sf("image.adjustments.vibrance", json!({"temperature": "25"}))).is_none());
+        assert!(vibrance_adjustment(&sf("filter.blur.gaussianBlur", json!({"temperature": 25}))).is_none());
     }
 
     fn sf(command: &str, params: J) -> SmartFilter {

@@ -383,6 +383,9 @@ impl Ctx<'_> {
                     adjust_map::label(k)
                 ));
             }
+            if let Some(warning) = crate::vibrance_balance_warning(&name, &adj) {
+                self.warn(warning);
+            }
             LayerContent::Adjustment(adj)
         } else if let Some(block) = rec.block(b"TySh") {
             // Only canonical type data with a safe transform can become a text layer. A retained
@@ -429,6 +432,13 @@ impl Ctx<'_> {
             // Smart filters (`filterFX` in the placed-layer data) and their mask (`FEid`).
             let placed = rec.block(b"SoLd").or_else(|| rec.block(b"SoLE")).and_then(|b| crate::smart_map::parse_sold(&b.data));
             let stack = placed.as_ref().and_then(|p| p.stack.clone()).unwrap_or_default();
+            for filter in &stack.filters {
+                if let Some(adjustment) = crate::smart_map::vibrance_adjustment(filter)
+                    && let Some(warning) = crate::vibrance_balance_warning(&name, &adjustment)
+                {
+                    self.warn(warning);
+                }
+            }
             let filter_mask = match &placed {
                 Some(p) if !stack.filters.is_empty() => self.filter_mask(&p.placed, &stack, &name),
                 _ => None,

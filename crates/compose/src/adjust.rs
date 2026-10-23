@@ -163,7 +163,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 range_lightness(out, dl)
             })
         }
-        Adjustment::Vibrance { vibrance, saturation } => {
+        // temperature/tint survive PSD open/save but are not rendered yet (tracked in #8667).
+        Adjustment::Vibrance { vibrance, saturation, .. } => {
             let (v, s) = (*vibrance / 100.0, *saturation / 100.0);
             let hi = if depth == Some(SampleType::F32) { f32::INFINITY } else { 1.0 };
             map_rgb(buf, |c| vibrance_px(c, v, s, transfer, hi))

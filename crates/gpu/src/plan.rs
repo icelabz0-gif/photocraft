@@ -1713,8 +1713,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
                 (8, p, None)
             }
         }
-        Adjustment::Vibrance { vibrance, saturation } => {
+        Adjustment::Vibrance { vibrance, saturation, .. } => {
             // compose::adjust::vibrance_px; 32-bit samples aren't clipped at 1.
+            // temperature/tint survive PSD open/save but are not rendered yet (tracked in #8667).
             let hi = if depth == photocraft_color::SampleType::F32 { f32::MAX } else { 1.0 };
             p[0] = [vibrance / 100.0, saturation / 100.0, transfer_exponent(transfer), hi];
             let b = adjust::VIBRANCE_BOOST;

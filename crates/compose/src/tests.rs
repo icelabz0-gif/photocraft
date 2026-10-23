@@ -3267,7 +3267,7 @@ fn rendering_restores_the_lab_mix_flag_it_found() {
 /// Vibrance of an 8-bit sRGB colour (0–255 in and out).
 fn vibrance_255(c: [f32; 3], vibrance: f32, saturation: f32) -> [f32; 3] {
     let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 1.0]);
-    adjust::apply(&Adjustment::Vibrance { vibrance, saturation }, &mut buf);
+    adjust::apply(&Adjustment::Vibrance { vibrance, saturation, temperature: 0.0, tint: 0.0 }, &mut buf);
     let p = buf.px[0];
     [p[0] * 255.0, p[1] * 255.0, p[2] * 255.0]
 }
@@ -3338,8 +3338,10 @@ fn clipped_brightness_and_desaturation_whiten_a_lighter_color_logo() {
     let mut logo = solid_layer("logo", Rect::new(0, 0, 1, 1), yellow);
     logo.blend = BlendMode::LighterColor;
     d.layers.push(logo);
-    for adj in [Adjustment::BrightnessContrast { brightness: 150.0, contrast: 0.0, legacy: false }, Adjustment::Vibrance { vibrance: 0.0, saturation: -100.0 }]
-    {
+    for adj in [
+        Adjustment::BrightnessContrast { brightness: 150.0, contrast: 0.0, legacy: false },
+        Adjustment::Vibrance { vibrance: 0.0, saturation: -100.0, temperature: 0.0, tint: 0.0 },
+    ] {
         let mut l = Layer::new("adj", LayerContent::Adjustment(adj));
         l.clipped = true;
         d.layers.push(l);

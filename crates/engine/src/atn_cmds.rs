@@ -889,7 +889,16 @@ const ADJUSTMENTS: &[Adjustment] = &[
     adj_fields!("Pstr", "posterize", &[F("Lvls", "levels", Kind::Long)]),
     adj_fields!("Invr", "invert", &[]),
     Adjustment { class: "ClrB", suffix: "colorBalance", from: color_balance_from, to: color_balance_to },
-    adj_fields!("Vbrn", "vibrance", &[F("vibrance", "vibrance", Kind::Long), F("Strt", "saturation", Kind::Long)]),
+    adj_fields!(
+        "Vbrn",
+        "vibrance",
+        &[
+            F("vibrance", "vibrance", Kind::Long),
+            F("Strt", "saturation", Kind::Long),
+            F("temperature", "temperature", Kind::Long),
+            F("tint", "tint", Kind::Long)
+        ]
+    ),
     adj_fields!("Exps", "exposure", &[F("Exps", "exposure", Kind::Dbl), F("Ofst", "offset", Kind::Dbl), F("gammaCorrection", "gamma", Kind::Dbl)]),
     Adjustment { class: "PhtF", suffix: "photoFilter", from: |d| fields_from(d, PHOTO_FILTER_FIELDS).map(Value::Object), to: photo_filter_to },
     adj_fields!("BlnW", "blackWhite", BW),

@@ -177,7 +177,7 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
         // Colour adjustments (Photoshop offers them for colour documents only: they would tint
         // a grayscale composite).
         let colour = vec![
-            Adjustment::Vibrance { vibrance: 40.0, saturation: -10.0 },
+            Adjustment::Vibrance { vibrance: 40.0, saturation: -10.0, temperature: 0.0, tint: 0.0 },
             Adjustment::ColorBalance { shadows: [10.0, 0.0, -5.0], midtones: [0.0, 20.0, 0.0], highlights: [-30.0, 0.0, 15.0], preserve_luminosity: true },
             Adjustment::BlackWhite { weights: [50.0, 60.0, 40.0, 60.0, 20.0, 70.0], tint: Some([1.0, 0.8, 0.6]) },
             Adjustment::PhotoFilter { color: [1.0, f32::from(32768u16) / 65535.0, 0.0], density: 0.25, preserve_luminosity: false },
