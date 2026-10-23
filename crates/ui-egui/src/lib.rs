@@ -76,6 +76,7 @@ pub mod crop_straighten;
 pub mod crop_ui;
 pub mod dds_options_ui;
 pub mod delete_layer_prompt;
+pub mod deviantart;
 pub mod dialog_alt_reset;
 pub mod dialog_blend_ui;
 pub mod dialogs;
@@ -673,10 +674,26 @@ pub struct Services {
     /// while AppKit's run loop is still going crashes or hangs Touch Bar Macs (#1575, #1458).
     /// Without one, eframe closes the window and the app ends with it.
     pub quit: Option<QuitFn>,
+    /// File › Submit to DeviantArt. The refresh token is an argument, never a URL.
+    pub load_deviantart: Option<LoadTextFn>,
+    pub save_deviantart: Option<SaveTextFn>,
+    pub deviantart_connect: Option<DeviantArtConnectFn>,
+    pub deviantart_current_refresh: Option<DeviantArtCurrentRefreshFn>,
+    pub deviantart_submit: Option<DeviantArtSubmitFn>,
+    pub deviantart_call: Option<DeviantArtCallFn>,
 }
 
 /// A document histogram being computed off the UI thread: (document, revision, receiver of
 /// (document, compute ms, histograms)).
+/// Browser login. Returns the refresh token. Must not log it.
+pub type DeviantArtConnectFn = std::sync::Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
+/// Current refresh token after DeviantArt rotates it. Never log the returned value.
+pub type DeviantArtCurrentRefreshFn = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
+/// Sta.sh submit. Arguments: refresh token, app id, title, comments, tags, file name, bytes.
+pub type DeviantArtSubmitFn = std::sync::Arc<dyn Fn(&str, &str, &str, &str, &[String], &str, &[u8]) -> Result<String, String> + Send + Sync>;
+/// Publish, edit, gallery, download or avatar. Arguments: refresh token, app id, JSON request.
+pub type DeviantArtCallFn = std::sync::Arc<dyn Fn(&str, &str, &str) -> Result<String, String> + Send + Sync>;
+
 pub(crate) type HistJob = (DocId, u64, std::sync::mpsc::Receiver<(DocId, f64, std::sync::Arc<tone::Histograms>)>);
 
 /// The Info panel's cached sample: pixel x, y, document revision and Eyedropper Sample Size.
@@ -686,6 +703,10 @@ pub struct PhotocraftApp {
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
+    /// File › Submit to DeviantArt. Not part of [`UiState`]: the control channel must not see the token.
+    pub deviantart: deviantart::Settings,
+    pub(crate) deviantart_job: Option<deviantart::Job>,
+    pub(crate) deviantart_pending: std::collections::VecDeque<String>,
     /// Canvas caches per (document, display): CPU textures hold monitor values; the GPU
     /// canvas state is shared (`canvas::GPU_OUTPUT`).
     canvases: HashMap<(DocId, u32), canvas::CanvasCache>,
@@ -1011,6 +1032,9 @@ impl PhotocraftApp {
             session,
             ui: UiState::default(),
             services,
+            deviantart: deviantart::Settings::default(),
+            deviantart_job: None,
+            deviantart_pending: std::collections::VecDeque::new(),
             canvases: HashMap::new(),
             navigator_textures: HashMap::new(),
             display_memo: HashMap::new(),
@@ -1161,6 +1185,9 @@ impl PhotocraftApp {
         // Saved preferences are in place before the first frame; recovery starts in upkeep.
         prefs_ui::load(&mut app);
         layers_panel_ui::restore_options(&mut app);
+        if let Some(text) = app.services.load_deviantart.as_mut().and_then(|load| load()) {
+            app.deviantart = deviantart::settings_from_json(&text);
+        }
         // After the saved preferences, which say whether the set was already offered.
         kys_import::offer_import(&mut app);
         notices::wayland_file_drop_guidance(&mut app);
@@ -1790,12 +1817,11 @@ impl PhotocraftApp {
         if self.save_options_open() {
             return Err(SAVE_OPTIONS_OPEN.into());
         }
-        let r = self.write_save(path, None, choices)?;
-        // JPEG Options are recorded only where they change something
-        // ([`jpeg_options_ui::plain_save_step`]); the Targa and DDS answers as given.
+        let r = self.write_save(path.clone(), None, choices)?;
         let mut step = jpeg_options_ui::plain_save_step(choices.jpeg);
         FormatChoices { jpeg: None, ..choices }.record(&mut step);
         self.session.journal.push(("file.save".into(), step));
+        deviantart::arm_after_save(self, &path, deviantart::WriteKind::Save, &r);
         Ok(r)
     }
 
@@ -1809,6 +1835,7 @@ impl PhotocraftApp {
         }
         choices.record(&mut step);
         self.session.journal.push(("file.saveAs".into(), step));
+        deviantart::arm_after_save(self, &path, deviantart::WriteKind::SaveAs, &r);
         Ok(r)
     }
 
@@ -2294,6 +2321,7 @@ impl eframe::App for PhotocraftApp {
         discard_ui::guard_window_close(self, ctx);
         // Background jobs: apply finished ones, keep frames coming, Esc cancels (before the
         // shortcuts see Esc).
+        crate::deviantart::poll(self, ctx);
         if !screen_picker::tick(self, ctx) {
             jobs_ui::tick(self, ctx);
             #[cfg(not(target_arch = "wasm32"))]
