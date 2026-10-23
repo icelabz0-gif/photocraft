@@ -953,4 +953,8 @@ fn alt_choosing_an_adjustment_from_the_menu_reopens_the_last_settings() {
     };
     assert_eq!(choose(&mut h, Modifiers::NONE), (defaults["inBlack"].clone(), defaults["gamma"].clone()), "a click opens at the defaults");
     assert_eq!(choose(&mut h, Modifiers::ALT), (levels["inBlack"].clone(), levels["gamma"].clone()), "⌥-click opens at the last settings");
+    // The plain click noted Levels already: put another command in front of it first.
+    crate::palette::note_recent(&h.ctx, "file.new");
+    choose(&mut h, Modifiers::ALT);
+    assert_eq!(crate::palette::recent_ids(&h.ctx).first().map(String::as_str), Some("image.adjustments.levels"), "Edit › Search's most recent");
 }

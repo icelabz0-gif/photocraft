@@ -1292,7 +1292,12 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         let alt = ctx.input(|i| i.modifiers.alt);
         // ⌥ while choosing an Image › Adjustments item opens it at its last settings (#8900).
         let r = if alt && crate::adjust_dialog::has_dialog(&id) {
-            crate::adjust_dialog::open_last(app, &id).map(|_| Value::Null).ok_or_else(|| "no document".to_string())
+            let opened = crate::adjust_dialog::open_last(app, &id).map(|_| Value::Null).ok_or_else(|| "no document".to_string());
+            // Edit › Search's recents, as `invoke` notes a plain click.
+            if opened.is_ok() {
+                crate::palette::note_recent(&ctx, &id);
+            }
+            opened
         } else {
             invoke(app, &ctx, &alt_click(id, alt), json!({}))
         };
