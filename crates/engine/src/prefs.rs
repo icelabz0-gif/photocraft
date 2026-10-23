@@ -87,6 +87,21 @@ choice!(LogDestination { Metadata = "metadata", TextFile = "textFile", Both = "b
 choice!(LogDetail { SessionsOnly = "sessionsOnly", Concise = "concise", Detailed = "detailed" } default Concise);
 choice!(Ask { Always = "always", Never = "never", Ask = "ask" } default Always);
 choice!(QuickExportFormat { Png = "png", Jpg = "jpg", Gif = "gif", Webp = "webp", Exr = "exr" } default Png);
+choice!(
+    /// The format Save As suggests for a document that has no file it can be saved back to (an
+    /// untitled document, or one opened from a format that can't keep its layers). The names are
+    /// file extensions. A flat format (PNG, JPEG) is suggested only when it keeps the whole
+    /// document; one with layers, masks, editable contents, alpha channels or (for JPEG)
+    /// transparency gets PSD instead, so they aren't lost.
+    SaveFormat { Psd = "psd", Pcraft = "pcraft", Tif = "tif", Png = "png", Jpg = "jpg" } default Psd
+);
+
+impl SaveFormat {
+    /// Whether this format can hold only a flattened image.
+    pub fn is_flat(self) -> bool {
+        matches!(self, Self::Png | Self::Jpg)
+    }
+}
 choice!(ExportLocation { Ask = "ask", SameFolder = "sameFolder" } default Ask);
 choice!(ExportMetadata { None = "none", Copyright = "copyright", All = "all" } default Copyright);
 choice!(
@@ -468,6 +483,8 @@ pub struct FileHandling {
     pub exr_aces_cg: bool,
     pub ask_before_saving_layered_tiff: bool,
     pub maximize_psd_compatibility: Ask,
+    /// The format Save As suggests when the document has no file of its own to keep.
+    pub default_save_format: SaveFormat,
     /// SVG groups deeper than this are rasterised on import; parser and document safety caps remain fixed.
     pub rasterize_svg_groups_deeper_than: u32,
     pub recent_file_count: u32,
@@ -500,6 +517,7 @@ impl Default for FileHandling {
             exr_aces_cg: false,
             ask_before_saving_layered_tiff: true,
             maximize_psd_compatibility: Ask::Always,
+            default_save_format: SaveFormat::Psd,
             rasterize_svg_groups_deeper_than: photocraft_doc::MAX_GROUP_DEPTH as u32,
             recent_file_count: 20,
             recent_files: Vec::new(),
@@ -1172,6 +1190,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "historyLog.destination" => LogDestination::NAMES,
         "historyLog.detail" => LogDetail::NAMES,
         "fileHandling.imagePreviews" | "fileHandling.maximizePsdCompatibility" => Ask::NAMES,
+        "fileHandling.defaultSaveFormat" => SaveFormat::NAMES,
         "export.quickExportFormat" => QuickExportFormat::NAMES,
         "export.quickExportLocation" => ExportLocation::NAMES,
         "export.metadata" => ExportMetadata::NAMES,

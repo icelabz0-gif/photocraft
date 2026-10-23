@@ -3005,3 +3005,7 @@ curves	Smooth	平滑
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Default save format (Preferences › File Handling)
+	Default save format	預設儲存格式
+	TIFF	TIFF

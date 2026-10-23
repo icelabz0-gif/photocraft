@@ -4454,3 +4454,7 @@ shape	Appearance	Izgled
 
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Default save format (Preferences › File Handling)
+	Default save format	Podrazumevani format čuvanja
+	TIFF	TIFF
