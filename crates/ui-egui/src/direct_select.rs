@@ -1,7 +1,7 @@
 //! Direct Selection tool (A, #790), the Convert Point tool (#3204), the Pens' ⌘/Ctrl (Direct
 //! Selection: the Pen, Freeform Pen and Curvature Pen) and the Pen's ⌥/Alt (Convert Point)
 //! modifiers, as in Photoshop. It edits the paths the canvas shows: the targeted vector mask or
-//! the active shape layer's path, and the work path.
+//! every visible shape layer's path, and the work path.
 //!
 //! * Click an anchor to select it (⇧ adds or removes, ⌥ selects its whole subpath), drag on empty
 //!   canvas to marquee-select anchors, click empty canvas to deselect.
@@ -63,6 +63,10 @@ pub struct DirectSelection {
     pub target: Option<PathRef>,
     /// Selected anchors as `[subpath, knot]`.
     pub anchors: Vec<[usize; 2]>,
+    /// Additional paths participating in a multi-layer anchor selection.
+    pub additional: Vec<(PathRef, Vec<[usize; 2]>)>,
+    #[serde(skip)]
+    pub additional_bases: Vec<(PathRef, Path)>,
     /// A clicked segment (`[subpath, knot]` it leaves): its two handles show.
     pub segment: Option<[usize; 2]>,
     #[serde(skip)]
@@ -302,11 +306,20 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
         return true;
     };
     if let PathRef::Layer(id) = target
-        && app.session.active().and_then(|st| st.active_layer).map(|l| l.0) != Some(id)
+        && !app.session.active().is_some_and(|st| st.is_layer_selected(photocraft_doc::LayerId(id)))
     {
         let _ = app.run("layer.select", json!({"layer": id}));
     }
+    let paths = candidates(app);
     let ds = &mut app.ui.direct_selection;
+    if let Some(i) = ds.additional.iter().position(|(r, _)| *r == target) {
+        let (_, anchors) = ds.additional.remove(i);
+        if let Some(old) = ds.target {
+            ds.additional.push((old, std::mem::take(&mut ds.anchors)));
+        }
+        ds.target = Some(target);
+        ds.anchors = anchors;
+    }
     if ds.target != Some(target) {
         *ds = DirectSelection { target: Some(target), ..Default::default() };
     }
@@ -354,6 +367,8 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
             Edit::Segment(k, t)
         }
     };
+    ds.additional_bases =
+        if matches!(edit, Edit::Anchors(_)) { paths.into_iter().filter(|(r, _)| ds.additional.iter().any(|(t, _)| t == r)).collect() } else { Vec::new() };
     ds.drag = Some(Drag::Edit { target, base, edit, start: p, end: p, preview: None });
     true
 }
@@ -464,34 +479,58 @@ fn release(app: &mut PhotocraftApp, target: PathRef, base: &Path, edit: &Edit, s
     if let (Some(p), Some(key)) = (params.as_object_mut(), app.ui.direct_selection.coalesce.take()) {
         p.insert("coalesce".into(), json!(key));
     }
+    if matches!(edit, Edit::Anchors(_)) && !app.ui.direct_selection.additional.is_empty() {
+        params["targets"] = json!(anchor_targets(&app.ui.direct_selection));
+    }
     if let Err(e) = app.run(id, params) {
         app.ui.status = e;
         app.ui.status_error = true;
     }
 }
 
-/// End of a marquee: select the anchors inside it on the frontmost path that has any (⇧ adds).
+/// Select every visible candidate anchor inside the marquee, independent of layer selection (⇧ adds).
 /// A click on empty canvas deselects.
 fn marquee(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], add: bool) {
     let rect = [start[0], start[1], end[0], end[1]];
-    let hits = candidates(app).into_iter().map(|(r, path)| (r, edit::anchors_in(&path, rect))).find(|(_, a)| !a.is_empty());
+    let hits: Vec<_> = candidates(app).into_iter().map(|(r, path)| (r, edit::anchors_in(&path, rect))).filter(|(_, a)| !a.is_empty()).collect();
     let ds = &mut app.ui.direct_selection;
-    match hits {
-        Some((r, anchors)) if add && ds.target == Some(r) => {
-            for a in anchors {
-                if !ds.anchors.contains(&a) {
-                    ds.anchors.push(a);
-                }
-            }
-            ds.segment = None;
+    if !add {
+        let target = if hits.is_empty() { ds.target } else { None };
+        *ds = DirectSelection { target, ..Default::default() };
+    }
+    for (r, anchors) in hits {
+        if ds.target.is_none() {
+            ds.target = Some(r);
         }
-        Some((r, anchors)) => *ds = DirectSelection { target: Some(r), anchors, ..Default::default() },
-        None if add => {}
-        None => {
-            ds.anchors.clear();
-            ds.segment = None;
+        let list = if ds.target == Some(r) {
+            &mut ds.anchors
+        } else {
+            if !ds.additional.iter().any(|(target, _)| *target == r) {
+                ds.additional.push((r, Vec::new()));
+            }
+            let Some((_, list)) = ds.additional.iter_mut().find(|(target, _)| *target == r) else { continue };
+            list
+        };
+        for a in anchors {
+            if !list.contains(&a) {
+                list.push(a);
+            }
         }
     }
+    ds.segment = None;
+}
+
+fn anchor_targets(ds: &DirectSelection) -> Vec<Value> {
+    ds.target
+        .iter()
+        .map(|t| (*t, &ds.anchors))
+        .chain(ds.additional.iter().map(|(t, a)| (*t, a)))
+        .map(|(target, anchors)| {
+            let mut p = target.params();
+            p["anchors"] = json!(anchors);
+            p
+        })
+        .collect()
 }
 
 /// Arrow keys with Direct Selection and selected anchors (#4486), as in Photoshop: nudge them
@@ -511,6 +550,9 @@ pub fn arrow_keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
             if ctx.input_mut(|i| i.consume_key(mods, key)) {
                 let k = if mods.shift { 10.0 } else { 1.0 };
                 let mut params = json!({"anchors": anchors, "move": [ux * k, uy * k]});
+                if !app.ui.direct_selection.additional.is_empty() {
+                    params["targets"] = json!(anchor_targets(&app.ui.direct_selection));
+                }
                 if let (Some(p), Some(t)) = (params.as_object_mut(), target.params().as_object()) {
                     p.extend(t.clone());
                 }
@@ -543,9 +585,24 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, to_scr: &dyn F
             Some(Drag::Edit { target, preview: Some(p), .. }) if *target == r => p.clone(),
             _ => path,
         };
+        let path = if let Some(Drag::Edit { edit: Edit::Anchors(_), start, end, .. }) = &ds.drag {
+            ds.additional_bases
+                .iter()
+                .find(|(t, _)| *t == r)
+                .and_then(|(_, base)| {
+                    let anchors = ds.additional.iter().find(|(t, _)| *t == r)?.1.clone();
+                    Edit::Anchors(anchors).preview(base, *start, *end)
+                })
+                .unwrap_or(path)
+        } else {
+            path
+        };
         crate::vector_ui::draw_outline(painter, &path, to_scr, accent);
-        let ours = ds.target == Some(r);
-        for &(k, h) in if ours { shown_handles(ds, &path) } else { Vec::new() }.iter() {
+        let extra = ds.additional.iter().find(|(target, _)| *target == r);
+        let local = extra.map(|(_, anchors)| DirectSelection { target: Some(r), anchors: anchors.clone(), ..Default::default() });
+        let shown_ds = local.as_ref().unwrap_or(ds);
+        let ours = ds.target == Some(r) || extra.is_some();
+        for &(k, h) in if ours { shown_handles(shown_ds, &path) } else { Vec::new() }.iter() {
             if let Some(kn) = path.subpaths.get(k[0]).and_then(|s| s.knots.get(k[1])) {
                 let c = if h == Handle::In { kn.in_ctrl } else { kn.out_ctrl };
                 crate::vector_ui::draw_handle(painter, to_scr([kn.anchor.x, kn.anchor.y]), to_scr([c.x, c.y]), accent);
@@ -553,7 +610,7 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, to_scr: &dyn F
         }
         for (s, sp) in path.subpaths.iter().enumerate() {
             for (k, kn) in sp.knots.iter().enumerate() {
-                crate::vector_ui::draw_anchor(painter, to_scr([kn.anchor.x, kn.anchor.y]), ours && ds.anchors.contains(&[s, k]), accent);
+                crate::vector_ui::draw_anchor(painter, to_scr([kn.anchor.x, kn.anchor.y]), ours && shown_ds.anchors.contains(&[s, k]), accent);
             }
         }
     }

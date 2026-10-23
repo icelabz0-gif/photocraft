@@ -517,3 +517,68 @@ fn a_curvature_pen_double_click_through_the_canvas_rounds_a_corner() {
     assert!(k.smooth && k.in_ctrl != k.anchor, "the double-clicked corner is smooth: {k:?}");
     assert!(h.state().ui.pen.is_none(), "and no path was started");
 }
+
+#[test]
+fn marquee_selects_and_moves_anchors_on_all_selected_shapes() {
+    let mut app = app(Tool::DirectSelection);
+    let mut ids = Vec::new();
+    for x in [20, 100] {
+        app.run("shape.create", json!({"kind":"rect","rect":[x,20,30,30],"fill":"#ff0000"})).unwrap();
+        ids.push(app.session.active().unwrap().active_layer.unwrap());
+    }
+    app.session.active_mut().unwrap().selected_layers = ids.clone();
+    let before = app.session.active().unwrap().doc.clone();
+    drag(&mut app, [10.0, 10.0], [150.0, 60.0], Modifiers::NONE);
+    assert_eq!(app.ui.direct_selection.anchors.len(), 4);
+    assert_eq!(app.ui.direct_selection.additional.len(), 1);
+    assert_eq!(app.ui.direct_selection.additional[0].1.len(), 4);
+    let n = steps(&app);
+    drag(&mut app, [20.0, 20.0], [25.0, 25.0], Modifiers::NONE);
+    assert_eq!(steps(&app), n + 1);
+    for id in &ids {
+        let get = |d: &photocraft_doc::Document| match &d.layer(*id).unwrap().content {
+            photocraft_doc::LayerContent::Shape(sh) => sh.path.subpaths[0].knots[0].anchor,
+            _ => panic!("shape"),
+        };
+        let a = get(&before);
+        let b = get(&app.session.active().unwrap().doc);
+        assert_eq!(b, Point::new(a.x + 5.0, a.y + 5.0));
+    }
+    assert!(app.session.undo());
+    for id in ids {
+        assert_eq!(app.session.active().unwrap().doc.layer(id), before.layer(id));
+    }
+}
+
+#[test]
+fn marquee_selects_across_shapes_regardless_of_layer_selection() {
+    for active in [false, true] {
+        let mut app = app(Tool::DirectSelection);
+        let mut ids = Vec::new();
+        for x in [20, 100] {
+            app.run("shape.create", json!({"kind":"rect","rect":[x,20,30,30],"fill":"#ff0000"})).unwrap();
+            ids.push(app.session.active().unwrap().active_layer.unwrap());
+        }
+        if !active {
+            let st = app.session.active_mut().unwrap();
+            st.active_layer = None;
+            st.selected_layers.clear();
+        }
+        assert_eq!(app.session.active().unwrap().selected_layers().len(), usize::from(active));
+        drag(&mut app, [10.0, 10.0], [150.0, 60.0], Modifiers::NONE);
+        assert_eq!(app.ui.direct_selection.anchors.len(), 4);
+        assert_eq!(app.ui.direct_selection.additional.len(), 1);
+        assert_eq!(app.ui.direct_selection.additional[0].1.len(), 4);
+        let before = app.session.active().unwrap().doc.clone();
+        drag(&mut app, [20.0, 20.0], [25.0, 25.0], Modifiers::NONE);
+        for id in ids {
+            let get = |doc: &photocraft_doc::Document| match &doc.layer(id).unwrap().content {
+                photocraft_doc::LayerContent::Shape(sh) => sh.path.subpaths[0].knots[0].anchor,
+                _ => panic!("shape"),
+            };
+            let a = get(&before);
+            let b = get(&app.session.active().unwrap().doc);
+            assert_eq!(b, Point::new(a.x + 5.0, a.y + 5.0));
+        }
+    }
+}
