@@ -177,7 +177,10 @@ fn basic_color_params_merge_and_layer_mask() {
                 "whites": 10,
                 "blacks": -5,
                 "vibrance": 30,
-                "saturation": -10
+                "saturation": -10,
+                "hslHue": [20, 0, 0, 0, 0, 0, 0, -20],
+                "hslSat": [0, 0, 0, 0, 0, 0, 0, 0],
+                "hslLum": [0, 0, 0, 0, 0, 0, 0, 0]
             }),
         )
         .unwrap();
@@ -194,7 +197,9 @@ fn basic_color_params_merge_and_layer_mask() {
             whites: 10.0,
             blacks: -5.0,
             vibrance: 30.0,
-            saturation: -10.0
+            saturation: -10.0,
+            hsl_hue: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -20.0],
+            ..
         }
     ));
     // The selection becomes the layer mask.

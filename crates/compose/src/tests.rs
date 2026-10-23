@@ -3259,6 +3259,28 @@ fn basic_color(p: [f32; 10]) -> Adjustment {
         blacks: p[7],
         vibrance: p[8],
         saturation: p[9],
+        hsl_hue: [0.0; 8],
+        hsl_sat: [0.0; 8],
+        hsl_lum: [0.0; 8],
+    }
+}
+
+/// A Basic Color adjustment with only the Color Mixer set.
+fn basic_color_mixer(hsl_hue: [f32; 8], hsl_sat: [f32; 8], hsl_lum: [f32; 8]) -> Adjustment {
+    Adjustment::BasicColor {
+        temperature: 0.0,
+        tint: 0.0,
+        exposure: 0.0,
+        contrast: 0.0,
+        highlights: 0.0,
+        shadows: 0.0,
+        whites: 0.0,
+        blacks: 0.0,
+        vibrance: 0.0,
+        saturation: 0.0,
+        hsl_hue,
+        hsl_sat,
+        hsl_lum,
     }
 }
 
@@ -3416,4 +3438,112 @@ fn basic_color_never_tints_grayscale_family_documents() {
         adjust::apply_in(&basic_color(chroma), &mut buf, adjust::Transfer::Srgb, Some(SampleType::U8), mode);
         assert!(buf.px[0][0] > buf.px[0][2], "{mode:?} should warm: {:?}", buf.px[0]);
     }
+}
+
+/// One pixel through the Color Mixer (all other Basic Color sliders neutral).
+fn mixer_px(c: [f32; 3], hue: [f32; 8], sat: [f32; 8], lum: [f32; 8], depth: SampleType) -> [f32; 3] {
+    let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [c[0], c[1], c[2], 1.0]);
+    adjust::apply_depth(&basic_color_mixer(hue, sat, lum), &mut buf, adjust::Transfer::Srgb, Some(depth));
+    [buf.px[0][0], buf.px[0][1], buf.px[0][2]]
+}
+
+#[test]
+fn basic_color_mixer_zero_is_an_exact_no_op() {
+    let snapshot = [[0.13, 0.42, 0.77, 0.4], [2.0, -0.5, 0.0, 1.0], [0.0, 0.999, 0.001, 0.0]];
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut buf = Buffer { rect: Rect::new(0, 0, 3, 1), px: snapshot.to_vec() };
+        adjust::apply_depth(&basic_color_mixer([0.0; 8], [0.0; 8], [0.0; 8]), &mut buf, adjust::Transfer::Srgb, Some(depth));
+        assert_eq!(buf.px, snapshot, "{depth:?}: all-zero mixer must keep every bit");
+    }
+    // A colour slider set while the mixer stays neutral keeps the old path bit-exact: with the
+    // mixer at 0 there is no HSV round-trip after Presence.
+    let mut muted = Buffer::filled(Rect::new(0, 0, 1, 1), [0.7, 0.2, 0.1, 1.0]);
+    adjust::apply_depth(&basic_color([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -60.0]), &mut muted, adjust::Transfer::Srgb, Some(SampleType::U8));
+    let mut mixed_zero = Buffer::filled(Rect::new(0, 0, 1, 1), [0.7, 0.2, 0.1, 1.0]);
+    let mut a = basic_color([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -60.0]);
+    if let Adjustment::BasicColor { hsl_hue, hsl_sat, hsl_lum, .. } = &mut a {
+        *hsl_hue = [0.0; 8];
+        *hsl_sat = [0.0; 8];
+        *hsl_lum = [0.0; 8];
+    }
+    adjust::apply_depth(&a, &mut mixed_zero, adjust::Transfer::Srgb, Some(SampleType::U8));
+    assert_eq!(muted.px, mixed_zero.px);
+}
+
+#[test]
+fn basic_color_mixer_bands_are_isolated_and_move_the_right_way() {
+    let zero = [0.0; 8];
+    // Red's hue band shifts pure red towards orange (green rises); the blue band leaves red alone.
+    let hue = [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let red = mixer_px([1.0, 0.0, 0.0], hue, zero, zero, SampleType::U8);
+    assert!(red[1] > 0.05 && red[2] <= 1e-5, "red shifted towards orange: {red:?}");
+    let blue_band = [0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0];
+    let untouched = mixer_px([1.0, 0.0, 0.0], blue_band, zero, zero, SampleType::U8);
+    assert_eq!(untouched, [1.0, 0.0, 0.0], "the blue band must not move red");
+    // A negative red shift goes towards magenta (blue rises).
+    let magenta = mixer_px([1.0, 0.0, 0.0], [-100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], zero, zero, SampleType::U8);
+    assert!(magenta[2] > 0.05 && magenta[1] <= 1e-5, "{magenta:?}");
+
+    // Saturation flattens its band around its own saturation; green leaves red alone.
+    let sat = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let flat = mixer_px([1.0, 0.0, 0.0], zero, [-100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], sat, SampleType::U8);
+    assert!((flat[0] - flat[1]).abs() < 1e-5 && (flat[1] - flat[2]).abs() < 1e-5, "{flat:?}");
+    let red_sat = mixer_px([1.0, 0.0, 0.0], zero, [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0], sat, SampleType::U8);
+    assert_eq!(red_sat, [1.0, 0.0, 0.0], "the green band must not desaturate red");
+
+    // Luminance brighter/darker in the red band, and weighted by the pixel's saturation.
+    let lum_up = mixer_px([0.6, 0.1, 0.1], zero, zero, [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    let lum_down = mixer_px([0.6, 0.1, 0.1], zero, zero, [-100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], SampleType::U8);
+    assert!(basic_luma(lum_up) > basic_luma([0.6, 0.1, 0.1]), "{lum_up:?}");
+    assert!(basic_luma(lum_down) < basic_luma([0.6, 0.1, 0.1]), "{lum_down:?}");
+    // Neutrals never gain chroma, whichever band is pushed.
+    for c in [[0.0; 3], [0.5; 3], [1.0; 3]] {
+        let out = mixer_px(c, [100.0; 8], [100.0; 8], [100.0; 8], SampleType::U8);
+        assert_eq!(out, c, "neutral {c:?} tinted");
+    }
+}
+
+#[test]
+fn basic_color_mixer_applies_after_presence_and_stays_neutral_in_greyscale() {
+    // Presence then mixer: saturation -100 leaves a grey, and the mixer has no chroma to act on.
+    let mut a = basic_color([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0]);
+    if let Adjustment::BasicColor { hsl_hue, .. } = &mut a {
+        *hsl_hue = [100.0; 8];
+    }
+    let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [1.0, 0.0, 0.0, 1.0]);
+    adjust::apply_depth(&a, &mut buf, adjust::Transfer::Srgb, Some(SampleType::U8));
+    let grey = buf.px[0];
+    assert!((grey[0] - grey[1]).abs() < 1e-5 && (grey[1] - grey[2]).abs() < 1e-5, "{grey:?}");
+
+    // Grayscale-family documents ignore the mixer entirely (no chroma may be introduced).
+    for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
+        let snapshot = [[0.25, 0.25, 0.25, 1.0], [0.8, 0.8, 0.8, 1.0]];
+        let mut buf = Buffer { rect: Rect::new(0, 0, 2, 1), px: snapshot.to_vec() };
+        adjust::apply_in(
+            &basic_color_mixer([100.0; 8], [100.0; 8], [100.0; 8]),
+            &mut buf,
+            adjust::Transfer::for_document(mode, SampleType::U8),
+            Some(SampleType::U8),
+            mode,
+        );
+        assert_eq!(buf.px, snapshot, "{mode:?}: mixer must be a no-op");
+    }
+}
+
+#[test]
+fn basic_color_mixer_respects_layer_mask_and_opacity() {
+    let mut d = Document::with_background("mixer", Size::new(4, 1), ColorMode::Rgb, SampleType::U8, Color::rgb(1.0, 0.0, 0.0));
+    let mut hue = [0.0; 8];
+    hue[0] = 100.0;
+    let mut adj = Layer::new("mixer", LayerContent::Adjustment(basic_color_mixer(hue, [0.0; 8], [0.0; 8])));
+    let mut m = LayerMask::reveal_all();
+    m.surface.fill_rect(Rect::new(2, 0, 4, 1), &[0.0]);
+    adj.mask = Some(m);
+    d.layers.push(adj);
+    let inside = px(&d, 0, 0);
+    assert!(inside[1] > 0.05, "masked-in red is shifted: {inside:?}");
+    assert_eq!(px(&d, 3, 0), [1.0, 0.0, 0.0, 1.0], "masked-out red is untouched");
+    d.layers[1].opacity = 0.5;
+    let half = px(&d, 0, 0);
+    assert!(half[1] > 0.0 && half[1] < inside[1], "opacity blends the mixer: {half:?} vs {inside:?}");
 }

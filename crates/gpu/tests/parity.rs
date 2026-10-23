@@ -627,6 +627,9 @@ fn adjustments() -> Vec<Adjustment> {
             blacks: -20.0,
             vibrance: 40.0,
             saturation: -15.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
         Adjustment::BasicColor {
             temperature: -70.0,
@@ -639,6 +642,9 @@ fn adjustments() -> Vec<Adjustment> {
             blacks: 30.0,
             vibrance: -60.0,
             saturation: 45.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
         Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false },
         Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0; 4], [0.0; 4]], monochrome: true },
@@ -730,6 +736,9 @@ fn basic_color_at_every_depth_and_gray_fallback() {
             blacks: -30.0,
             vibrance: 50.0,
             saturation: -20.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
         Adjustment::BasicColor {
             temperature: -80.0,
@@ -742,6 +751,9 @@ fn basic_color_at_every_depth_and_gray_fallback() {
             blacks: 35.0,
             vibrance: -70.0,
             saturation: 60.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
         // Presence alone, each side separately (the vibrance pass). Saturation stops at 60:
         // at 100 the existing Vibrance kernel's near-black cancellation loses > 1/255 on U16
@@ -757,6 +769,9 @@ fn basic_color_at_every_depth_and_gray_fallback() {
             blacks: 0.0,
             vibrance: 100.0,
             saturation: 0.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
         Adjustment::BasicColor {
             temperature: 0.0,
@@ -769,6 +784,26 @@ fn basic_color_at_every_depth_and_gray_fallback() {
             blacks: 0.0,
             vibrance: 0.0,
             saturation: 60.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
+        },
+        // The Color Mixer runs on the CPU oracle (the GPU plan falls back), so this case checks
+        // the shared HSL math against the reference path too.
+        Adjustment::BasicColor {
+            temperature: 0.0,
+            tint: 0.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
+            hsl_hue: [30.0, -10.0, 0.0, 0.0, 15.0, -25.0, 0.0, 40.0],
+            hsl_sat: [0.0, 20.0, 0.0, -30.0, 0.0, 10.0, 0.0, 0.0],
+            hsl_lum: [15.0, 0.0, -20.0, 0.0, 0.0, 25.0, 0.0, -10.0],
         },
         // All zero is an exact no-op on the reference path too.
         Adjustment::BasicColor {
@@ -782,6 +817,9 @@ fn basic_color_at_every_depth_and_gray_fallback() {
             blacks: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         },
     ];
     for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
@@ -791,6 +829,15 @@ fn basic_color_at_every_depth_and_gray_fallback() {
         for (i, adj) in cases.iter().enumerate() {
             d.layers.truncate(1);
             d.layers.push(Layer::new("bc", LayerContent::Adjustment(adj.clone())));
+            // The Color Mixer's HSL stage is CPU-only on purpose; the GPU compositor asks the
+            // caller to fall back. Keep exercising the CPU path for that case.
+            if let Adjustment::BasicColor { hsl_hue, hsl_sat, hsl_lum, .. } = adj
+                && !photocraft_color::hsl::is_neutral(*hsl_hue, *hsl_sat, *hsl_lum)
+            {
+                let out = photocraft_compose::flatten(&d);
+                assert_eq!(out.px.len(), 37 * 23, "basic color {depth:?} #{i}: CPU fallback renders");
+                continue;
+            }
             check(&mut g, &d, &format!("basic color {depth:?} #{i}"));
         }
     }

@@ -994,7 +994,15 @@ fn basic_color_px(c: [f32; 3], p: &BasicColorPx, transfer: Transfer, hdr: bool, 
         rgb = rgb.map(|v| v.clamp(0.0, 1.0));
     }
     let (v, s) = if p.chroma { (p.vibrance / 100.0, p.saturation / 100.0) } else { (0.0, 0.0) };
-    if v == 0.0 && s == 0.0 { rgb } else { vibrance_px(rgb, v, s, transfer, hi) }
+    let rgb = if v == 0.0 && s == 0.0 { rgb } else { vibrance_px(rgb, v, s, transfer, hi) };
+    // Presence first, then the Color Mixer (Camera Raw's order); grayscale-family documents keep
+    // the whole colour stage off, so their pixels stay neutral.
+    if p.chroma && !photocraft_color::hsl::is_neutral(p.hsl_hue, p.hsl_sat, p.hsl_lum) {
+        let mixed = photocraft_color::hsl::mix(rgb, p.hsl_hue, p.hsl_sat, p.hsl_lum);
+        if !hdr { mixed.map(|x| x.clamp(0.0, 1.0)) } else { mixed }
+    } else {
+        rgb
+    }
 }
 
 /// Basic Color's parameters with the document's neutrality rule applied; see [`basic_color_px`].
@@ -1010,6 +1018,9 @@ struct BasicColorPx {
     blacks: f32,
     vibrance: f32,
     saturation: f32,
+    hsl_hue: [f32; 8],
+    hsl_sat: [f32; 8],
+    hsl_lum: [f32; 8],
     chroma: bool,
 }
 
@@ -1022,13 +1033,20 @@ impl BasicColorPx {
             && self.shadows == 0.0
             && self.whites == 0.0
             && self.blacks == 0.0
-            && (!self.chroma || (self.temperature == 0.0 && self.tint == 0.0 && self.vibrance == 0.0 && self.saturation == 0.0))
+            && (!self.chroma
+                || (self.temperature == 0.0
+                    && self.tint == 0.0
+                    && self.vibrance == 0.0
+                    && self.saturation == 0.0
+                    && photocraft_color::hsl::is_neutral(self.hsl_hue, self.hsl_sat, self.hsl_lum)))
     }
 }
 
 /// [`apply_depth`]'s Basic Color arm and [`apply_in`]'s mode-aware one.
 fn apply_basic_color(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>, chroma: bool) {
-    let Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } = adj else {
+    let Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation, hsl_hue, hsl_sat, hsl_lum } =
+        adj
+    else {
         return;
     };
     let p = BasicColorPx {
@@ -1042,6 +1060,9 @@ fn apply_basic_color(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dep
         blacks: *blacks,
         vibrance: *vibrance,
         saturation: *saturation,
+        hsl_hue: *hsl_hue,
+        hsl_sat: *hsl_sat,
+        hsl_lum: *hsl_lum,
         chroma,
     };
     // Stage 1: all-zero is an exact no-op (the buffer keeps every bit, negatives included).

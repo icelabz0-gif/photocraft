@@ -1574,9 +1574,11 @@ fn to_row(t: &[f32]) -> [f32; 4096] {
 pub fn adjustment_on_gpu(adj: &Adjustment, mode: photocraft_color::ColorMode) -> bool {
     use photocraft_compose::adjust::{cmyk_channel_adjustment, lab_channel_adjustment};
     // Basic Color ignores its colour sliders in grayscale-family documents, a rule only the CPU
-    // owns (compose::adjust::apply_in), so those modes fall back.
-    if matches!(adj, Adjustment::BasicColor { .. })
-        && matches!(mode, photocraft_color::ColorMode::Grayscale | photocraft_color::ColorMode::Duotone | photocraft_color::ColorMode::Bitmap)
+    // owns (compose::adjust::apply_in), so those modes fall back. The Color Mixer's HSL stage is
+    // CPU-only too: a non-neutral mixer falls back rather than differing from the oracle.
+    if let Adjustment::BasicColor { hsl_hue, hsl_sat, hsl_lum, .. } = adj
+        && (matches!(mode, photocraft_color::ColorMode::Grayscale | photocraft_color::ColorMode::Duotone | photocraft_color::ColorMode::Bitmap)
+            || !photocraft_color::hsl::is_neutral(*hsl_hue, *hsl_sat, *hsl_lum))
     {
         return false;
     }
@@ -1666,7 +1668,7 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
                 (8, p, None)
             }
         }
-        Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } => {
+        Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation, .. } => {
             // compose::adjust::basic_color_px:
             // p0 = temperature, tint, exposure, contrast; p1 = highlights, shadows, whites, blacks;
             // p2 = vibrance, saturation, exposure transfer gamma, unused;
@@ -1874,6 +1876,9 @@ mod tests {
             blacks: 0.0,
             vibrance: 10.0,
             saturation: 0.0,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
         };
         for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
             assert!(!adjustment_on_gpu(&basic, mode), "{mode:?}");
@@ -1881,6 +1886,12 @@ mod tests {
         for mode in [ColorMode::Rgb, ColorMode::Lab, ColorMode::Cmyk] {
             assert!(adjustment_on_gpu(&basic, mode), "{mode:?}");
         }
+        // A non-neutral Color Mixer runs on the CPU oracle.
+        let mut mixed = basic;
+        if let Adjustment::BasicColor { hsl_hue, .. } = &mut mixed {
+            hsl_hue[0] = 50.0;
+        }
+        assert!(!adjustment_on_gpu(&mixed, ColorMode::Rgb));
     }
 
     #[test]

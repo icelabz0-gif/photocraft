@@ -227,7 +227,7 @@ impl Default for CameraRaw {
 }
 
 /// Hue band centres of the Color Mixer (degrees).
-pub const HSL_BANDS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0];
+pub const HSL_BANDS: [f32; 8] = photocraft_color::hsl::HSL_BANDS;
 
 fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
@@ -480,14 +480,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 
 /// Weights of the eight HSL bands at hue `h` (hat functions between neighbouring centres).
 pub fn band_weights(h: f32) -> [f32; 8] {
-    let mut w = [0.0f32; 8];
-    for k in 0..8 {
-        let (c, prev, next) = (HSL_BANDS[k], HSL_BANDS[(k + 7) % 8], HSL_BANDS[(k + 1) % 8]);
-        let diff = ((h - c + 540.0) % 360.0) - 180.0;
-        let span = if diff >= 0.0 { (next - c).rem_euclid(360.0) } else { (c - prev).rem_euclid(360.0) };
-        w[k] = (1.0 - diff.abs() / span.max(1e-3)).max(0.0);
-    }
-    w
+    photocraft_color::hsl::band_weights(h)
 }
 
 impl CameraRaw {
@@ -679,26 +672,7 @@ pub fn develop(px: &mut [[f32; 4]], w: usize, h: usize, p: &CameraRaw, float: bo
                     }
                 }
                 if hsl {
-                    let [hh, s, v] = rgb_to_hsv(c.map(|x| x.max(0.0)));
-                    if s > 1e-4 {
-                        let wts = band_weights(hh);
-                        let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
-                        for k in 0..8 {
-                            dh += wts[k] * p.hsl_hue[k];
-                            ds += wts[k] * p.hsl_sat[k];
-                            dl += wts[k] * p.hsl_lum[k];
-                        }
-                        let nh = hh + dh / 100.0 * 30.0;
-                        let ns = (s * (1.0 + ds / 100.0)).clamp(0.0, 1.0);
-                        let mut out = hsv_to_rgb(nh, ns, v);
-                        // Keep the luminance, then apply the luminance shift weighted by saturation.
-                        let (l0, l1) = (luma(c), luma(out));
-                        if l1 > 1e-6 {
-                            out = out.map(|x| x * l0 / l1);
-                        }
-                        let k = 2f32.powf(dl / 100.0 * 1.0 * s);
-                        c = out.map(|x| x * k);
-                    }
+                    c = photocraft_color::hsl::mix(c, p.hsl_hue, p.hsl_sat, p.hsl_lum);
                 }
                 if grade {
                     let l = luma(c).clamp(0.0, 1.0);

@@ -219,6 +219,9 @@ fn basic_color_survives_pcraft_and_warns_when_dropped_from_psd() {
         blacks: -20.0,
         vibrance: 40.0,
         saturation: -15.0,
+        hsl_hue: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -5.0],
+        hsl_sat: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        hsl_lum: [0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0],
     };
     let mut d = Document::new("basic color", photocraft_geom::Size::new(16, 12), ColorMode::Rgb, SampleType::U8);
     let fmt = d.pixel_format();

@@ -23,7 +23,7 @@ use photocraft_algo::selection;
 use photocraft_algo::tone::{self, LabStats, MatchColor};
 use photocraft_color::convert::{lab_to_srgb, srgb_to_lab};
 use photocraft_color::{BlendMode, PixelFormat};
-use photocraft_doc::{Document, Layer, LayerId, LayerMask};
+use photocraft_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::{Surface, from_rgba_into, to_rgba};
 use serde_json::{Value, json};
@@ -33,6 +33,7 @@ use crate::{EngineError, Result, Session};
 
 const RUN: &str = "retouchAI.run";
 const ANALYZE: &str = "retouchAI.analyze";
+const FROM_FACE: &str = "layer.layerMask.fromFace";
 const MAX_TOOLS: usize = 14;
 const ANALYSIS_SIDE: u32 = 1600;
 const MASK_COVERAGE: f32 = 0.004;
@@ -1633,6 +1634,134 @@ fn analyze_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(out)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaceMode {
+    All,
+    Main,
+}
+
+impl FaceMode {
+    fn parse(p: &Value) -> Result<Self> {
+        match p.get("faces") {
+            None => Ok(FaceMode::All),
+            Some(Value::String(s)) if s == "all" => Ok(FaceMode::All),
+            Some(Value::String(s)) if s == "main" => Ok(FaceMode::Main),
+            Some(_) => Err(bad(FROM_FACE, "`faces` must be \"all\" or \"main\"")),
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            FaceMode::All => "all",
+            FaceMode::Main => "main",
+        }
+    }
+}
+
+/// The document with one layer hidden: the visible image without the mask target's own colour
+/// effect. Hidden siblings and groups keep their state, so the analysis sees exactly what the
+/// user sees apart from that layer.
+fn without_layer(doc: &Document, id: LayerId) -> Document {
+    let mut d = doc.clone();
+    if let Some(path) = d.path_of(id)
+        && let Some(l) = d.layer_at_mut(&path)
+    {
+        l.visible = false;
+    }
+    d
+}
+
+/// Face boxes in analysis pixels: the shared detector plus the same duplicate collapsing the
+/// Retouch AI tools use. `override_rects` is the deterministic seam for tests (the detector needs
+/// a real face image, which synthetic command tests do not have).
+fn face_rects_at(px: &[[f32; 4]], aw: usize, ah: usize, override_rects: Option<&[Rect]>) -> Vec<Rect> {
+    let grid = Rect::new(0, 0, aw as i32, ah as i32);
+    let rects: Vec<Rect> = match override_rects {
+        Some(rects) => rects.to_vec(),
+        None if faces::AVAILABLE => dedupe_faces(faces::detect(px, aw, ah, crate::face_cmds::MIN_SCORE).unwrap_or_default()).iter().map(face_rect).collect(),
+        None => Vec::new(),
+    };
+    rects.into_iter().map(|r| r.intersect(&grid)).filter(|r| !r.is_empty()).collect()
+}
+
+/// The skin coverage of the chosen faces: the Color Range skin classifier, smoothed, gated to
+/// the face/neck/upper-chest region around those boxes, then turned into a layer mask that hides
+/// everything else.
+fn face_mask(doc: &Document, px: &[[f32; 4]], aw: usize, ah: usize, faces: &[Rect]) -> Option<LayerMask> {
+    let canvas = doc.bounds();
+    if canvas.is_empty() || aw == 0 || ah == 0 {
+        return None;
+    }
+    let raw_skin = selection::skin_tones(px, 40.0);
+    let mut skin_data = matting::box_mean(&raw_skin, aw, ah, 1);
+    let skin_bbox = clean_skin(&mut skin_data, aw, ah, canvas, faces, Rect::EMPTY);
+    if skin_bbox.is_empty() {
+        return None;
+    }
+    let field = Field::filled(canvas, aw, ah, skin_data).with_content(skin_bbox);
+    let surface = field_mask_surface(&field, canvas, None);
+    if surface.content_bounds().is_empty() {
+        return None;
+    }
+    Some(hide_mask(surface))
+}
+
+fn from_face_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    from_face_cmd_with(s, p, None)
+}
+
+fn from_face_cmd_with(s: &mut Session, p: &Value, override_rects: Option<&[Rect]>) -> Result<Value> {
+    let mode = FaceMode::parse(p)?;
+    let id = crate::commands::layer_param(s, p)?;
+    let doc = {
+        let d = s.active().ok_or(EngineError::NoDocument)?;
+        let layer = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+        if !matches!(layer.content, LayerContent::Adjustment(_)) {
+            return Err(bad(
+                FROM_FACE,
+                format!(
+                    "layer \"{}\" is {} {} layer; a mask from a face needs an adjustment layer",
+                    layer.name,
+                    layer.content.article(),
+                    layer.content.kind_name()
+                ),
+            ));
+        }
+        d.doc.clone()
+    };
+    let canvas = doc.bounds();
+    if canvas.is_empty() {
+        return Err(EngineError::Other("the document has no pixels to analyse".into()));
+    }
+    let (aw, ah) = analysis_size(canvas);
+    let px = photocraft_compose::render_reduced(&without_layer(&doc, id), aw as u32, ah as u32).px;
+    if px.len() != aw.saturating_mul(ah) {
+        return Err(EngineError::Other("the reduced analysis image has an unexpected size".into()));
+    }
+    let found = face_rects_at(&px, aw, ah, override_rects);
+    if found.is_empty() {
+        return Err(EngineError::Other("no face found".into()));
+    }
+    let faces =
+        if mode == FaceMode::Main { found.iter().copied().max_by(|a, b| rect_area(*a).total_cmp(&rect_area(*b))).into_iter().collect() } else { found.clone() };
+    let mask = face_mask(&doc, &px, aw, ah, &faces).ok_or_else(|| EngineError::Other("no face found".into()))?;
+    s.edit("Layer Mask from Face", |doc, _| {
+        doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
+        Ok(())
+    })?;
+    Ok(json!({
+        "layer": id.0,
+        "faces": found.len(),
+        "mode": mode.id(),
+    }))
+}
+
+fn has_adjustment_layer(s: &Session) -> std::result::Result<(), String> {
+    let d = s.active().ok_or("no document open")?;
+    let layer = d.active_layer.and_then(|id| d.doc.layer(id)).ok_or("no active layer")?;
+    if matches!(layer.content, LayerContent::Adjustment(_)) { Ok(()) } else { Err("the active layer is not an adjustment layer".into()) }
+}
+
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".into())
 }
@@ -1658,6 +1787,16 @@ pub fn specs() -> Vec<CommandSpec> {
             enabled: has_doc,
             run: analyze_cmd,
             journal: false,
+        },
+        CommandSpec {
+            id: FROM_FACE,
+            label: "Layer Mask from Face",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id? (adjustment layer; default active layer),"faces":"all"|"main"="all"} → {"layer":id,"faces":count,"mode":"all"|"main"}"##,
+            enabled: has_adjustment_layer,
+            run: from_face_cmd,
+            journal: true,
         },
     ]
 }
@@ -2061,5 +2200,145 @@ mod tests {
         let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
         assert!(mask.value(65, 55) > 0.2);
         assert!(mask.value(120, 78) < 0.01, "skin outside the selection must be hidden");
+    }
+
+    // ---------- layer.layerMask.fromFace ----------
+
+    fn adjustment_session() -> (Session, LayerId) {
+        let mut s = synthetic_session(SampleType::U8);
+        // A grayscale adjustment on top proves the analysis excludes the mask target's own
+        // colour effect: the hidden layer would otherwise desaturate the skin away.
+        let r = s.execute("layer.newAdjustmentLayer.basicColor", json!({"saturation": -100})).unwrap();
+        let id = LayerId(r["layer"].as_u64().unwrap());
+        (s, id)
+    }
+
+    fn add_skin_blob(doc: &mut Document, cx: i32, cy: i32, rx: i32, ry: i32) {
+        let fmt = doc.pixel_format();
+        let bounds = doc.bounds();
+        let ch = fmt.channels();
+        let Some(surface) = doc.layers[0].surface_mut() else { return };
+        let native = surface.read_region(bounds);
+        let w = bounds.width() as usize;
+        let mut rgba: Vec<[f32; 4]> = native.chunks_exact(ch).map(|p| to_rgba(&fmt, p)).collect();
+        for y in 0..bounds.height() {
+            for x in 0..bounds.width() {
+                let dx = (x as f32 - cx as f32) / rx.max(1) as f32;
+                let dy = (y as f32 - cy as f32) / ry.max(1) as f32;
+                if dx * dx + dy * dy <= 1.0 {
+                    rgba[y as usize * w + x as usize] = [0.80, 0.56, 0.43, 1.0];
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(rgba.len() * ch);
+        let mut tmp = [0.0f32; 4];
+        for p in &rgba {
+            let _ = from_rgba_into(&fmt, *p, &mut tmp);
+            out.extend_from_slice(&tmp[..ch]);
+        }
+        surface.write_region(bounds, &out);
+    }
+
+    #[test]
+    fn from_face_requires_a_document_a_pixel_layer_and_valid_params() {
+        let mut s = Session::new();
+        assert!(s.execute(FROM_FACE, json!({})).is_err());
+        assert!(!s.is_enabled(FROM_FACE));
+
+        let mut s = synthetic_session(SampleType::U8);
+        assert!(s.execute(FROM_FACE, json!({})).is_err(), "the background is a pixel layer");
+        assert!(!s.is_enabled(FROM_FACE));
+
+        let (mut s, id) = adjustment_session();
+        assert!(s.is_enabled(FROM_FACE));
+        for params in [json!({"faces":"left"}), json!({"faces":7}), json!({"layer":999999}), json!({"layer":"nope"})] {
+            assert!(s.execute(FROM_FACE, params.clone()).is_err(), "{params}");
+        }
+        // An explicit adjustment layer works even while a pixel layer is active.
+        let background = s.active().unwrap().doc.layers[0].id;
+        s.execute("layer.select", json!({"layer": background.0})).unwrap();
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0}), Some(&[Rect::from_xywh(70, 48, 52, 58)])).unwrap();
+        assert_eq!(r["layer"], id.0);
+    }
+
+    #[test]
+    fn from_face_without_a_face_errors_and_keeps_the_old_mask() {
+        let (mut s, id) = adjustment_session();
+        let mut old = LayerMask::hide_all();
+        old.surface.write_region(Rect::from_xywh(3, 4, 1, 1), &[0.25]);
+        old.surface.prune();
+        let mut doc = (*s.active().unwrap().doc).clone();
+        doc.layer_mut(id).unwrap().mask = Some(old.clone());
+        s.active_mut().unwrap().doc = std::sync::Arc::new(doc);
+        let label = s.active().unwrap().history.undo_label().map(str::to_string);
+
+        let err = from_face_cmd_with(&mut s, &json!({"layer": id.0}), Some(&[])).unwrap_err();
+        match err {
+            EngineError::Other(msg) => assert_eq!(msg, "no face found"),
+            other => panic!("expected `no face found`, got {other:?}"),
+        }
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layer(id).unwrap().mask.as_ref(), Some(&old), "a failed analysis must not touch the old mask");
+        assert_eq!(d.history.undo_label().map(str::to_string), label, "a failed analysis must not journal");
+    }
+
+    #[test]
+    fn from_face_masks_the_face_neck_and_chest_in_one_undo_step() {
+        let (mut s, id) = adjustment_session();
+        // A selection must be ignored and left in place.
+        s.execute("select.rect", json!({"x":0,"y":0,"width":10,"height":10})).unwrap();
+        let before_content = s.active().unwrap().doc.layer(id).unwrap().content.clone();
+        let before_mask = s.active().unwrap().doc.layer(id).unwrap().mask.clone();
+        let before_layers = layer_ids(&s);
+        let label = s.active().unwrap().history.undo_label().map(str::to_string);
+
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0}), Some(&[Rect::from_xywh(70, 48, 52, 58)])).unwrap();
+        assert_eq!(r["layer"], id.0);
+        assert_eq!(r["faces"], 1);
+        assert_eq!(r["mode"], "all");
+        {
+            let d = s.active().unwrap();
+            let layer = d.doc.layer(id).unwrap();
+            assert_eq!(layer.content, before_content, "the adjustment itself must not change");
+            assert_eq!(layer_ids(&s), before_layers, "no layer is added or removed");
+            assert!(d.doc.selection.is_some(), "the selection must not be consumed");
+            let mask = layer.mask.as_ref().expect("fromFace must install a mask");
+            assert!(mask.value(96, 78) > 0.5, "the face skin must be revealed");
+            assert!(mask.value(96, 110) > 0.05, "the neck/upper chest must be revealed");
+            assert!(mask.value(4, 4) < 0.01, "the background must stay hidden");
+            assert!(mask.value(96, 20) < 0.01, "hair above the face must stay hidden");
+            assert_eq!(d.history.undo_label(), Some("Layer Mask from Face"), "exactly one named step");
+        }
+        s.execute("edit.undo", json!({})).unwrap();
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layer(id).unwrap().mask, before_mask, "one undo restores the mask the layer had before");
+        assert_eq!(d.history.undo_label().map(str::to_string), label);
+    }
+
+    #[test]
+    fn from_face_main_picks_the_largest_box_and_all_replaces_the_mask() {
+        let (mut s, id) = adjustment_session();
+        // A second face away from the first face's skin gate (which reaches 0.65 face widths out).
+        let mut doc = (*s.active().unwrap().doc).clone();
+        add_skin_blob(&mut doc, 18, 100, 10, 10);
+        s.active_mut().unwrap().doc = std::sync::Arc::new(doc);
+        let big = Rect::from_xywh(70, 45, 52, 60);
+        let small = Rect::from_xywh(8, 90, 20, 20);
+
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0, "faces": "main"}), Some(&[big, small])).unwrap();
+        assert_eq!(r["faces"], 2, "the count reports every detected face");
+        assert_eq!(r["mode"], "main");
+        {
+            let d = s.active().unwrap();
+            let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
+            assert!(mask.value(96, 78) > 0.5, "the largest face is masked");
+            assert!(mask.value(18, 100) < 0.02, "the smaller face stays out in main mode");
+        }
+
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0}), Some(&[big, small])).unwrap();
+        assert_eq!(r["mode"], "all");
+        let d = s.active().unwrap();
+        let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
+        assert!(mask.value(18, 100) > 0.2, "all mode replaces the old mask and covers every face");
     }
 }

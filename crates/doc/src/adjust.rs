@@ -239,6 +239,16 @@ pub enum Adjustment {
         vibrance: f32,
         /// -100..=100, 0 neutral.
         saturation: f32,
+        /// Color Mixer, per band: Red, Orange, Yellow, Green, Mint/Aqua, Blue, Purple, Magenta
+        /// (centres 0, 30, 60, 120, 180, 240, 270, 300 degrees). -100..=100, 0 neutral.
+        #[serde(default)]
+        hsl_hue: [f32; 8],
+        /// Color Mixer saturation per band (-100..=100, 0 neutral).
+        #[serde(default)]
+        hsl_sat: [f32; 8],
+        /// Color Mixer luminance per band (-100..=100, 0 neutral).
+        #[serde(default)]
+        hsl_lum: [f32; 8],
     },
     Vibrance {
         vibrance: f32,
@@ -381,6 +391,36 @@ mod tests {
         assert!(matches!(c, Adjustment::Curves { space: ToneSpace::Rgb, pencil: false, .. }));
         let g: Adjustment = serde_json::from_str(r#"{"GradientMap":{"stops":[],"reverse":true}}"#).unwrap();
         assert!(matches!(g, Adjustment::GradientMap { dither: false, .. }));
+        // Basic Color files from before the Color Mixer load with every band neutral.
+        let b: Adjustment = serde_json::from_str(
+            r#"{"BasicColor":{"temperature":12.0,"tint":-4.0,"exposure":0.25,"contrast":5.0,"highlights":-6.0,"shadows":7.0,"whites":8.0,"blacks":-9.0,"vibrance":10.0,"saturation":-11.0}}"#,
+        )
+        .unwrap();
+        let Adjustment::BasicColor { temperature, hsl_hue, hsl_sat, hsl_lum, .. } = b else { panic!("expected BasicColor") };
+        assert_eq!(temperature, 12.0);
+        assert_eq!((hsl_hue, hsl_sat, hsl_lum), ([0.0; 8], [0.0; 8], [0.0; 8]));
+    }
+
+    #[test]
+    fn basic_color_mixer_round_trips() {
+        let a = Adjustment::BasicColor {
+            temperature: 0.0,
+            tint: 0.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
+            hsl_hue: [10.0, -20.0, 30.0, -40.0, 50.0, -60.0, 70.0, -80.0],
+            hsl_sat: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            hsl_lum: [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0],
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Adjustment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
     }
 
     #[test]

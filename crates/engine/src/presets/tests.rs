@@ -909,6 +909,9 @@ fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
         blacks: -6.0,
         vibrance: 30.0,
         saturation: -12.0,
+        hsl_hue: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -5.0],
+        hsl_sat: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        hsl_lum: [0.0, 0.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     };
     let mut root_basic = adjustment_layer("Root Basic", basic.clone());
     root_basic.opacity = 0.8;
@@ -961,6 +964,8 @@ fn color_presets_new_captures_visible_adjustments_bottom_to_top() {
     let names: Vec<&str> = preset.layers.iter().map(|l| l.name.as_str()).collect();
     assert_eq!(names, ["Root Basic", "Nested Invert", "Top Vibrance"]);
     assert_eq!(preset.layers[0].params, crate::adjust_params::to_params(&basic));
+    assert_eq!(preset.layers[0].params["hslHue"], json!([5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -5.0]), "capture keeps the mixer");
+    assert_eq!(preset.layers[0].params["hslLum"], json!([0.0, 0.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
     assert_eq!(preset.layers[1].params, crate::adjust_params::to_params(&invert));
     assert_eq!(preset.layers[2].params, crate::adjust_params::to_params(&top_vibrance));
     assert_eq!(preset.layers[0].opacity, 0.8);
@@ -1070,6 +1075,45 @@ fn color_presets_apply_creates_one_pass_through_group_undo_step() {
     assert_eq!(d.doc.layers.last().unwrap().id.0, r2["group"].as_u64().unwrap());
     assert_eq!(d.doc.layers[d.doc.layers.len() - 2].id, gid);
     assert_eq!(d.doc.layers.last().unwrap().name, "Preset \u{2022} Warm Portrait");
+}
+
+#[test]
+fn color_presets_carry_the_basic_color_mixer() {
+    let mut s = color_session();
+    let hue = [10.0, 0.0, -20.0, 0.0, 0.0, 0.0, 0.0, 30.0];
+    let sat = [0.0, 0.0, 0.0, 40.0, 0.0, 0.0, 0.0, 0.0];
+    let lum = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -40.0];
+    let r = s
+        .execute(
+            "color.presets.apply",
+            json!({"preset": {"name": "Mixer Look", "layers": [
+                {"kind": "basicColor", "name": "Basic Color", "params": {
+                    "hslHue": hue, "hslSat": sat, "hslLum": lum
+                }, "opacity": 0.75, "blend": "Normal"}
+            ]}}),
+        )
+        .unwrap();
+    let d = s.active().unwrap();
+    let child = &d.doc.layers.last().unwrap().children().unwrap()[0];
+    assert_eq!(child.opacity, 0.75);
+    let LayerContent::Adjustment(Adjustment::BasicColor { hsl_hue, hsl_sat, hsl_lum, .. }) = &child.content else { panic!("not a Basic Color layer") };
+    assert_eq!((*hsl_hue, *hsl_sat, *hsl_lum), (hue, sat, lum));
+    let LayerContent::Adjustment(adj) = &child.content else { panic!("not an adjustment layer") };
+    assert_eq!(crate::adjust_params::to_params(adj)["hslHue"], json!(hue));
+    // A preset saved before the mixer applies with neutral bands.
+    s.execute("edit.undo", json!({})).unwrap();
+    let old = json!({"preset": {"name": "Old Look", "layers": [
+        {"kind": "basicColor", "name": "Basic Color", "params": {"saturation": 20}, "opacity": 1.0, "blend": "Normal"}
+    ]}});
+    s.execute("color.presets.apply", old).unwrap();
+    let d = s.active().unwrap();
+    let child = &d.doc.layers.last().unwrap().children().unwrap()[0];
+    let LayerContent::Adjustment(Adjustment::BasicColor { saturation, hsl_hue, hsl_sat, hsl_lum, .. }) = &child.content else {
+        panic!("not a Basic Color layer")
+    };
+    assert_eq!(*saturation, 20.0);
+    assert_eq!((*hsl_hue, *hsl_sat, *hsl_lum), ([0.0; 8], [0.0; 8], [0.0; 8]));
+    assert_eq!(r["name"], "Mixer Look");
 }
 
 #[test]

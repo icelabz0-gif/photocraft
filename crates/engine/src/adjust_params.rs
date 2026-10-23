@@ -118,12 +118,39 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             Adjustment::Vibrance { vibrance: r.num("vibrance", v, -100.0, 100.0)?, saturation: r.num("saturation", s, -100.0, 100.0)? }
         }
         "basicColor" => {
-            let [temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation] = match base {
-                Some(Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation }) => {
-                    [*temperature, *tint, *exposure, *contrast, *highlights, *shadows, *whites, *blacks, *vibrance, *saturation]
-                }
-                _ => [0.0; 10],
-            };
+            let ([temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation], mut hsl_hue, mut hsl_sat, mut hsl_lum) =
+                match base {
+                    Some(Adjustment::BasicColor {
+                        temperature,
+                        tint,
+                        exposure,
+                        contrast,
+                        highlights,
+                        shadows,
+                        whites,
+                        blacks,
+                        vibrance,
+                        saturation,
+                        hsl_hue,
+                        hsl_sat,
+                        hsl_lum,
+                    }) => (
+                        [*temperature, *tint, *exposure, *contrast, *highlights, *shadows, *whites, *blacks, *vibrance, *saturation],
+                        *hsl_hue,
+                        *hsl_sat,
+                        *hsl_lum,
+                    ),
+                    _ => ([0.0; 10], [0.0; 8], [0.0; 8], [0.0; 8]),
+                };
+            if let Some(v) = r.numbers("hslHue", 8)? {
+                hsl_hue = mixer_bands(&v);
+            }
+            if let Some(v) = r.numbers("hslSat", 8)? {
+                hsl_sat = mixer_bands(&v);
+            }
+            if let Some(v) = r.numbers("hslLum", 8)? {
+                hsl_lum = mixer_bands(&v);
+            }
             Adjustment::BasicColor {
                 temperature: r.num("temperature", temperature, -100.0, 100.0)?,
                 tint: r.num("tint", tint, -100.0, 100.0)?,
@@ -135,6 +162,9 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
                 blacks: r.num("blacks", blacks, -100.0, 100.0)?,
                 vibrance: r.num("vibrance", vibrance, -100.0, 100.0)?,
                 saturation: r.num("saturation", saturation, -100.0, 100.0)?,
+                hsl_hue,
+                hsl_sat,
+                hsl_lum,
             }
         }
         "hueSaturation" => hue_saturation(&r, base)?,
@@ -237,7 +267,21 @@ pub fn to_params(adj: &Adjustment) -> Value {
         Adjustment::Threshold { level } => json!({"level": (level * 255.0).round()}),
         Adjustment::Posterize { levels } => json!({"levels": levels}),
         Adjustment::Exposure { exposure, offset, gamma } => json!({"exposure": exposure, "offset": offset, "gamma": gamma}),
-        Adjustment::BasicColor { temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation } => json!({
+        Adjustment::BasicColor {
+            temperature,
+            tint,
+            exposure,
+            contrast,
+            highlights,
+            shadows,
+            whites,
+            blacks,
+            vibrance,
+            saturation,
+            hsl_hue,
+            hsl_sat,
+            hsl_lum,
+        } => json!({
             "temperature": temperature,
             "tint": tint,
             "exposure": exposure,
@@ -248,6 +292,9 @@ pub fn to_params(adj: &Adjustment) -> Value {
             "blacks": blacks,
             "vibrance": vibrance,
             "saturation": saturation,
+            "hslHue": hsl_hue,
+            "hslSat": hsl_sat,
+            "hslLum": hsl_lum,
         }),
         Adjustment::Vibrance { vibrance, saturation } => json!({"vibrance": vibrance, "saturation": saturation}),
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
@@ -380,6 +427,11 @@ impl Reader<'_> {
 fn num_in(cmd: &str, key: &str, v: &Value, lo: f32, hi: f32) -> Result<f32> {
     let x = v.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad(cmd, format!("`{key}` must be a number")))?;
     Ok((x as f32).clamp(lo, hi))
+}
+
+/// The eight Color Mixer band values of one `hslHue`/`hslSat`/`hslLum` array, clamped to ±100.
+fn mixer_bands(v: &[f32]) -> [f32; 8] {
+    std::array::from_fn(|i| v.get(i).copied().unwrap_or(0.0).clamp(-100.0, 100.0))
 }
 
 fn color_of(cmd: &str, key: &str, v: &Value) -> Result<[f32; 3]> {
@@ -1204,7 +1256,10 @@ mod tests {
                 whites: 0.0,
                 blacks: 0.0,
                 vibrance: 0.0,
-                saturation: 0.0
+                saturation: 0.0,
+                hsl_hue: [0.0; 8],
+                hsl_sat: [0.0; 8],
+                hsl_lum: [0.0; 8],
             }
         );
         // Every number clamps to the contract's range.
@@ -1220,7 +1275,10 @@ mod tests {
                 "whites": 1e9,
                 "blacks": -1e9,
                 "vibrance": 1e9,
-                "saturation": -1e9
+                "saturation": -1e9,
+                "hslHue": [1e9, -1e9, 10, -10, 0, 0, 0, 0],
+                "hslSat": [1, 2, 3, 4, 5, 6, 7, 8],
+                "hslLum": [-1, -2, -3, -4, -5, -6, -7, -8]
             }),
             None,
             ColorMode::Rgb,
@@ -1238,13 +1296,32 @@ mod tests {
                 whites: 100.0,
                 blacks: -100.0,
                 vibrance: 100.0,
-                saturation: -100.0
+                saturation: -100.0,
+                hsl_hue: [100.0, -100.0, 10.0, -10.0, 0.0, 0.0, 0.0, 0.0],
+                hsl_sat: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                hsl_lum: [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0],
             }
         );
         // A partial update merges over the base and leaves the keys it doesn't name alone.
-        let base = from_params("basicColor", &json!({"temperature": 30, "exposure": 1.25, "shadows": 30}), None, ColorMode::Rgb).unwrap();
+        let base =
+            from_params("basicColor", &json!({"temperature": 30, "exposure": 1.25, "shadows": 30, "hslHue": [5, 0, 0, 0, 0, 0, 0, -5]}), None, ColorMode::Rgb)
+                .unwrap();
         let merged = from_params("basicColor", &json!({"highlights": -40}), Some(&base), ColorMode::Rgb).unwrap();
-        assert!(matches!(merged, Adjustment::BasicColor { temperature: 30.0, exposure: 1.25, shadows: 30.0, highlights: -40.0, .. }));
+        assert!(matches!(
+            merged,
+            Adjustment::BasicColor {
+                temperature: 30.0,
+                exposure: 1.25,
+                shadows: 30.0,
+                highlights: -40.0,
+                hsl_hue: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -5.0],
+                ..
+            }
+        ));
+        // Mixer arrays accept only exactly eight numbers.
+        for p in [json!({"hslHue": [1, 2, 3]}), json!({"hslHue": "red"}), json!({"hslSat": [0, 0, 0, 0, 0, 0, 0, "1"]}), json!({"hslLum": {}})] {
+            assert!(from_params("basicColor", &p, None, ColorMode::Rgb).is_err(), "{p}");
+        }
         // Wrong types are errors, not silently ignored.
         for p in [
             json!({"temperature": "warm"}),
@@ -1262,9 +1339,12 @@ mod tests {
         }
         // to_params returns every key.
         let back = to_params(&merged);
-        for key in ["temperature", "tint", "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation"] {
+        for key in
+            ["temperature", "tint", "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation", "hslHue", "hslSat", "hslLum"]
+        {
             assert!(back.get(key).is_some(), "{key} missing from {back}");
         }
+        assert_eq!(back["hslHue"].as_array().map(Vec::len), Some(8));
     }
 
     #[test]
