@@ -50,6 +50,11 @@ pub struct PsdExportOptions {
     /// The path of the document's own file: linked smart objects are resolved against it
     /// ([`crate::doc_path::resolve`]) before they are read and embedded.
     pub document_path: Option<std::path::PathBuf>,
+    /// Store spot channels as Photoshop's TIFFs do, 0 = solid ink (see
+    /// [`crate::channel_map::photoshop_spot_plane`]). Only the layered TIFF sets it: a PSD keeps
+    /// writing the document's density as it is (1 = solid ink), so files saved by earlier
+    /// versions keep reading the same.
+    pub photoshop_spot_polarity: bool,
     /// Read and embed the files linked smart objects name. On by default; automation turns it
     /// off, since a stored path is document data rather than a granted file: such a layer is
     /// then written as pixels, with a warning.
@@ -65,6 +70,7 @@ impl Default for PsdExportOptions {
             merged_compression: Compression::Rle,
             maximize_compatibility: true,
             document_path: None,
+            photoshop_spot_polarity: false,
             read_linked_files: true,
         }
     }
@@ -1247,9 +1253,12 @@ pub(crate) fn pascal_names_resource(names: &[&str]) -> Vec<u8> {
     let mut v = Vec::new();
     for n in names {
         let b = legacy_name(n);
-        v.push(b.len() as u8);
-        v.extend_from_slice(&b);
+        let n = b.len().min(255);
+        v.push(n as u8);
+        v.extend_from_slice(&b[..n]);
     }
+    // No per-string pad: Photoshop's resource 1006 for "Spot Color 1" is 13 bytes
+    // (length byte + 12 characters). The 8BIM container pads an odd resource separately.
     v
 }
 
@@ -1747,7 +1756,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
     };
     for a in &extra {
         let s = if a.surface.format() != ex.mask_fmt { a.surface.convert(ex.mask_fmt) } else { a.surface.clone() };
-        let bytes = s.to_interleaved(canvas);
+        let mut bytes = s.to_interleaved(canvas);
+        if opts.photoshop_spot_polarity && a.spot.is_some() {
+            crate::channel_map::photoshop_spot_plane(&mut bytes, sample);
+        }
         planes.extend(deinterleave(&bytes, 1, sample, &[false]).remove(0));
     }
     let channels = (cc + usize::from(has_alpha) + extra.len()) as u16;
@@ -1830,7 +1842,13 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
         if !ex.records.is_empty() && matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
             continue;
         }
-        global_blocks.push(global_block(block_signature(sig, key, version), key, &data));
+        let block = global_block(block_signature(sig, key, version), key, &data);
+        // A kept merged-transparency marker describes the opened file's composite. Over an opaque
+        // one it would make the first alpha channel read back as the transparency, and vanish.
+        if !has_alpha && block.is_merged_transparency_marker() {
+            continue;
+        }
+        global_blocks.push(block);
     }
     if let Some(txt2) = txt2 {
         let mut tb = TaggedBlock::new(*b"Txt2", txt2.clone());
@@ -1871,10 +1889,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
     resources.push(version_info_resource(real_merged));
 
     let has_layers = !ex.records.is_empty();
-    // Photoshop writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`) before the layer
-    // block, and won't open a file whose `Lr32` comes first (#5068): the layer block goes right
-    // after the last kept marker, else first.
-    let index = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32")).map_or(0, |i| i + 1);
+    // Photoshop writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`; `MTrn` in a TIFF)
+    // before the layer block, and won't open a file whose `Lr32` comes first (#5068): the layer
+    // block goes right after the last kept marker, else first.
+    let index = global_blocks.iter().rposition(TaggedBlock::is_merged_transparency_marker).map_or(0, |i| i + 1);
     let placement = match (has_layers, sample) {
         (true, SampleType::U16) => LayerInfoPlacement::GlobalBlock { index, signature: *b"8BIM", key: *b"Lr16", padding: None },
         (true, SampleType::F32) => LayerInfoPlacement::GlobalBlock { index, signature: *b"8BIM", key: *b"Lr32", padding: None },
@@ -1982,6 +2000,69 @@ mod tests {
         assert!(back.layers.len() == 1 && bg.name == "Background" && bg.locks.transparency && bg.locks.position, "{:?}", bg.locks);
     }
 
+    /// A layered document with a spot and an alpha channel. Each channel holds 100 %, 25 %, 75 %
+    /// and 0 % in four columns, the layout of the Photoshop spot oracles.
+    fn spot_and_alpha_document() -> Document {
+        let mut doc = document(4, 1);
+        doc.layers.push(Layer::group("Group", vec![Layer::raster("Layer 1", doc.pixel_format())]));
+        let channel = |name: &str| {
+            let mut s = Surface::new(PixelFormat::GRAY8);
+            s.write_interleaved(doc.bounds(), &[255, 64, 191, 0]);
+            photocraft_doc::AlphaChannel::new(name, s)
+        };
+        let mut spot = channel("Spot Color 1");
+        spot.spot = Some((photocraft_doc::Color::rgb(0.0, 0.6, 1.0), 0.0));
+        let alpha = channel("Alpha 1");
+        doc.channels.extend([spot, alpha]);
+        doc
+    }
+
+    /// Photoshop's spot polarity is for the layered TIFF only: a PSD stores a spot plane and an
+    /// alpha plane straight (255 = solid ink, 255 = selected) as before, so files saved by earlier
+    /// versions and this one read the same. It writes no resource 1053, an empty global layer
+    /// mask, and flag bit 3 on the layers but not on the group's closing divider. Opening it gives
+    /// the same ink back.
+    #[test]
+    fn psd_stores_spot_and_alpha_planes_straight() {
+        let doc = spot_and_alpha_document();
+        let written = |photoshop_spot_polarity| {
+            let opts = PsdExportOptions { photoshop_spot_polarity, ..Default::default() };
+            PsdFile::from_bytes(&document_to_psd_with(&doc, &opts).0.to_bytes().unwrap()).unwrap()
+        };
+        let extra_planes = |file: &PsdFile| {
+            let planes = file.decode_merged().unwrap();
+            planes[planes.len() - 2 * 4..].to_vec()
+        };
+        let file = written(false);
+        assert_eq!(extra_planes(&file), [255, 64, 191, 0, 255, 64, 191, 0], "spot, then alpha");
+        assert!(file.resource(crate::channel_map::ALPHA_IDENTIFIERS).is_none());
+        assert_eq!(file.global_layer_mask.as_ref().map(|m| m.data.len()), Some(0));
+        let flags: Vec<u8> = file.layers().iter().map(|l| l.flags.0 & LayerFlags::BIT4_USEFUL).collect();
+        assert_eq!(flags, [0, LayerFlags::BIT4_USEFUL, LayerFlags::BIT4_USEFUL], "closing divider, layer, group");
+        let back = crate::import("spot.psd", &file.to_bytes().unwrap()).unwrap().document;
+        assert!(back.channels[0].spot.is_some() && back.channels[1].spot.is_none());
+        for c in &back.channels {
+            assert_eq!(c.surface.to_interleaved(back.bounds()), [255, 64, 191, 0], "{}", c.name);
+        }
+        // The layered TIFF's switch inverts the spot plane only.
+        assert_eq!(extra_planes(&written(true)), [0, 191, 64, 255, 255, 64, 191, 0]);
+    }
+
+    /// Resource 1053 (alpha identifiers, in every Photoshop file with an extra channel) is kept
+    /// from an opened PSD and written back unchanged, as before.
+    #[test]
+    fn psd_alpha_identifiers_survive_open_and_save() {
+        let mut file = document_to_psd(&spot_and_alpha_document());
+        let ids = [0, 0, 0, 3, 0, 0, 0, 2];
+        file.resources.push(ImageResource::new(crate::channel_map::ALPHA_IDENTIFIERS, ids.to_vec()));
+        let opened = crate::import("ps.psd", &file.to_bytes().unwrap()).unwrap().document;
+        let saved = crate::export(&opened, "x.psd", &crate::ExportOptions::default()).unwrap();
+        let again = PsdFile::from_bytes(&saved.bytes).unwrap();
+        let kept: Vec<&ImageResource> = again.resources.iter().filter(|r| r.id == crate::channel_map::ALPHA_IDENTIFIERS).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].data, ids);
+    }
+
     #[test]
     fn group_divider_id_wraps_without_colliding_with_imported_layer_ids() {
         let mut doc = document(8, 8);
@@ -2008,7 +2089,12 @@ mod tests {
     /// `transparentbg.psd` re-saved both ways). The layer block follows a kept marker.
     #[test]
     fn layer_block_follows_a_kept_merged_transparency_marker() {
-        for (depth, key, marker) in [(SampleType::F32, *b"Lr32", *b"Mt32"), (SampleType::U16, *b"Lr16", *b"Mt16"), (SampleType::F32, *b"Lr32", *b"Mtrn")] {
+        for (depth, key, marker) in [
+            (SampleType::F32, *b"Lr32", *b"Mt32"),
+            (SampleType::U16, *b"Lr16", *b"Mt16"),
+            (SampleType::F32, *b"Lr32", *b"Mtrn"),
+            (SampleType::F32, *b"Lr32", *b"MTrn"),
+        ] {
             let mut doc = Document::new("t", photocraft_geom::Size::new(8, 6), ColorMode::Rgb, depth);
             let mut s = Surface::new(doc.pixel_format());
             s.fill_rect(photocraft_geom::Rect::new(1, 1, 5, 4), &[0.5, 0.2, 0.9, 1.0]);
@@ -2026,6 +2112,28 @@ mod tests {
         doc.metadata.psd_global_blocks = vec![(*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new()))];
         let saved = PsdFile::from_bytes(&document_to_psd(&doc).to_bytes().unwrap()).unwrap();
         assert!(matches!(saved.layer_info_placement, LayerInfoPlacement::GlobalBlock { index: 0, .. }));
+    }
+
+    /// A merged-transparency marker kept from the opened file describes that file's composite.
+    /// Saved with an opaque composite, it would make the first alpha channel read back as the
+    /// merged transparency, and the channel would be gone: the save drops it.
+    #[test]
+    fn an_opaque_save_drops_a_kept_merged_transparency_marker() {
+        for (depth, marker) in [(SampleType::U8, *b"MTrn"), (SampleType::U8, *b"Mtrn"), (SampleType::U16, *b"Mt16"), (SampleType::F32, *b"Mt32")] {
+            let case = format!("{depth:?} {}", String::from_utf8_lossy(&marker));
+            let mut doc = Document::new("t", photocraft_geom::Size::new(8, 6), ColorMode::Rgb, depth);
+            let mut s = Surface::new(doc.pixel_format());
+            s.fill_rect(photocraft_geom::Rect::new(0, 0, 8, 6), &[0.5, 0.2, 0.9, 1.0]);
+            doc.layers.push(Layer::new("Layer 1", LayerContent::Raster(s)));
+            doc.channels.push(photocraft_doc::AlphaChannel::new("Alpha 1", Surface::new(PixelFormat::GRAY8)));
+            doc.metadata.psd_global_blocks = vec![(*b"8BIM", marker, std::sync::Arc::new(Vec::new()))];
+            let file = document_to_psd(&doc);
+            assert!(!file.global_blocks.iter().any(TaggedBlock::is_merged_transparency_marker), "{case}");
+            assert!(!file.merged_has_alpha(), "{case}");
+            let back = crate::import("a.psd", &file.to_bytes().unwrap()).unwrap().document;
+            let names: Vec<&str> = back.channels.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["Alpha 1"], "{case}");
+        }
     }
 
     #[test]
