@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use photocraft_color::ColorMode;
-use photocraft_doc::{Document, LayerContent, LayerId, SmartContentsId};
+use photocraft_doc::{Document, Layer, LayerContent, LayerId, SmartContentsId};
 use photocraft_geom::Rect;
 use serde_json::{Value, json};
 
@@ -107,13 +107,29 @@ pub(crate) fn adapt_copies(s: &Session, copies: &mut Document, dest: &Document) 
             *surf = surf.convert(f);
         });
     }
+    fn prepare_shapes(layers: &mut [Layer], doc: &Document, new_canvas: bool) {
+        for layer in layers {
+            match &mut layer.content {
+                LayerContent::Shape(shape) if new_canvas || shape.cache.is_none() => crate::vector_cmds::refresh_shape(doc, shape),
+                LayerContent::Group(group) => prepare_shapes(&mut group.children, doc, new_canvas),
+                _ => {}
+            }
+        }
+    }
+    let new_canvas = copies.bounds() != dest.bounds();
+    prepare_shapes(&mut copies.layers, dest, new_canvas);
     Ok(())
 }
 
 /// Moves every layer of `copies` by whole pixels (content, masks, vectors and smart placement).
-pub(crate) fn translate_copies(copies: &mut Document, dx: i32, dy: i32) {
+pub(crate) fn translate_copies(copies: &mut Document, destination: &Document, dx: i32, dy: i32) {
     if dx != 0 || dy != 0 {
-        let snapshot = copies.clone();
+        let mut snapshot = copies.clone();
+        // Vector caches are clipped and quantized for the destination, not the clipboard's source.
+        snapshot.size = destination.size;
+        snapshot.mode = destination.mode;
+        snapshot.depth = destination.depth;
+        snapshot.icc_profile = destination.icc_profile.clone();
         for l in &mut copies.layers {
             crate::commands::translate_layer(&snapshot, l, dx, dy);
             crate::vector_cmds::translate_vectors(&snapshot, l, f64::from(dx), f64::from(dy));
@@ -187,7 +203,7 @@ fn copy_to_document(s: &mut Session, p: &Value) -> Result<Value> {
         point(p, "offset")?.map_or((0.0, 0.0), |o| (o[0], o[1]))
     };
     let (dx, dy) = (dx.round() as i32, dy.round() as i32);
-    translate_copies(&mut copies, dx, dy);
+    translate_copies(&mut copies, &ddoc, dx, dy);
     let patterns: Vec<_> = sdoc.patterns.iter().filter(|pat| !ddoc.patterns.iter().any(|d| d.id == pat.id)).cloned().collect();
     s.set_active(dest);
     let label = if ids.len() == 1 { "Duplicate Layer" } else { "Duplicate Layers" };
