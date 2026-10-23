@@ -246,11 +246,12 @@ const FULL_RESOLUTION_PREVIEW: &[&str] = &[
 
 /// Whether `command` with `params` previews at full resolution: [`FULL_RESOLUTION_PREVIEW`], every
 /// Filter Gallery filter (its strokes, grain and textures are sized in pixels; the settings are
-/// abstract levels, not lengths) and the dithered colour-mode conversions (Indexed Color, Bitmap).
+/// abstract levels, not lengths), palette mapping, and dithered colour-mode conversions.
 fn full_resolution_preview(command: &str, params: &Value) -> bool {
     let choice = |key: &str| params.get(key).and_then(Value::as_str);
     FULL_RESOLUTION_PREVIEW.contains(&command)
         || command.starts_with("filter.gallery.")
+        || command == "filter.paletteMap"
         || (command == "image.mode.indexedColor" && choice("dither") != Some("none"))
         || (command == "image.mode.bitmap" && !matches!(choice("method"), Some("threshold" | "threshold50")))
 }
@@ -341,11 +342,51 @@ fn rememberable(kind: &Kind, value: &Value) -> bool {
     }
 }
 
+fn palette_widget_command(command: &str) -> bool {
+    command == "filter.paletteMap"
+}
+
+fn palette_widget_field(command: &str, key: &str) -> bool {
+    palette_widget_command(command) && matches!(key, "paletteId" | "paletteSnapshot" | "mapping")
+}
+/// Schema fields owned by automation adapters rather than the stock Indexed/Save-for-Web UI.
+///
+/// The engine accepts these values so scripts can replay fixed palettes and shared mapping
+/// settings, but the generic dialog must neither manufacture nor render them.
+fn hidden_automation_field(command: &str, key: &str) -> bool {
+    matches!(command, "image.mode.indexedColor" | "file.export.saveForWebLegacy")
+        && matches!(key, "paletteId" | "paletteSnapshot" | "reducePalette" | "mapping" | "transparentIndex")
+}
+
+fn valid_palette_widget_value(key: &str, value: &Value) -> bool {
+    match key {
+        "paletteId" => {
+            value.as_str().is_some_and(|id| !id.is_empty() && (id == crate::palette_map_ui::CUSTOM_ID || photocraft_algo::palettes::builtin(id).is_some()))
+        }
+        "paletteSnapshot" => serde_json::from_value::<photocraft_algo::palette_map::Palette>(value.clone()).is_ok_and(|palette| palette.validate().is_ok()),
+        "mapping" => serde_json::from_value::<photocraft_algo::palette_map::Settings>(value.clone()).is_ok_and(|settings| settings.validate().is_ok()),
+        _ => false,
+    }
+}
+
 fn restore_remembered(app: &PhotocraftApp, command: &str, spec: &str, fields: &mut Map<String, Value>) {
     let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(command) else { return };
     for p in parse_spec(spec) {
-        if let Some(v) = saved.get(&p.key).filter(|v| rememberable(&p.kind, v)) {
-            fields.insert(p.key, v.clone());
+        if hidden_automation_field(command, &p.key) {
+            continue;
+        }
+        let valid = if palette_widget_field(command, &p.key) {
+            saved.get(&p.key).is_some_and(|value| {
+                valid_palette_widget_value(&p.key, value)
+                    && (p.key != "paletteId"
+                        || value.as_str() != Some(crate::palette_map_ui::CUSTOM_ID)
+                        || saved.get("paletteSnapshot").is_some_and(|snapshot| valid_palette_widget_value("paletteSnapshot", snapshot)))
+            })
+        } else {
+            saved.get(&p.key).is_some_and(|value| rememberable(&p.kind, value))
+        };
+        if valid && let Some(value) = saved.get(&p.key) {
+            fields.insert(p.key, value.clone());
         }
     }
 }
@@ -356,8 +397,18 @@ pub(crate) fn remember(app: &mut PhotocraftApp, command: &str, fields: &Map<Stri
         return;
     }
     let Some(spec) = photocraft_engine::commands::find(command) else { return };
-    let saved: Map<String, Value> =
-        parse_spec(spec.params).into_iter().filter_map(|p| fields.get(&p.key).filter(|v| rememberable(&p.kind, v)).map(|v| (p.key, v.clone()))).collect();
+    let mut saved: Map<String, Value> = parse_spec(spec.params)
+        .into_iter()
+        .filter(|p| !hidden_automation_field(command, &p.key))
+        .filter_map(|p| fields.get(&p.key).filter(|v| rememberable(&p.kind, v)).map(|v| (p.key, v.clone())))
+        .collect();
+    if palette_widget_command(command) {
+        for key in ["paletteId", "paletteSnapshot", "mapping"] {
+            if let Some(value) = fields.get(key).filter(|value| valid_palette_widget_value(key, value)) {
+                saved.insert(key.into(), value.clone());
+            }
+        }
+    }
     if !saved.is_empty() {
         app.session.prefs.edit(|prefs| prefs.dialogs.insert(command.into(), Value::Object(saved)));
     }
@@ -365,6 +416,9 @@ pub(crate) fn remember(app: &mut PhotocraftApp, command: &str, fields: &Map<Stri
 
 /// Schema-default values for one param of `command` (open and Alt+Reset share this).
 fn default_value(app: &PhotocraftApp, command: &str, p: &Param) -> Option<Value> {
+    if palette_widget_field(command, &p.key) || hidden_automation_field(command, &p.key) {
+        return None;
+    }
     Some(match &p.kind {
         Kind::Range { default, .. } if command == "image.mode.indexedColor" && p.key == "colors" => json!(default.round().clamp(2.0, 256.0) as u32),
         Kind::Range { default, .. } => json!(default),
@@ -467,6 +521,9 @@ pub fn reset_fields(app: &PhotocraftApp, fields: &mut Map<String, Value>) {
             fields.insert(p.key, v);
         }
     }
+    if command == "filter.paletteMap" {
+        crate::palette_map_ui::ensure_filter_default(fields);
+    }
     apply_command_defaults(app, &command, fields);
     // The schema has no default for the Blur Gallery's pins: start again from the opening one.
     if crate::blur_pins::handles(&command) {
@@ -490,6 +547,9 @@ pub fn open(app: &mut PhotocraftApp, command: &str) -> Option<u64> {
         }
     }
     restore_remembered(app, command, spec.params, &mut fields);
+    if command == "filter.paletteMap" {
+        crate::palette_map_ui::ensure_filter_default(&mut fields);
+    }
     apply_command_defaults(app, command, &mut fields);
     if crate::blur_pins::handles(command) {
         crate::blur_pins::init(app, &mut fields);
@@ -567,6 +627,9 @@ pub fn open_with_spec(app: &mut PhotocraftApp, command: &str, label: &str, spec:
     fields.insert("__preview".into(), json!(true));
     fields.insert("__spec".into(), json!(spec));
     for p in parse_spec(spec) {
+        if hidden_automation_field(command, &p.key) {
+            continue;
+        }
         let v = match &p.kind {
             Kind::Range { default, .. } => json!(default),
             Kind::Choice { options, default } => {
@@ -780,6 +843,11 @@ fn replace_color_result(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
 pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let cmd = f.get("__command").and_then(Value::as_str).unwrap_or_default().to_string();
+    if crate::palette_map_ui::owns_command(&cmd) {
+        crate::palette_map_ui::ensure_filter_default(f);
+        crate::palette_map_ui::body(ui, f);
+        return;
+    }
     // Plug-in dialogs carry their own spec (from the plug-in's manifest).
     let spec = match f.get("__spec").and_then(Value::as_str) {
         Some(s) => s.to_string(),
@@ -792,6 +860,9 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         crate::select_mask_view::controls(ui, f);
     }
     for p in parse_spec(&spec) {
+        if hidden_automation_field(&cmd, &p.key) {
+            continue;
+        }
         if zoom_center::owns(&cmd, f) && matches!(p.key.as_str(), "centerX" | "centerY") {
             if p.key == "centerX" {
                 zoom_center::row(ui, f);
@@ -1854,7 +1925,6 @@ mod tests {
         assert!(has_dialog("filter.blur.gaussianBlur"));
         assert!(!has_dialog("filter.stylize.findEdges"));
     }
-
     /// Generated filter and adjustment labels (param names, symbolic choices) and gallery
     /// names that `lang` has no catalog row for.
     fn missing_generated_filter_labels(lang: crate::i18n::Lang) -> std::collections::BTreeSet<String> {
@@ -1866,7 +1936,11 @@ mod tests {
         };
         for c in photocraft_engine::command_specs().iter().filter(|c| c.id.starts_with("filter.") || c.id.starts_with("image.adjustments.")) {
             for p in parse_spec(c.params) {
-                if !p.key.chars().all(|c| c.is_ascii_alphanumeric()) || matches!(p.kind, Kind::Json) {
+                if palette_widget_field(c.id, &p.key)
+                    || hidden_automation_field(c.id, &p.key)
+                    || !p.key.chars().all(|c| c.is_ascii_alphanumeric())
+                    || matches!(p.kind, Kind::Json)
+                {
                     continue;
                 }
                 check(source_label(&p.key));
@@ -1914,6 +1988,28 @@ mod tests {
         assert!(missing.is_empty(), "missing Russian dynamic labels: {missing:#?}");
     }
 
+    /// A newly opened Palette Map dialog must install its custom palette default before the
+    /// generic schema fields are decoded.  Confirming without touching the controls therefore
+    /// maps a real non-palette pixel instead of submitting the parser's integer placeholders.
+    #[test]
+    fn fresh_palette_map_dialog_maps_a_pixel_on_confirm() {
+        let mut session = photocraft_engine::Session::new();
+        session.execute("file.new", json!({"width": 1, "height": 1, "background": "#123456"})).unwrap();
+        let mut app = PhotocraftApp::new(session, crate::Services::default());
+        app.background_jobs = false;
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let before = app.session.active().unwrap().doc.layer(layer).unwrap().surface().unwrap().pixel(0, 0);
+        let id = open(&mut app, "filter.paletteMap").expect("Palette Map dialog");
+        assert!(app.ui.dialog_mut(id).unwrap().fields.contains_key("paletteSnapshot"));
+        crate::dialogs::confirm(&mut app, id).expect("default Palette Map confirms");
+        let after = app.session.active().unwrap().doc.layer(layer).unwrap().surface().unwrap().pixel(0, 0);
+        assert_ne!(after, before, "the fresh dialog applied a mapping");
+        let ega = &photocraft_algo::palettes::builtin("gimp:Ega").expect("bundled EGA palette").palette;
+        assert!(
+            ega.colors.iter().any(|color| color.iter().zip(&after).take(3).all(|(a, b)| (a - b).abs() <= 1.0 / 255.0)),
+            "mapped pixel is not in the selected palette: {after:?}"
+        );
+    }
     /// The Select menu's generated dialogs (Select and Mask, Modify ▸ …) show their
     /// params, choices and title in every UI language, not just Korean.
     #[test]
