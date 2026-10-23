@@ -140,9 +140,10 @@ pub fn label(key: &[u8; 4]) -> &'static str {
 }
 
 /// Why [`parse`] keeps a block as [`Adjustment::Unsupported`], when there is more to say than
-/// "it could not be read" (so far: Color Lookup).
+/// "it could not be read" (so far: Vibrance and Color Lookup).
 pub fn unreadable_reason(key: &[u8; 4], data: &[u8]) -> Option<String> {
     match key {
+        b"vibA" => read_vibrance(data).err(),
         b"clrL" => read_lookup(data).err(),
         _ => None,
     }
@@ -466,11 +467,25 @@ fn versioned(d: &[u8]) -> Option<Descriptor> {
 }
 
 /// `vibA` (Adobe spec, "Vibrance"): a versioned descriptor with `vibrance` and `Strt`
-/// (saturation), both integers in -100..=100. Photoshop omits a key whose value is 0.
+/// (saturation), both integers in -100..=100. Photoshop omits a key whose value is 0. A missing or
+/// true `useLegacy` selects the modeled method; other method flags stay unsupported.
 fn parse_vibrance(d: &[u8]) -> Option<Adjustment> {
-    let desc = versioned(d)?;
+    read_vibrance(d).ok()
+}
+
+/// [`parse_vibrance`] with a reason when the method cannot be represented by PhotoCraft.
+fn read_vibrance(d: &[u8]) -> Result<Adjustment, String> {
+    let (versioned, _) = VersionedDescriptor::parse_prefix(d).map_err(|e| format!("unreadable settings ({e})"))?;
+    let desc = versioned.descriptor;
+    match desc.get("useLegacy") {
+        None | Some(Value::Boolean(true)) => {}
+        Some(Value::Boolean(false)) => {
+            return Err("it selects the modern Vibrance method (useLegacy=false), which isn't supported yet".into());
+        }
+        Some(_) => return Err("its useLegacy method flag has an unexpected type".into()),
+    }
     let get = |k: &str| desc_num(&desc, k).unwrap_or(0.0).clamp(-100.0, 100.0);
-    Some(Adjustment::Vibrance { vibrance: get("vibrance"), saturation: get("Strt") })
+    Ok(Adjustment::Vibrance { vibrance: get("vibrance"), saturation: get("Strt") })
 }
 
 /// `blnc` (Adobe spec, "Color Balance"): shadows, midtones and highlights as three i16 each
@@ -1301,6 +1316,44 @@ mod tests {
         let mut v = d.clone();
         v[3] = 17;
         assert!(matches!(parse(b"vibA", &v, None, Channels::Rgb), Adjustment::Unsupported { .. }));
+    }
+
+    #[test]
+    fn vibrance_unsupported_methods_preserve_raw() {
+        let cases = [
+            (
+                "modern",
+                Descriptor::new("null").with("useLegacy", Value::Boolean(false)).with("vibrance", Value::Integer(28)).with("Strt", Value::Integer(-7)),
+                "modern",
+            ),
+            (
+                "malformed",
+                Descriptor::new("null").with("useLegacy", Value::Integer(1)).with("vibrance", Value::Integer(28)).with("Strt", Value::Integer(-7)),
+                "useLegacy",
+            ),
+        ];
+        for (name, desc, reason) in cases {
+            let raw = vdesc(desc);
+            for channels in [Channels::Rgb, Channels::Gray, Channels::Cmyk, Channels::Lab, Channels::Other] {
+                assert!(
+                    matches!(parse(b"vibA", &raw, None, channels), Adjustment::Unsupported { psd_key, raw: kept } if psd_key == "vibA" && kept == raw),
+                    "{name} / {channels:?}"
+                );
+            }
+            assert!(unreadable_reason(b"vibA", &raw).is_some_and(|message| message.contains(reason)), "{name}");
+        }
+
+        for use_legacy in [None, Some(true)] {
+            let mut desc = Descriptor::new("null").with("vibrance", Value::Integer(28)).with("Strt", Value::Integer(-7));
+            if let Some(flag) = use_legacy {
+                desc = desc.with("useLegacy", Value::Boolean(flag));
+            }
+            let raw = vdesc(desc);
+            for channels in [Channels::Rgb, Channels::Gray, Channels::Cmyk, Channels::Lab, Channels::Other] {
+                assert_eq!(parse(b"vibA", &raw, None, channels), Adjustment::Vibrance { vibrance: 28.0, saturation: -7.0 });
+            }
+            assert!(unreadable_reason(b"vibA", &raw).is_none());
+        }
     }
 
     #[test]

@@ -407,6 +407,34 @@ fn threshold_and_hue_params() {
 }
 
 #[test]
+fn unsupported_vibrance_edit_is_rejected_without_history() {
+    use photocraft_doc::{Adjustment, ColorMode, Layer, LayerContent, SampleType};
+    use photocraft_geom::Size;
+
+    let raw = vec![0, 0, 0, 16, 1, 2, 3];
+    let mut doc = photocraft_doc::Document::new("Unsupported Vibrance", Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    let layer = Layer::new("Modern Vibrance", LayerContent::Adjustment(Adjustment::Unsupported { psd_key: "vibA".into(), raw: raw.clone() }));
+    let layer_id = layer.id;
+    doc.layers.push(layer);
+
+    let mut session = Session::new();
+    session.add_document(doc, None);
+    let before = Arc::clone(&session.active().expect("active document").doc);
+    let history_len = session.active().expect("active document").history.past_len();
+
+    let error = session.execute("layer.setAdjustment", json!({"layer": layer_id.0, "vibrance": 29})).unwrap_err();
+    assert!(error.to_string().contains("can't be edited (kept as imported)"), "{error}");
+    let state = session.active().expect("active document");
+    assert!(Arc::ptr_eq(&state.doc, &before), "the document snapshot changed");
+    assert_eq!(state.history.past_len(), history_len, "an undo step was recorded");
+    assert!(!session.undo(), "the rejected edit created an undo step");
+    assert!(matches!(
+        &session.active().expect("active document").doc.layers[0].content,
+        LayerContent::Adjustment(Adjustment::Unsupported { psd_key, raw: kept }) if psd_key == "vibA" && kept == &raw
+    ));
+}
+
+#[test]
 fn paint_stroke_and_selection() {
     let mut s = session_with_doc();
     s.execute("layer.new.layer", json!({})).unwrap();
