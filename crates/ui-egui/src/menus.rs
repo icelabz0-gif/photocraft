@@ -1178,10 +1178,10 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
     let mut clicked: Option<String> = None;
     let t = crate::theme::Tokens::get(ui.ctx());
     let mut nav = crate::menu_nav::Nav::load(ui.ctx());
-    // The keyboard on the bar (#4988): Alt / F10 focus, Alt+letter, mnemonics.
+    // The keyboard on the bar (#4988): F10 focus, Alt+letter, mnemonics.
     let mut keys = crate::menu_keys::Keys::load(ui.ctx());
     keys.take_first_row(&mut nav);
-    nav.underline = keys.show_underlines(ui.ctx());
+    nav.underline = keys.show_underlines(ui.ctx(), nav.top.is_some());
     let translated: Vec<String> = TOP_MENUS.iter().map(|top| crate::i18n::tr(lang, top).to_string()).collect();
     let preferred: Vec<Option<char>> = TOP_MENUS.iter().map(|top| crate::menu_keys::TOP_PREFERRED.iter().find(|(t, _)| t == top).map(|(_, c)| *c)).collect();
     // A title with no Latin letter shows its English key: "文件(F)" (#5863).
@@ -1203,7 +1203,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
             for (k, top) in TOP_MENUS.iter().enumerate() {
                 // egui's menu_button toggles on release; these titles open on the press (one
                 // gesture can press, drag to an item and release), so each drives its popup.
-                // The title the keyboard is on (Alt / F10) is lit like a hovered one.
+                // The title the keyboard is on (F10) is lit like a hovered one.
                 let focused = keys.focus == Some(if rtl { TOP_MENUS.len() - 1 - k } else { k });
                 let label = if nav.underline {
                     crate::menu_keys::mnemonic_text(ui, "", &top_labels[k], top_mnemonics[k], Some(t.text_dim))
