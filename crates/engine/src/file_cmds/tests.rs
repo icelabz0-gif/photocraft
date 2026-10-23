@@ -398,6 +398,39 @@ fn save_a_copy_writes_the_jpeg_format_asked_for() {
     assert_eq!((jpeg_quality(-3.0), jpeg_quality(40.0), jpeg_quality(f64::NAN), jpeg_quality(f64::NEG_INFINITY)), (1, 100, 100, 100));
 }
 
+/// `matte` is JPEG Options' Matte: a half-transparent document is written blended with the
+/// Foreground or Background colour, White, Black or 50% Gray; none, or no `matte`, is white. A
+/// name it doesn't know is a bad parameter, reported before anything is written.
+#[test]
+fn save_a_copy_composites_a_jpeg_over_the_matte_asked_for() {
+    let dir = tmp("jpeg-matte");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 16, "height": 16, "background": "transparent"})).unwrap();
+    s.execute("edit.fill", json!({"contents": "color", "color": "#0000ff", "opacity": 50})).unwrap();
+    s.execute("tools.setColors", json!({"foreground": [1.0, 0.0, 0.0, 1.0], "background": [0.0, 1.0, 0.0, 1.0]})).unwrap();
+    let out = join(&dir, "a.jpg");
+    for (matte, want) in [
+        (json!(null), [0.5, 0.5, 1.0]),
+        (json!("none"), [0.5, 0.5, 1.0]),
+        (json!("white"), [0.5, 0.5, 1.0]),
+        (json!("black"), [0.0, 0.0, 0.5]),
+        (json!("gray"), [0.25, 0.25, 0.75]),
+        (json!("foreground"), [0.5, 0.0, 0.5]),
+        (json!("background"), [0.0, 0.5, 0.5]),
+    ] {
+        s.execute("file.saveACopy", json!({"path": out, "quality": 12, "matte": matte})).unwrap();
+        let back = photocraft_io::import("a.jpg", &std::fs::read(&out).unwrap()).unwrap().document;
+        let px = back.layers[0].surface().unwrap().pixel(8, 8);
+        assert!(want.iter().zip(&px).all(|(w, p)| (w - p).abs() < 0.03), "{matte}: {px:?}, want {want:?}");
+    }
+    let _ = std::fs::remove_file(&out);
+    for bad in [json!("Black"), json!("pink"), json!(""), json!(2), json!(true)] {
+        let r = s.execute("file.saveACopy", json!({"path": out, "matte": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert!(!std::path::Path::new(&out).exists(), "{bad}: nothing written");
+    }
+}
+
 /// A `jpegFormat` other than the three names is a bad parameter, reported before anything is
 /// written.
 #[test]

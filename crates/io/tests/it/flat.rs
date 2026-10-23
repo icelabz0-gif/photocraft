@@ -554,6 +554,31 @@ fn transparency_is_composited_over_white_for_formats_without_alpha() {
     assert!(!r.warnings.iter().any(|w| w.contains("composited")), "{:?}", r.warnings);
 }
 
+/// JPEG Options' Matte: transparent pixels take the matte colour and half-transparent ones blend
+/// with it, in the document's own colour model (CMYK as inks); opaque pixels keep theirs.
+#[test]
+fn transparency_is_composited_over_the_matte_colour() {
+    let red = photocraft_doc::Color::rgb(1.0, 0.0, 0.0);
+    let rgb: [&[f32]; 3] = [&[0.0, 0.0, 0.0, 0.0], &[0.0, 0.0, 1.0, 0.5], &[0.0, 0.63, 0.0, 1.0]];
+    let gray: [&[f32]; 2] = [&[0.0, 0.0], &[0.0, 0.5]];
+    let cmyk: [&[f32]; 2] = [&[1.0, 1.0, 1.0, 1.0, 0.0], &[0.0, 0.0, 0.0, 1.0, 0.5]];
+    let g = red.in_mode(ColorMode::Grayscale).c[0];
+    let k = red.in_mode(ColorMode::Cmyk).c;
+    let cases = [
+        (ColorMode::Rgb, &rgb[..], vec![vec![1.0, 0.0, 0.0], vec![0.5, 0.0, 0.5], vec![0.0, 0.63, 0.0]]),
+        (ColorMode::Grayscale, &gray[..], vec![vec![g], vec![g / 2.0]]),
+        (ColorMode::Cmyk, &cmyk[..], vec![k.to_vec(), vec![k[0] / 2.0, k[1] / 2.0, k[2] / 2.0, (k[3] + 1.0) / 2.0]]),
+    ];
+    for (mode, cols, want) in cases {
+        let what = format!("{mode:?}");
+        let opts = ExportOptions { matte: Some(red), ..ExportOptions::default() };
+        let r = export(&columns(mode, SampleType::U8, cols), "a.jpg", &opts).unwrap();
+        assert!(r.warnings.iter().any(|w| w.contains("composited over the matte colour")), "{what}: {:?}", r.warnings);
+        let back = import("a.jpg", &r.bytes).unwrap().document;
+        assert_colors(&column_pixels(&back, cols.len()), &want, 0.03, &what);
+    }
+}
+
 /// Formats that can't embed a profile get sRGB values (what an untagged file means), converted
 /// through the colour engine, instead of values that only mean something under the dropped profile.
 #[test]

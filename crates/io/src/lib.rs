@@ -235,6 +235,9 @@ pub struct ExportOptions {
     /// PSD/PSB and layered TIFF: read and embed the files linked smart objects name (see
     /// [`PsdExportOptions::read_linked_files`]). On by default; automation turns it off.
     pub read_linked_files: bool,
+    /// JPEG Options › Matte: the colour transparency is composited over when the format can't keep
+    /// it. `None` is white, as Photoshop's None.
+    pub matte: Option<photocraft_doc::Color>,
 }
 
 impl Default for ExportOptions {
@@ -250,6 +253,7 @@ impl Default for ExportOptions {
             document_path: None,
             pcraft_cache: None,
             read_linked_files: true,
+            matte: None,
         }
     }
 }

@@ -595,9 +595,14 @@ pub(crate) fn export_flat_with(doc: &Document, format: Format, opts: &ExportOpti
         img.meta.text.clear();
     }
     if img.layout().has_alpha() && !format.caps().alpha {
-        // Flattened over white, as saving a transparent document without transparency does.
-        img = matte_over_white(&img)?;
-        warnings.push(format!("transparency composited over white for {format:?}"));
+        // Flattened over white, as saving a transparent document without transparency does,
+        // unless JPEG Options picked another matte.
+        img = matte_over(&img, opts.matte)?;
+        if opts.matte.is_some() {
+            warnings.push(format!("transparency composited over the matte colour for {format:?}"));
+        } else {
+            warnings.push(format!("transparency composited over white for {format:?}"));
+        }
     }
     if img.layout().is_cmyk() && !format.caps().layouts.iter().any(|l| l.is_cmyk()) {
         img = cmyk_image_to_srgb(&img)?;
@@ -745,14 +750,30 @@ fn map_bands(img: &Image, layout: ChannelLayout, sample: CSample, f: impl Fn(Vec
 
 /// Straight-alpha pixels composited over white (no ink for CMYK), without the alpha channel.
 fn matte_over_white(img: &Image) -> Result<Image, IoError> {
+    matte_over(img, None)
+}
+
+/// Straight-alpha pixels composited over `matte`, converted to the image's colour model (CMYK as
+/// inks), or over white when `None`; without the alpha channel.
+fn matte_over(img: &Image, matte: Option<photocraft_doc::Color>) -> Result<Image, IoError> {
     let layout = img.layout();
     let white = if layout.is_cmyk() { 0.0 } else { 1.0 };
+    let mode = if layout.is_cmyk() {
+        ColorMode::Cmyk
+    } else if layout.is_lab() {
+        ColorMode::Lab
+    } else if layout.is_gray() {
+        ColorMode::Grayscale
+    } else {
+        ColorMode::Rgb
+    };
+    let under = matte.map_or([white; 4], |m| m.in_mode(mode).c);
     map_bands(img, layout.without_alpha(), img.sample_type(), |vals| {
         let mut out = Vec::with_capacity(vals.len() / layout.channels() * layout.color_channels());
         for px in vals.chunks_exact(layout.channels()) {
             if let Some((&a, color)) = px.split_last() {
                 let a = a.clamp(0.0, 1.0);
-                out.extend(color.iter().map(|&c| c * a + white * (1.0 - a)));
+                out.extend(color.iter().zip(under.iter().chain(std::iter::repeat(&white))).map(|(&c, &u)| c * a + u * (1.0 - a)));
             }
         }
         out

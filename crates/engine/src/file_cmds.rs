@@ -346,6 +346,8 @@ pub(crate) struct SaveOpts {
     pub quality: Option<f64>,
     /// JPEG Options › Format Options (`"jpegFormat"`); unset, Baseline ("Standard").
     pub jpeg_format: Option<photocraft_codecs::JpegFormat>,
+    /// JPEG Options › Matte (`"matte"`), resolved to its colour; unset or None, white.
+    pub matte: Option<photocraft_doc::Color>,
     /// TIFF: keep the layers. Off unless a command's params ask (`"tiffLayers": true`).
     pub tiff_layers: bool,
     /// Targa: 24 or 32 bits per pixel (`"tgaBits"`); unset, 32 with an alpha channel or
@@ -370,6 +372,7 @@ impl Default for SaveOpts {
         SaveOpts {
             quality: None,
             jpeg_format: None,
+            matte: None,
             tiff_layers: false,
             tga_bits: None,
             dpx_bits: None,
@@ -382,8 +385,8 @@ impl Default for SaveOpts {
 }
 
 impl SaveOpts {
-    /// `quality`, `jpegFormat`, `tiffLayers` and `tgaBits` from command `cmd`'s params (a
-    /// `jpegFormat` it doesn't name or a `tgaBits` other than 24 or 32 is an error); the image
+    /// `quality`, `jpegFormat`, `matte`, `tiffLayers` and `tgaBits` from command `cmd`'s params (a
+    /// `jpegFormat` or `matte` it doesn't name or a `tgaBits` other than 24 or 32 is an error); the image
     /// previews and the PSD merged image from the session's File Handling preferences (Ask When
     /// Saving has no dialog here, so it saves them, as Photoshop's Save As checkbox and its
     /// Maximize Compatibility checkbox both start on).
@@ -392,6 +395,7 @@ impl SaveOpts {
         Ok(SaveOpts {
             quality: f64_param(p, "quality"),
             jpeg_format: jpeg_format_param(p, cmd)?,
+            matte: jpeg_matte_param(p, cmd)?.and_then(|m| m.color(&s.tools)),
             tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false),
             tga_bits: tga_bits_param(p, cmd)?,
             dpx_bits: dpx_bits_param(p, cmd)?,
@@ -456,6 +460,66 @@ pub fn jpeg_format_param(p: &Value, cmd: &str) -> Result<Option<photocraft_codec
     }
 }
 
+/// JPEG Options › Matte: the colour a JPEG's transparent pixels are composited over, and its
+/// half-transparent ones blended with. None is white, as in Photoshop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JpegMatte {
+    #[default]
+    None,
+    Foreground,
+    Background,
+    White,
+    Black,
+    Gray,
+}
+
+impl JpegMatte {
+    /// In the order of Photoshop's menu.
+    pub const ALL: [JpegMatte; 6] = [JpegMatte::None, JpegMatte::Foreground, JpegMatte::Background, JpegMatte::White, JpegMatte::Black, JpegMatte::Gray];
+
+    /// The `"matte"` param's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            JpegMatte::None => "none",
+            JpegMatte::Foreground => "foreground",
+            JpegMatte::Background => "background",
+            JpegMatte::White => "white",
+            JpegMatte::Black => "black",
+            JpegMatte::Gray => "gray",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
+
+    /// The colour, the Foreground and Background ones from `tools`; `None` for None (white).
+    pub fn color(self, tools: &crate::ToolState) -> Option<photocraft_doc::Color> {
+        let rgb = |c: [f32; 4]| photocraft_doc::Color::rgb(c[0], c[1], c[2]);
+        match self {
+            JpegMatte::None => None,
+            JpegMatte::Foreground => Some(rgb(tools.foreground)),
+            JpegMatte::Background => Some(rgb(tools.background)),
+            JpegMatte::White => Some(photocraft_doc::Color::WHITE),
+            JpegMatte::Black => Some(photocraft_doc::Color::BLACK),
+            // 128, as Edit › Fill's 50% Gray.
+            JpegMatte::Gray => Some(photocraft_doc::Color::rgb(128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0)),
+        }
+    }
+}
+
+/// The JPEG matte in `p` (`"matte": "none" | "foreground" | "background" | "white" | "black" |
+/// "gray"`; absent or null: none). Anything else is a bad parameter of command `cmd`.
+pub fn jpeg_matte_param(p: &Value, cmd: &str) -> Result<Option<JpegMatte>> {
+    match p.get("matte") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_str().and_then(JpegMatte::parse).map(Some).ok_or_else(|| EngineError::BadParams {
+            cmd: cmd.into(),
+            msg: format!("`matte` must be \"none\", \"foreground\", \"background\", \"white\", \"black\" or \"gray\", got {v}"),
+        }),
+    }
+}
+
 /// Photoshop's 0–12 JPEG quality as the encoder's 1–100 (0 → 1, 12 → 100, linear between; out of
 /// range is clamped, and NaN or infinite is 100).
 pub fn jpeg_quality(q: f64) -> u8 {
@@ -512,6 +576,7 @@ pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> R
         document_path: crate::doc_path::current(),
         // An untrusted session's stored paths are document data: embed none of them.
         read_linked_files: !crate::jobs::authorization_installed(),
+        matte: save.matte,
         ..Default::default()
     };
     // No quality chosen: write the file the way it was opened (a JPEG at its own quality, a WebP
@@ -1943,7 +2008,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"jpegFormat":"baseline|optimized|progressive"? (JPEG; default baseline),"layers":bool=true,"overwrite":bool=false (replace the document's own file),"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tiffCompression":"none|lzw|zip"? (TIFF: image compression; unset, none),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain)}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"jpegFormat":"baseline|optimized|progressive"? (JPEG; default baseline),"matte":"none|foreground|background|white|black|gray"? (JPEG: the colour transparency is composited over; default none, white),"layers":bool=true,"overwrite":bool=false (replace the document's own file),"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tiffCompression":"none|lzw|zip"? (TIFF: image compression; unset, none),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain)}"##,
             native_doc,
             save_a_copy
         ),
@@ -2043,7 +2108,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Layers to Files…",
             &["File", "Export"],
             None,
-            r##"{"dir":folder,"format":"png|jpg|psd|tiff|…"="png","prefix":str=document name,"visibleOnly":bool=true,"quality":0..12?,"jpegFormat":"baseline|optimized|progressive"?,"tiffLayers":bool=false,"tiffCompression":"none|lzw|zip"?,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain)} → {files}"##,
+            r##"{"dir":folder,"format":"png|jpg|psd|tiff|…"="png","prefix":str=document name,"visibleOnly":bool=true,"quality":0..12?,"jpegFormat":"baseline|optimized|progressive"?,"matte":"none|foreground|background|white|black|gray"?,"tiffLayers":bool=false,"tiffCompression":"none|lzw|zip"?,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain)} → {files}"##,
             native_doc,
             layers_to_files
         ),

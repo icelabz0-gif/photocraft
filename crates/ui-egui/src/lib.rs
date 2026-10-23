@@ -275,7 +275,7 @@ pub(crate) const SAVE_OPTIONS_OPEN: &str = "Answer the TIFF, Targa, DDS or JPEG 
 
 /// The format answers a save takes instead of asking: the Targa bits per pixel (`"tgaBits"`),
 /// the DDS options (`"ddsCompression"`, `"ddsMipmaps"`) and JPEG Options (`"quality"` 0–12,
-/// `"jpegFormat"`). `None` asks in Save As and takes the default in automation saves, which never
+/// `"jpegFormat"`, `"matte"`). `None` asks in Save As and takes the default in automation saves, which never
 /// prompt.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FormatChoices {
@@ -304,11 +304,12 @@ impl FormatChoices {
         })
     }
 
-    /// The export settings with these answers applied.
-    pub fn apply(self, settings: ExportSettings) -> ExportSettings {
+    /// The export settings with these answers applied; a JPEG matte of the Foreground or
+    /// Background colour takes it from `tools`.
+    pub fn apply(self, settings: ExportSettings, tools: &photocraft_engine::ToolState) -> ExportSettings {
         let settings = ExportSettings { tga_bits: self.tga_bits.or(settings.tga_bits), dds: self.dds.unwrap_or(settings.dds), ..settings };
         match self.jpeg {
-            Some(j) => j.apply(settings),
+            Some(j) => j.apply(settings, tools),
             None => settings,
         }
     }
@@ -336,6 +337,8 @@ pub struct ExportSettings {
     pub jpeg_quality: Option<u8>,
     /// JPEG Options › Format Options: baseline, baseline optimized or progressive.
     pub jpeg_format: photocraft_codecs::JpegFormat,
+    /// JPEG Options › Matte's colour ([`photocraft_io::ExportOptions::matte`]); `None` is white.
+    pub matte: Option<photocraft_doc::Color>,
     /// WebP: lossless (VP8L) rather than lossy (VP8 at [`Self::webp_quality`]).
     pub webp_lossless: bool,
     /// Lossy WebP quality 1–100 (None = codec default).
@@ -379,6 +382,7 @@ impl Default for ExportSettings {
         ExportSettings {
             jpeg_quality: None,
             jpeg_format: photocraft_codecs::JpegFormat::Baseline,
+            matte: None,
             webp_lossless: true,
             webp_quality: None,
             tiff_layers: true,
@@ -405,6 +409,7 @@ impl ExportSettings {
             opts.encode.jpeg_quality = q;
         }
         opts.encode.jpeg_format = self.jpeg_format;
+        opts.matte = self.matte;
         opts.encode.webp_lossless = self.webp_lossless;
         if let Some(q) = self.webp_quality {
             opts.encode.webp_quality = q;
@@ -1686,7 +1691,7 @@ impl PhotocraftApp {
 
     /// [`Self::save_as`] with the format choices already made, which skip their prompts:
     /// `file.save` and `file.saveAs` with `tgaBits` (no Targa Options), `ddsCompression` or
-    /// `ddsMipmaps` (no DDS Options), or `quality` or `jpegFormat` (no JPEG Options).
+    /// `ddsMipmaps` (no DDS Options), or `quality`, `jpegFormat` or `matte` (no JPEG Options).
     pub fn save_as_with(&mut self, path: Option<String>, choices: FormatChoices) -> Result<Value, String> {
         self.save_dialog_flow(path, choices, false)
     }
@@ -1832,7 +1837,7 @@ impl PhotocraftApp {
             && last.0 == "file.saveAs"
             && last.1.get("path").and_then(Value::as_str) == Some(path)
             && let Some(step) = last.1.as_object()
-            && step.keys().all(|k| matches!(k.as_str(), "path" | "tgaBits" | "ddsCompression" | "ddsMipmaps" | "quality" | "jpegFormat"))
+            && step.keys().all(|k| matches!(k.as_str(), "path" | "tgaBits" | "ddsCompression" | "ddsMipmaps" | "quality" | "jpegFormat" | "matte"))
         {
             let mut step = step.clone();
             step.remove("path");
@@ -1921,7 +1926,8 @@ impl PhotocraftApp {
     /// Options.
     fn write_save(&mut self, path: String, tiff_layers: Option<bool>, choices: FormatChoices) -> Result<Value, String> {
         let copy = self.saves_copy(&path, tiff_layers)?;
-        let settings = choices.apply(ExportSettings { tiff_layers: tiff_layers.unwrap_or(ExportSettings::default().tiff_layers), ..self.save_settings() });
+        let settings = choices
+            .apply(ExportSettings { tiff_layers: tiff_layers.unwrap_or(ExportSettings::default().tiff_layers), ..self.save_settings() }, &self.session.tools);
         match self.write_document(path.clone(), &settings, copy)? {
             Some((path, warnings)) => Ok(serde_json::json!({"path": path, "warnings": warnings})),
             None => Ok(serde_json::json!({"path": path, "warnings": [], "pending": true, "job": self.jobs.last_started.map(|j| j.0)})),
@@ -2130,7 +2136,7 @@ impl PhotocraftApp {
         let reply = |path: &str, warnings: &[String]| json!({"path": path, "warnings": warnings});
         // Only the target is granted: a linked smart object's stored path is document data, so
         // PSD export writes that layer as pixels instead of embedding the file.
-        let settings = ExportSettings { read_linked_files: false, ..choices.apply(self.save_settings()) };
+        let settings = ExportSettings { read_linked_files: false, ..choices.apply(self.save_settings(), &self.session.tools) };
         // #2017: the File › Save worker path, so the encode doesn't block the frame loop.
         if self.background_jobs
             && let Some(save) = self.services.automation_save.clone()

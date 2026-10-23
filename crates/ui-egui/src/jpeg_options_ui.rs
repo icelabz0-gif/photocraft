@@ -2,21 +2,25 @@
 //! a JPEG, as Photoshop's JPEG Options does. Quality is Photoshop's 0–12 scale (Low 0–4, Medium
 //! 5–7, High 8–9, Maximum 10–12), mapped to the encoder's 1–100 by
 //! `photocraft_engine::file_cmds::jpeg_quality`; Format Options are Baseline ("Standard"), Baseline
-//! Optimized and Progressive. Matte, Scans and the size preview aren't offered yet. Re-saving an
-//! opened JPEG starts at the file's own quality, as File › Save keeps it (#4032).
+//! Optimized and Progressive. Matte is the colour a document's transparency is composited over:
+//! None (white), Foreground Color, Background Color, White, Black or 50% Gray. Matte's Other…,
+//! Scans and the size preview aren't offered yet. Re-saving an opened JPEG starts at the file's
+//! own quality, as File › Save keeps it (#4032).
 //!
 //! The save is parked in [`Prompt`] while the modal is up (egui is immediate-mode) and written
-//! once answered. Cancel drops the save. Scripts skip the prompt by passing `quality` or
-//! `jpegFormat`.
+//! once answered. Cancel drops the save. Scripts skip the prompt by passing `quality`,
+//! `jpegFormat` or `matte`.
 //!
 //! Any save can ask: check [`wants_prompt`], then [`park`] (which starts where
 //! [`Start::for_active`] says) or [`park_at`] with a [`Start`] of its own, and return. The answer
 //! is written by [`confirm`] and journalled as the `record` command passed to `park`: with its
-//! path, `quality` (0–12, left out when the file's own quality was kept) and `jpegFormat`, or
+//! path, `quality` (0–12, left out when the file's own quality was kept), `jpegFormat` and `matte`
+//! (left out when None), or
 //! without the path for a plain `file.save`, which writes whichever file an action is played on
 //! ([`plain_save_step`]).
 
 use photocraft_codecs::JpegFormat;
+use photocraft_engine::file_cmds::JpegMatte;
 use serde_json::Value;
 
 use crate::{ExportSettings, PhotocraftApp};
@@ -24,39 +28,47 @@ use crate::{ExportSettings, PhotocraftApp};
 /// The highest quality on Photoshop's JPEG scale.
 pub const MAX_QUALITY: u8 = 12;
 
-/// A JPEG Options answer, from the prompt or from a command's `quality` and `jpegFormat`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A JPEG Options answer, from the prompt or from a command's `quality`, `jpegFormat` and `matte`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JpegChoice {
     /// Photoshop's 0–12 scale; `None` keeps the quality the save would use anyway (the opened
     /// file's own, else the encoder's default).
     pub quality: Option<u8>,
     pub format: JpegFormat,
+    pub matte: JpegMatte,
 }
 
 impl JpegChoice {
-    /// `settings` writing this choice.
-    pub fn apply(self, settings: ExportSettings) -> ExportSettings {
+    /// `settings` writing this choice; a Foreground or Background matte takes the colour from
+    /// `tools`.
+    pub fn apply(self, settings: ExportSettings, tools: &photocraft_engine::ToolState) -> ExportSettings {
         ExportSettings {
             jpeg_quality: self.quality.map(|q| photocraft_engine::file_cmds::jpeg_quality(f64::from(q))).or(settings.jpeg_quality),
             jpeg_format: self.format,
+            matte: self.matte.color(tools),
             ..settings
         }
     }
 
-    /// Adds `quality` and `jpegFormat` to a recorded save step, so replaying it doesn't ask again.
+    /// Adds `quality`, `jpegFormat` and `matte` (unless None) to a recorded save step, so
+    /// replaying it doesn't ask again.
     pub fn record(self, step: &mut Value) {
         if let Some(q) = self.quality {
             step["quality"] = q.into();
         }
         step["jpegFormat"] = self.format.name().into();
+        if self.matte != JpegMatte::None {
+            step["matte"] = self.matte.name().into();
+        }
     }
 }
 
-/// The JPEG Options a command or control call gives (`"quality": 0..12`, `"jpegFormat"`), which
-/// skip the prompt. Neither given: `None`. A quality that isn't a number from 0 to 12, or a
-/// format other than the three names, is an error.
+/// The JPEG Options a command or control call gives (`"quality": 0..12`, `"jpegFormat"`,
+/// `"matte"`), which skip the prompt. None given: `None`. A quality that isn't a number from 0 to
+/// 12, or a format or matte other than their names, is an error.
 pub fn choice_param(params: &Value, cmd: &str) -> Result<Option<JpegChoice>, String> {
     let format = photocraft_engine::file_cmds::jpeg_format_param(params, cmd).map_err(|e| e.to_string())?;
+    let matte = photocraft_engine::file_cmds::jpeg_matte_param(params, cmd).map_err(|e| e.to_string())?;
     let quality = match params.get("quality") {
         None | Some(Value::Null) => None,
         Some(v) => Some(
@@ -66,13 +78,17 @@ pub fn choice_param(params: &Value, cmd: &str) -> Result<Option<JpegChoice>, Str
                 .ok_or_else(|| format!("{cmd}: `quality` must be a number from 0 to 12 (Photoshop's JPEG scale), got {v}"))?,
         ),
     };
-    Ok((quality.is_some() || format.is_some()).then(|| JpegChoice { quality, format: format.unwrap_or_default() }))
+    Ok((quality.is_some() || format.is_some() || matte.is_some()).then(|| JpegChoice {
+        quality,
+        format: format.unwrap_or_default(),
+        matte: matte.unwrap_or_default(),
+    }))
 }
 
 /// The params of a recorded plain `file.save` (which writes whichever file an action is played
 /// on): none, unless JPEG Options changed something, so that a replay writes it too without
-/// asking. `quality` is left out when the file's own quality was kept, and `jpegFormat` when it
-/// is Baseline, the default.
+/// asking. `quality` is left out when the file's own quality was kept, `jpegFormat` when it is
+/// Baseline and `matte` when it is None, the defaults.
 pub fn plain_save_step(choice: Option<JpegChoice>) -> Value {
     let mut step = Value::Object(Default::default());
     if let Some(c) = choice {
@@ -82,6 +98,9 @@ pub fn plain_save_step(choice: Option<JpegChoice>) -> Value {
         if c.format != JpegFormat::Baseline {
             step["jpegFormat"] = c.format.name().into();
         }
+        if c.matte != JpegMatte::None {
+            step["matte"] = c.matte.name().into();
+        }
     }
     step
 }
@@ -89,11 +108,16 @@ pub fn plain_save_step(choice: Option<JpegChoice>) -> Value {
 /// The JPEG Options in a recorded save step, which replays without asking. A `file.saveACopy`
 /// step from the engine command keeps its params as they were given, and the engine clamps a
 /// `quality` to 0–12 and ignores one that isn't a number, so the replay reads it the same way. A
-/// format other than the three names is still an error, as it is for the engine.
+/// format or matte other than their names is still an error, as it is for the engine.
 pub fn recorded_choice(params: &Value, cmd: &str) -> Result<Option<JpegChoice>, String> {
     let format = photocraft_engine::file_cmds::jpeg_format_param(params, cmd).map_err(|e| e.to_string())?;
+    let matte = photocraft_engine::file_cmds::jpeg_matte_param(params, cmd).map_err(|e| e.to_string())?;
     let quality = params.get("quality").and_then(Value::as_f64).filter(|q| q.is_finite()).map(|q| q.clamp(0.0, f64::from(MAX_QUALITY)).round() as u8);
-    Ok((quality.is_some() || format.is_some()).then(|| JpegChoice { quality, format: format.unwrap_or_default() }))
+    Ok((quality.is_some() || format.is_some() || matte.is_some()).then(|| JpegChoice {
+        quality,
+        format: format.unwrap_or_default(),
+        matte: matte.unwrap_or_default(),
+    }))
 }
 
 /// Photoshop's name for a quality, in the UI language: Low, Medium, High or Maximum.
@@ -103,6 +127,18 @@ pub fn quality_label(q: u8) -> &'static str {
         5..=7 => tl!("Medium"),
         8..=9 => tl!("High"),
         _ => tl!("Maximum"),
+    }
+}
+
+/// Photoshop's name for a matte, in the UI language.
+pub fn matte_label(m: JpegMatte) -> &'static str {
+    match m {
+        JpegMatte::None => tl!("None"),
+        JpegMatte::Foreground => tl!("Foreground Color"),
+        JpegMatte::Background => tl!("Background Color"),
+        JpegMatte::White => tl!("White"),
+        JpegMatte::Black => tl!("Black"),
+        JpegMatte::Gray => tl!("50% Gray"),
     }
 }
 
@@ -154,6 +190,7 @@ pub struct Prompt {
     /// Quality, 0–12.
     pub quality: u8,
     pub format: JpegFormat,
+    pub matte: JpegMatte,
     /// See [`Start::own_quality`].
     pub own_quality: Option<u8>,
     /// Save a Copy: the document keeps its path and unsaved changes.
@@ -188,19 +225,28 @@ pub fn park_at(app: &mut PhotocraftApp, path: String, copy: bool, record: &'stat
     }
     let doc = app.active_doc_id()?;
     let Start { quality, own_quality, format } = start;
-    app.jpeg_options = Some(Prompt { doc, path, quality: quality.min(MAX_QUALITY), format, own_quality, copy, record });
+    app.jpeg_options = Some(Prompt { doc, path, quality: quality.min(MAX_QUALITY), format, matte: JpegMatte::None, own_quality, copy, record });
     Ok(())
 }
 
 pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let Some(p) = &mut app.jpeg_options else { return };
     let (mut ok, mut cancel) = (false, false);
-    let (mut quality, mut format) = (p.quality, p.format);
+    let (mut quality, mut format, mut matte) = (p.quality, p.format, p.matte);
     let modal = egui::Modal::new(egui::Id::new("jpeg-options")).show(ctx, |ui| {
         ui.set_max_width(360.0);
         ui.label(egui::RichText::new(tl!("JPEG Options")).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
         crate::widgets::hairline(ui);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(tl!("Matte"));
+            egui::ComboBox::from_id_salt("jpeg-matte").selected_text(matte_label(matte)).show_ui(ui, |ui| {
+                for m in JpegMatte::ALL {
+                    ui.selectable_value(&mut matte, m, matte_label(m));
+                }
+            });
+        });
         ui.add_space(8.0);
         crate::widgets::section_label(ui, tl!("Image Options"));
         ui.horizontal(|ui| {
@@ -231,6 +277,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     cancel |= modal.should_close();
     p.quality = quality.min(MAX_QUALITY);
     p.format = format;
+    p.matte = matte;
     // A focused button takes Enter as its click without consuming the key: Enter on Cancel cancels.
     if ok || (!cancel && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))) {
         confirm(app, ctx);
@@ -241,14 +288,14 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
 }
 
-/// OK: writes the waiting save with the prompt's quality and format, and journals it.
+/// OK: writes the waiting save with the prompt's quality, format and matte, and journals it.
 pub fn confirm(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let Some(p) = app.jpeg_options.take() else { return };
     // Left where it started, an opened JPEG keeps its own quality exactly rather than the nearest
     // step on the 0–12 scale (95 would be written as 92). The recorded step then leaves the
     // quality out, so a replay keeps the file's own quality too, as File › Save does (#4032).
     let own = p.own_quality.filter(|&q| quality_from_percent(u32::from(q)) == p.quality);
-    let choice = JpegChoice { quality: own.is_none().then_some(p.quality), format: p.format };
+    let choice = JpegChoice { quality: own.is_none().then_some(p.quality), format: p.format, matte: p.matte };
     let step = if p.record == "file.save" {
         // A plain Save writes whichever file the action is played on (#3531), with the answer.
         plain_save_step(Some(choice))
@@ -257,7 +304,7 @@ pub fn confirm(app: &mut PhotocraftApp, ctx: &egui::Context) {
         choice.record(&mut step);
         step
     };
-    let mut settings = choice.apply(app.save_settings());
+    let mut settings = choice.apply(app.save_settings(), &app.session.tools);
     if own.is_some() {
         settings.jpeg_quality = own;
     }
@@ -284,9 +331,12 @@ mod tests {
         let base = JpegFormat::Baseline;
         assert_eq!(choice_param(&json!({}), "file.saveAs"), Ok(None));
         assert_eq!(choice_param(&json!({"quality": null, "jpegFormat": null}), "file.saveAs"), Ok(None));
-        assert_eq!(choice_param(&json!({"quality": 12}), "file.saveAs"), Ok(Some(JpegChoice { quality: Some(12), format: base })));
-        assert_eq!(choice_param(&json!({"quality": 7.6}), "file.saveAs"), Ok(Some(JpegChoice { quality: Some(8), format: base })));
-        assert_eq!(choice_param(&json!({"jpegFormat": "progressive"}), "file.saveAs"), Ok(Some(JpegChoice { quality: None, format: JpegFormat::Progressive })));
+        assert_eq!(choice_param(&json!({"quality": 12}), "file.saveAs"), Ok(Some(JpegChoice { quality: Some(12), format: base, matte: JpegMatte::None })));
+        assert_eq!(choice_param(&json!({"quality": 7.6}), "file.saveAs"), Ok(Some(JpegChoice { quality: Some(8), format: base, matte: JpegMatte::None })));
+        assert_eq!(
+            choice_param(&json!({"jpegFormat": "progressive"}), "file.saveAs"),
+            Ok(Some(JpegChoice { quality: None, format: JpegFormat::Progressive, matte: JpegMatte::None }))
+        );
         for bad in [
             json!({"quality": 13}),
             json!({"quality": -1}),
@@ -306,12 +356,15 @@ mod tests {
     fn recorded_steps_read_like_the_engine() {
         let base = JpegFormat::Baseline;
         assert_eq!(recorded_choice(&json!({"path": "a.jpg"}), "file.saveACopy"), Ok(None));
-        assert_eq!(recorded_choice(&json!({"quality": 90}), "file.saveACopy"), Ok(Some(JpegChoice { quality: Some(12), format: base })));
-        assert_eq!(recorded_choice(&json!({"quality": -3}), "file.saveACopy"), Ok(Some(JpegChoice { quality: Some(0), format: base })));
+        assert_eq!(
+            recorded_choice(&json!({"quality": 90}), "file.saveACopy"),
+            Ok(Some(JpegChoice { quality: Some(12), format: base, matte: JpegMatte::None }))
+        );
+        assert_eq!(recorded_choice(&json!({"quality": -3}), "file.saveACopy"), Ok(Some(JpegChoice { quality: Some(0), format: base, matte: JpegMatte::None })));
         assert_eq!(recorded_choice(&json!({"quality": "8"}), "file.saveACopy"), Ok(None), "a quality that isn't a number is ignored");
         assert_eq!(
             recorded_choice(&json!({"quality": 7.6, "jpegFormat": "optimized"}), "file.saveAs"),
-            Ok(Some(JpegChoice { quality: Some(8), format: JpegFormat::Optimized }))
+            Ok(Some(JpegChoice { quality: Some(8), format: JpegFormat::Optimized, matte: JpegMatte::None }))
         );
         assert!(recorded_choice(&json!({"jpegFormat": "fast"}), "file.saveACopy").is_err());
     }
@@ -347,7 +400,8 @@ mod tests {
             photocraft_doc::Color::WHITE,
         );
         let write = |format| {
-            let settings = JpegChoice { quality: Some(10), format }.apply(ExportSettings::default());
+            let settings =
+                JpegChoice { quality: Some(10), format, matte: JpegMatte::None }.apply(ExportSettings::default(), &photocraft_engine::ToolState::default());
             photocraft_io::export(&doc, "a.jpg", &settings.io_options()).unwrap().bytes
         };
         // Start of frame: 0xFFC0 baseline, 0xFFC2 progressive. Scan data stuffs its 0xFF bytes, and
@@ -360,14 +414,52 @@ mod tests {
 
     #[test]
     fn choices_apply_and_record() {
-        let c = JpegChoice { quality: Some(10), format: JpegFormat::Optimized };
-        let s = c.apply(ExportSettings::default());
+        let c = JpegChoice { quality: Some(10), format: JpegFormat::Optimized, matte: JpegMatte::None };
+        let s = c.apply(ExportSettings::default(), &photocraft_engine::ToolState::default());
         assert_eq!((s.jpeg_quality, s.jpeg_format), (Some(84), JpegFormat::Optimized));
         let mut step = json!({"path": "a.jpg"});
         c.record(&mut step);
         assert_eq!(step, json!({"path": "a.jpg", "quality": 10, "jpegFormat": "optimized"}));
         assert_eq!(choice_param(&step, "file.saveAs"), Ok(Some(c)), "a recorded step replays the same answer");
-        let unset = JpegChoice { quality: None, format: JpegFormat::Progressive }.apply(ExportSettings { jpeg_quality: Some(95), ..ExportSettings::default() });
+        let unset = JpegChoice { quality: None, format: JpegFormat::Progressive, matte: JpegMatte::None }
+            .apply(ExportSettings { jpeg_quality: Some(95), ..ExportSettings::default() }, &photocraft_engine::ToolState::default());
         assert_eq!(unset.jpeg_quality, Some(95), "no quality keeps the quality the save had");
+    }
+
+    /// `matte` names JPEG Options' Matte: it skips the prompt on its own, is recorded unless None,
+    /// replays from the step, and an unknown name is refused.
+    #[test]
+    fn matte_params() {
+        let black = JpegChoice { quality: None, format: JpegFormat::Baseline, matte: JpegMatte::Black };
+        assert_eq!(choice_param(&json!({"matte": "black"}), "file.saveAs"), Ok(Some(black)));
+        assert_eq!(choice_param(&json!({"matte": null}), "file.saveAs"), Ok(None));
+        assert_eq!(recorded_choice(&json!({"matte": "gray"}), "file.saveACopy"), Ok(Some(JpegChoice { matte: JpegMatte::Gray, ..black })));
+        for bad in [json!({"matte": "Black"}), json!({"matte": "#000000"}), json!({"matte": 0})] {
+            assert!(choice_param(&bad, "file.saveAs").is_err(), "{bad}");
+            assert!(recorded_choice(&bad, "file.saveACopy").is_err(), "{bad}");
+        }
+        let mut step = json!({"path": "a.jpg"});
+        black.record(&mut step);
+        assert_eq!(step, json!({"path": "a.jpg", "jpegFormat": "baseline", "matte": "black"}));
+        assert_eq!(choice_param(&step, "file.saveAs"), Ok(Some(black)), "a recorded step replays the same answer");
+        assert_eq!(plain_save_step(Some(black)), json!({"matte": "black"}));
+        let mut step = json!({"path": "a.jpg"});
+        JpegChoice { matte: JpegMatte::None, ..black }.record(&mut step);
+        assert_eq!(step, json!({"path": "a.jpg", "jpegFormat": "baseline"}), "None, the default, isn't recorded");
+    }
+
+    /// The matte reaches the settings as its colour: Foreground and Background from the tools,
+    /// None as no colour (white).
+    #[test]
+    fn mattes_apply_their_colour() {
+        let tools =
+            photocraft_engine::ToolState { foreground: [1.0, 0.0, 0.0, 1.0], background: [0.0, 0.0, 1.0, 1.0], ..photocraft_engine::ToolState::default() };
+        let matte = |m| JpegChoice { quality: None, format: JpegFormat::Baseline, matte: m }.apply(ExportSettings::default(), &tools).io_options().matte;
+        let rgb = photocraft_doc::Color::rgb;
+        assert_eq!(matte(JpegMatte::None), None);
+        assert_eq!(matte(JpegMatte::Foreground), Some(rgb(1.0, 0.0, 0.0)));
+        assert_eq!(matte(JpegMatte::Background), Some(rgb(0.0, 0.0, 1.0)));
+        assert_eq!(matte(JpegMatte::Black), Some(photocraft_doc::Color::BLACK));
+        assert_eq!(matte(JpegMatte::Gray), Some(rgb(128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0)));
     }
 }

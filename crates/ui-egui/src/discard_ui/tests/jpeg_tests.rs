@@ -3,8 +3,9 @@
 //! waiting behind it.
 use super::*;
 use crate::{FileDialogAnswer, jpeg_options_ui};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use photocraft_codecs::JpegFormat;
+use photocraft_engine::file_cmds::JpegMatte;
 use std::{cell::RefCell, rc::Rc};
 
 /// Each write: the path, and the JPEG quality (1–100) and format the export was asked for.
@@ -269,4 +270,42 @@ fn a_save_can_choose_where_the_prompt_starts() {
     h.state_mut().run("actions.stop", json!({})).unwrap();
     assert_eq!(writes.borrow().as_slice(), &[("s.jpg".to_string(), asked(Some(70), JpegFormat::Progressive))]);
     assert_eq!(h.state().session.actions.list[0].steps, [("file.saveAs".into(), json!({"path": "s.jpg", "jpegFormat": "progressive"}))]);
+}
+
+/// JPEG Options › Matte: the colour picked is the one the transparency is written over, the
+/// Foreground colour as it is when the save is written; the step records the matte by name, so a
+/// replay takes the Foreground colour of its own time, as an action's does.
+#[test]
+fn jpeg_options_matte_is_written_and_recorded() {
+    let (mut h, writes) = jpeg_app("unused.jpg");
+    h.state_mut().services.export = Some(Box::new(|_, _, settings| Ok((serde_json::to_vec(&settings.matte.map(|c| c.c)).unwrap(), Vec::new()))));
+    h.state_mut().session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
+    h.state_mut().run("actions.record", json!({})).unwrap();
+    h.state_mut().save_as(Some("p.jpg".into())).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().jpeg_options.as_ref().map(|p| p.matte), Some(JpegMatte::None));
+    let matte = |n: &egui_kittest::Node<'_>| {
+        let a = n.accesskit_node();
+        a.value().as_deref() == Some("None") || a.label().as_deref() == Some("None")
+    };
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| matte(n)).expect("the Matte dropdown").click();
+    h.run_steps(2);
+    h.get_by_label("Foreground Color").click();
+    h.run_steps(2);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    h.state_mut().run("actions.stop", json!({})).unwrap();
+    let red = serde_json::to_vec(&Some([1.0f32, 0.0, 0.0, 0.0])).unwrap();
+    assert_eq!(writes.borrow().as_slice(), &[("p.jpg".to_string(), red)]);
+    assert_eq!(
+        h.state().session.actions.list[0].steps,
+        [("file.saveAs".into(), json!({"path": "p.jpg", "quality": 10, "jpegFormat": "baseline", "matte": "foreground"}))]
+    );
+    writes.borrow_mut().clear();
+    h.state_mut().session.tools.foreground = [0.0, 0.0, 1.0, 1.0];
+    let played = h.state_mut().run("actions.play", json!({"action": 0})).unwrap();
+    assert!(played.get("failed").is_none(), "{played}");
+    assert!(h.state().jpeg_options.is_none(), "playback doesn't ask");
+    let blue = serde_json::to_vec(&Some([0.0f32, 0.0, 1.0, 0.0])).unwrap();
+    assert_eq!(writes.borrow().as_slice(), &[("p.jpg".to_string(), blue)]);
 }
