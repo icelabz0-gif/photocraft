@@ -130,9 +130,10 @@ impl Plugin {
             }
             r
         };
-        // A few bands at a time (one per worker), so peak memory stays near one band per thread.
+        // A few bands at a time: one per worker, and no more instances than the run's memory
+        // budget holds at their cap, so peak memory stays bounded however many cores run (#8603).
         #[cfg(not(target_arch = "wasm32"))]
-        let group = rayon::current_num_threads().max(1);
+        let group = self.limits().parallel_bands(rayon::current_num_threads());
         #[cfg(target_arch = "wasm32")]
         let group = 1;
         for chunk in bands.chunks(group) {
