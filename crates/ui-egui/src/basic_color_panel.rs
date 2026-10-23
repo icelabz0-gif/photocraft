@@ -66,6 +66,10 @@ pub(crate) mod text {
     pub const PAINT_NEW_REGION: &str = "Paint a new region";
     pub const ADD_TO_REGION: &str = "Add to region";
     pub const AUTO_FACE: &str = "Auto-select face";
+    pub const FACE_MODE: &str = "Faces";
+    pub const ALL_FACES: &str = "All faces";
+    pub const MAIN_FACE: &str = "Main face";
+    pub const DETECTING_FACE: &str = "Detecting face…";
     pub const APPLY_WHOLE: &str = "Apply to whole image";
     pub const SHOW_SELECTION: &str = "Show selection";
     pub const HIDE_SELECTION: &str = "Hide selection";
@@ -100,6 +104,10 @@ pub(crate) mod text {
         PAINT_NEW_REGION,
         ADD_TO_REGION,
         AUTO_FACE,
+        FACE_MODE,
+        ALL_FACES,
+        MAIN_FACE,
+        DETECTING_FACE,
         APPLY_WHOLE,
         SHOW_SELECTION,
         HIDE_SELECTION,
@@ -118,12 +126,41 @@ pub(crate) mod text {
 }
 
 /// Basic Color panel state, persisted in [`crate::state::UiState`] so it survives a relaunch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FaceMode {
+    #[default]
+    All,
+    Main,
+}
+
+impl FaceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Main => "main",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BasicColorState {
     /// The last command error shown under the controls (empty: none).
     pub status: String,
     pub status_error: bool,
+    /// Which faces the next Auto-select face run covers. Persisted.
+    pub face_mode: FaceMode,
+    /// True while a face run is waiting for the next frame (the spinner is visible then).
+    #[serde(skip)]
+    pub face_busy: bool,
+    /// The deferred face command, run after one painted spinner frame so the synchronous detector
+    /// does not block before the progress message reaches the screen.
+    #[serde(skip)]
+    pub face_request: Option<(LayerId, FaceMode)>,
+    /// One frame of grace before `face_request` runs, so the spinner/status is presented first.
+    #[serde(skip)]
+    pub face_wait: bool,
 }
 
 /// The active layer when it is a Basic Color adjustment: everything the panel needs, copied out so
@@ -161,7 +198,7 @@ enum Action {
     Reset { layer: LayerId },
     PaintNewRegion { layer: LayerId },
     AddToRegion { layer: LayerId },
-    AutoFace { layer: LayerId },
+    AutoFace { layer: LayerId, faces: FaceMode },
     ApplyWhole { layer: LayerId },
     ToggleMask { layer: LayerId },
 }
@@ -201,8 +238,8 @@ fn show_selection(app: &mut PhotocraftApp, layer: LayerId) {
     }
 }
 
-fn auto_face(app: &mut PhotocraftApp, layer: LayerId) {
-    match app.run("layer.layerMask.fromFace", json!({"layer": layer.0, "faces": "all"})) {
+fn auto_face(app: &mut PhotocraftApp, layer: LayerId, faces: FaceMode) {
+    match app.run("layer.layerMask.fromFace", json!({"layer": layer.0, "faces": faces.as_str()})) {
         Ok(result) => {
             let faces = result.get("faces").and_then(serde_json::Value::as_u64).unwrap_or(0).to_string();
             let message = crate::i18n::fmt(tl!(text::FACE_STATUS), &[("faces", &faces)]);
@@ -246,7 +283,14 @@ fn apply(app: &mut PhotocraftApp, action: Action) {
             paint_setup(app);
             show_selection(app, layer);
         }
-        Action::AutoFace { layer } => auto_face(app, layer),
+        Action::AutoFace { layer, faces } => {
+            // Defer the synchronous detector by one frame: the status and spinner get painted
+            // before the frame loop blocks, then `window` runs the command at the next frame.
+            app.ui.basic_color.face_busy = true;
+            app.ui.basic_color.face_request = Some((layer, faces));
+            app.ui.basic_color.face_wait = true;
+            set_status(&mut app.ui.basic_color, tl!(text::DETECTING_FACE).to_string(), false);
+        }
         Action::ApplyWhole { layer } => {
             if let Err(error) = app.run("layer.layerMask.revealAll", json!({"layer": layer.0})) {
                 failed(app, text::MASK_FAILED, &error);
@@ -262,7 +306,25 @@ fn apply(app: &mut PhotocraftApp, action: Action) {
     }
 }
 
-fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, actions: &mut Vec<Action>) {
+fn face_row(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode, face_busy: bool, with_apply: bool, actions: &mut Vec<Action>) {
+    ui.horizontal_wrapped(|ui| {
+        if with_apply && widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
+            actions.push(Action::ApplyWhole { layer: info.id });
+        }
+        if face_busy {
+            ui.spinner();
+            ui.label(egui::RichText::new(tl!(text::DETECTING_FACE)).size(11.0).color(Tokens::get(ui.ctx()).text_dim));
+            return;
+        }
+        if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
+            actions.push(Action::AutoFace { layer: info.id, faces: *face_mode });
+        }
+        ui.label(egui::RichText::new(tl!(text::FACE_MODE)).size(10.5).color(Tokens::get(ui.ctx()).text_faint));
+        widgets::dropdown(ui, "basic-color-face-mode", face_mode, &[(FaceMode::All, text::ALL_FACES), (FaceMode::Main, text::MAIN_FACE)], 104.0);
+    });
+}
+
+fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode, face_busy: bool, actions: &mut Vec<Action>) {
     let t = Tokens::get(ui.ctx());
     widgets::hairline(ui);
     ui.add_space(2.0);
@@ -270,14 +332,7 @@ fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, actions: &mut Vec<Action
     if !info.has_mask {
         // Vector mask only, or none: painting needs a pixel mask, so the paint controls wait.
         ui.add(egui::Label::new(egui::RichText::new(tl!(text::NO_PIXEL_MASK)).size(11.0).color(t.text_faint)).wrap());
-        ui.horizontal_wrapped(|ui| {
-            if widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
-                actions.push(Action::ApplyWhole { layer: info.id });
-            }
-            if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
-                actions.push(Action::AutoFace { layer: info.id });
-            }
-        });
+        face_row(ui, info, face_mode, face_busy, true, actions);
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -297,11 +352,7 @@ fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, actions: &mut Vec<Action
             actions.push(Action::ToggleMask { layer: info.id });
         }
     });
-    ui.horizontal_wrapped(|ui| {
-        if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
-            actions.push(Action::AutoFace { layer: info.id });
-        }
-    });
+    face_row(ui, info, face_mode, face_busy, false, actions);
     let hint = if info.overlay { tl!(text::SELECTION_HINT) } else { tl!(text::HINT) };
     ui.add(egui::Label::new(egui::RichText::new(hint).size(10.5).color(t.text_faint)).wrap());
 }
@@ -311,8 +362,21 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !app.ui.panels.basic_color {
         return;
     }
+    // The click frame drew the spinner/status and returned; this next frame is already on screen,
+    // so the synchronous detector can run now without hiding the progress message.
+    if app.ui.basic_color.face_request.is_some() {
+        if app.ui.basic_color.face_wait {
+            app.ui.basic_color.face_wait = false;
+            ctx.request_repaint();
+        } else if let Some((layer, faces)) = app.ui.basic_color.face_request.take() {
+            auto_face(app, layer, faces);
+            app.ui.basic_color.face_busy = false;
+        }
+    }
     let has_document = app.session.active_index().is_some();
     let active = active_basic_color(app);
+    let mut face_mode = app.ui.basic_color.face_mode;
+    let face_busy = app.ui.basic_color.face_busy;
     let mut open = true;
     let mut actions = Vec::new();
     let t = Tokens::get(ctx);
@@ -384,7 +448,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                                 }
                             });
                         });
-                        mask_controls(ui, info, &mut actions);
+                        mask_controls(ui, info, &mut face_mode, face_busy, &mut actions);
                         ui.add_space(4.0);
                         crate::adjust_editors::layer_editor(app, ui, info.id, &info.adjustment);
                     }
@@ -412,8 +476,12 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !open {
         app.ui.panels.basic_color = false;
     }
+    app.ui.basic_color.face_mode = face_mode;
     for action in actions {
         apply(app, action);
+    }
+    if app.ui.basic_color.face_busy {
+        ctx.request_repaint();
     }
 }
 
@@ -563,12 +631,15 @@ mod tests {
     fn default_state_round_trips_through_serde() {
         let state = BasicColorState::default();
         assert!(state.status.is_empty() && !state.status_error);
+        assert_eq!(state.face_mode, FaceMode::All);
         let json = serde_json::to_string(&state).expect("serialize");
         let back: BasicColorState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(state, back);
         // An older layout without the field gets the whole default state.
         let fresh: BasicColorState = serde_json::from_str("{}").expect("missing fields default");
         assert_eq!(fresh, BasicColorState::default());
+        let main: BasicColorState = serde_json::from_str(r#"{"faceMode":"main"}"#).expect("main face mode");
+        assert_eq!(main.face_mode, FaceMode::Main);
     }
 
     #[test]
@@ -674,6 +745,12 @@ mod tests {
             Some(photocraft_engine::mask_view_cmds::MaskViewMode::Overlay),
             "showing the selection brings the overlay back"
         );
+
+        // Auto-select face is deferred by one painted frame so the spinner/status is visible.
+        apply(&mut app, Action::AutoFace { layer: id, faces: FaceMode::Main });
+        assert!(app.ui.basic_color.face_busy);
+        assert_eq!(app.ui.basic_color.face_request, Some((id, FaceMode::Main)));
+        assert!(app.ui.basic_color.status.contains("Đang nhận diện") || app.ui.basic_color.status.contains("Detecting"));
     }
 
     #[test]
@@ -704,8 +781,18 @@ mod tests {
     fn auto_face_explains_when_no_face_is_found() {
         let mut h = harness(vec2(1440.0, 900.0));
         h.get_by_label(text::AUTO_FACE).click();
-        h.run_steps(3);
+        h.run_steps(6);
         assert!(h.query_all_by_label(text::NO_FACE).next().is_some(), "the panel says no face was found");
+    }
+
+    #[test]
+    fn face_mode_dropdown_switches_between_all_and_main() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).next().expect("the face-mode combo").click();
+        h.run_steps(2);
+        h.get_by_label(text::MAIN_FACE).click();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.basic_color.face_mode, FaceMode::Main);
     }
 
     #[test]

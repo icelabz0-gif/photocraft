@@ -193,9 +193,9 @@ fn render_with_source(
         vec![[0.0; 4]; n]
     };
     // Rubylith: `color` at `opacity` × coverage over the accumulated pixels.
-    let mut tint = |values: Vec<f32>, color: photocraft_color::Color, opacity: f32, coverage: &dyn Fn(f32) -> f32| {
+    let mut tint = |values: &[f32], color: photocraft_color::Color, opacity: f32, coverage: &dyn Fn(f32) -> f32| {
         let c = color.to_rgb();
-        for (o, val) in out.iter_mut().zip(values) {
+        for (o, &val) in out.iter_mut().zip(values) {
             let a = (coverage(val.clamp(0.0, 1.0)) * opacity).clamp(0.0, 1.0);
             for j in 0..3 {
                 o[j] = c[j] * a + o[j] * (1.0 - a);
@@ -210,14 +210,49 @@ fn render_with_source(
             Some((ink, solidity)) => (ink, 0.5 + 0.5 * solidity),
             None => (ch.color, ch.opacity),
         };
-        tint(sample(&ch.surface, r, factor), color, opacity, &|x| ch.overlay_coverage(x));
+        tint(&sample(&ch.surface, r, factor), color, opacity, &|x| ch.overlay_coverage(x));
     }
     // ⇧⌥-click mask view (#196): the layer mask as Quick Mask's red over the hidden areas
     // (Photoshop's Layer Mask Display Options default).
     if !solo_mask && let Some((m, MaskViewMode::Overlay)) = shown_mask {
-        tint(sample(m, r, factor), AlphaChannel::DEFAULT_COLOR, 0.5, &|x| 1.0 - x);
+        let values = sample(m, r, factor);
+        tint(&values, AlphaChannel::DEFAULT_COLOR, 0.5, &|x| 1.0 - x);
+        // A thin light/dark contour on both sides of the coverage edge keeps the selected area
+        // readable on light and dark pictures; the rubylith alone can wash into a bright backdrop.
+        let w = r.width().div_ceil(factor) as usize;
+        let h = r.height().div_ceil(factor) as usize;
+        mask_outline(&values, w, h, &mut out);
     }
     Some(out.into_iter().map(|p| Color32::from_rgba_premultiplied(q(p[0]), q(p[1]), q(p[2]), q(p[3]))).collect())
+}
+
+/// A thin contour around the layer-mask coverage edge. The covered side gets a light line and
+/// the hidden side a dark one, so the selection stays visible on bright and dark pictures. This
+/// only changes the channel-view texture, never the document.
+fn mask_outline(values: &[f32], w: usize, h: usize, out: &mut [[f32; 4]]) {
+    if w < 2 || h < 2 || values.len() != w.saturating_mul(h) || out.len() != values.len() {
+        return;
+    }
+    let inside = |i: usize| values[i] >= 0.5;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let sel = inside(i);
+            let edge = (x > 0 && inside(i - 1) != sel)
+                || (x + 1 < w && inside(i + 1) != sel)
+                || (y > 0 && inside(i - w) != sel)
+                || (y + 1 < h && inside(i + w) != sel);
+            if !edge {
+                continue;
+            }
+            let a = 0.82f32;
+            let c = if sel { [1.0f32, 1.0, 1.0] } else { [0.10f32, 0.10, 0.10] };
+            for j in 0..3 {
+                out[i][j] = c[j] * a + out[i][j] * (1.0 - a);
+            }
+            out[i][3] = a + out[i][3] * (1.0 - a);
+        }
+    }
 }
 
 /// `r` of a one-channel surface sampled every `factor` px, mapped to colours row by row (in
@@ -450,6 +485,16 @@ mod tests {
         let s = session();
         let st = s.active().unwrap();
         assert!(render(&st.doc, &st.channel_view, st.doc.bounds(), 1, false, st.active_layer).is_none());
+    }
+
+    #[test]
+    fn mask_outline_marks_both_sides_of_the_coverage_edge() {
+        let values = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let mut out = vec![[0.0f32; 4]; 9];
+        mask_outline(&values, 3, 3, &mut out);
+        assert!(out[4][0] > 0.5 && out[4][3] > 0.5, "covered side gets a light line: {:?}", out[4]);
+        assert!(out[1][0] < 0.2 && out[1][3] > 0.5, "hidden side gets a dark line: {:?}", out[1]);
+        assert_eq!(out[0][3], 0.0, "the untouched corner is not an edge");
     }
 
     #[test]
