@@ -664,7 +664,11 @@ pub(crate) fn shape_key(layer: &Layer, canvas: Rect) -> u64 {
         LayerContent::Shape(sh) => {
             std::mem::discriminant(&layer.content).hash(&mut h);
             if photocraft_compose::effect_outline(layer).is_some() {
-                format!("{:?}", sh.path).hash(&mut h);
+                // The cached maps live in region-local coordinates. Preserve their identity
+                // under translation so sync_fx can verify coverage and reuse them after a move.
+                let outline =
+                    sh.path.control_bounds().map_or_else(|| sh.path.clone(), |(x, y, _, _)| sh.path.transform(&photocraft_geom::Affine::translate(-x, -y)));
+                format!("{outline:?}").hash(&mut h);
             }
         }
         other => std::mem::discriminant(other).hash(&mut h),
@@ -745,6 +749,27 @@ mod tests {
     use super::*;
     use photocraft_color::BlendMode;
     use photocraft_doc::FxCommon;
+
+    #[test]
+    fn filled_shape_key_preserves_translation_but_detects_deformation() {
+        use photocraft_doc::{Fill, Path, ShapeLayer, Subpath};
+        let mut layer = Layer::new(
+            "shape",
+            LayerContent::Shape(ShapeLayer {
+                path: Path::new(vec![Subpath::polygon(&[(20.0, 20.0), (70.0, 20.0), (70.0, 60.0), (20.0, 60.0)])]),
+                fill: Some(Fill::Solid(photocraft_color::Color::WHITE)),
+                ..Default::default()
+            }),
+        );
+        let canvas = Rect::new(0, 0, 200, 200);
+        let before = shape_key(&layer, canvas);
+        let LayerContent::Shape(shape) = &mut layer.content else { unreachable!() };
+        shape.path = shape.path.transform(&photocraft_geom::Affine::translate(13.0, 7.0));
+        assert_eq!(before, shape_key(&layer, canvas));
+        let LayerContent::Shape(shape) = &mut layer.content else { unreachable!() };
+        shape.path.subpaths[0].knots[1].anchor.x += 3.0;
+        assert_ne!(before, shape_key(&layer, canvas));
+    }
 
     #[test]
     fn programs_key_on_geometry_not_colour() {
