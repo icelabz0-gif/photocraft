@@ -740,6 +740,16 @@ fn hdr_hue_saturation_bright_colours() {
         check(&mut g, &d, &format!("hue {hue} saturation {saturation} on bright colours"));
         d.layers.pop();
     }
+    // Hue Curves evaluate as Hue/Saturation's ranges, unclipped at 32 bits on both.
+    let pts = |v: &[(f32, f32)]| v.iter().map(|&(input, output)| CurvePoint { input, output }).collect::<Vec<_>>();
+    let hc = Adjustment::HueCurves {
+        hue: pts(&[(0.0, 30.0), (60.0, 0.0), (120.0, 0.0), (180.0, -20.0), (240.0, 0.0), (300.0, 0.0)]),
+        saturation: pts(&[(0.0, 1.4), (120.0, 1.0), (240.0, 0.6)]),
+        luminance: Vec::new(),
+    };
+    d.layers.push(Layer::new("hc", LayerContent::Adjustment(hc)));
+    check(&mut g, &d, "hue curves on bright colours");
+    d.layers.pop();
     // A PSD can store a Colorize saturation beyond 100: clamped before the 32-bit scaling on both.
     let hs = Adjustment::HueSaturation { hue: 200.0, saturation: 150.0, lightness: 50.0, colorize: true, ranges: HueRange::defaults() };
     d.layers.push(Layer::new("hs", LayerContent::Adjustment(hs)));

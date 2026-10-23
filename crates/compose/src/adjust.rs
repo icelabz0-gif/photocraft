@@ -273,7 +273,8 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
                 if dh == 0.0 && ds == 0.0 && dl == 0.0 {
                     return c;
                 }
-                range_lightness(hue_saturation(c, dh, ds.clamp(-1.0, 1.0), 0.0, false), dl)
+                // At 32 bits unclipped, as Hue/Saturation and the GPU kernel (bright colours stay colours).
+                range_lightness(hue_saturation_in(c, dh, ds.clamp(-1.0, 1.0), 0.0, false, depth), dl)
             })
         }
         // Not evaluated: identity (still round-trips through PSD).

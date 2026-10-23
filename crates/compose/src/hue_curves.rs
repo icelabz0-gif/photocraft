@@ -107,10 +107,11 @@ pub fn tables(hue: &[CurvePoint], saturation: &[CurvePoint], luminance: &[CurveP
 /// Grid points per axis of the Color Lookup Hue Curves are saved to PSD as ([`as_lookup`]).
 pub const LOOKUP_SIZE: u32 = 33;
 
-/// Hue Curves as the Color Lookup it renders as: a [`LOOKUP_SIZE`]³ cube (red fastest) of the
+/// Hue Curves approximated as a Color Lookup: a [`LOOKUP_SIZE`]³ cube (red fastest) of the
 /// adjustment applied to each grid colour. Photoshop has no Hue Curves, so PSD files carry this
-/// lookup instead (it renders the same, trilinearly interpolated, but the curves are no longer
-/// editable). `None` for any other adjustment.
+/// lookup instead. It is an approximation: the reader interpolates trilinearly between grid
+/// colours, so an edit narrower than the grid's hue spacing (a few degrees at full saturation)
+/// is softened or lost, and the curves are no longer editable. `None` for any other adjustment.
 pub fn as_lookup(adj: &photocraft_doc::Adjustment) -> Option<photocraft_doc::Adjustment> {
     let photocraft_doc::Adjustment::HueCurves { .. } = adj else { return None };
     let n = LOOKUP_SIZE as usize;
@@ -202,6 +203,19 @@ mod tests {
         let out = run(&a, &[BLUE, RED]);
         assert!(rgb_to_hsl(out[0]).2 < rgb_to_hsl(BLUE).2 - 0.05, "blue darker: {:?}", out[0]);
         assert_eq!(out[1], RED);
+    }
+
+    #[test]
+    fn thirty_two_bit_curves_keep_bright_colours() {
+        // Red at twice white in a 32-bit document, hue +30: Hue/Saturation's 32-bit evaluation
+        // (the GPU's too) keeps it a bright orange; the 8/16-bit one makes it white.
+        let adj = curves(anchored(0.0, 30.0, 0.0), Vec::new(), Vec::new());
+        let mut b = Buffer { rect: crate::Rect::new(0, 0, 1, 1), px: vec![[2.0, 0.0, 0.0, 1.0]] };
+        crate::adjust::apply_depth(&adj, &mut b, crate::adjust::Transfer::Gamma(1.0), Some(photocraft_color::SampleType::F32));
+        let got = [b.px[0][0], b.px[0][1], b.px[0][2]];
+        let want = crate::adjust::hue_saturation_in([2.0, 0.0, 0.0], 30.0, 0.0, 0.0, false, Some(photocraft_color::SampleType::F32));
+        assert_eq!(got, want);
+        assert!(got.iter().all(|v| v.is_finite()) && got[0] > 1.0 && got[2] < 0.5, "{got:?}");
     }
 
     #[test]
