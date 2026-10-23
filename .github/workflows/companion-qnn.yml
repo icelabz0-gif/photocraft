@@ -60,7 +60,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pure Core assertions failed.' }
       - name: Run pure packaging boundaries, manifest and script syntax assertions
         run: |
-          ./examples/onnx_qnn_worker/Tests/Packaging.Tests.ps1 -ResultsPath ./artifacts/qnn-tests/packaging-results.json 2>&1 |
+          ./examples/onnx_qnn_worker/Tests/Packaging.Tests.ps1 -ResultsPath ./artifacts/qnn-tests/packaging-results.json *>&1 |
             Tee-Object ./artifacts/qnn-tests/packaging-tests.log
       - name: Record exact validation scope
         if: always()
