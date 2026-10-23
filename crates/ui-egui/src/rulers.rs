@@ -433,14 +433,24 @@ fn ruler_scale_of(app: &PhotocraftApp, doc: Option<&photocraft_doc::Document>, x
     (px_per_unit, nice_step(60.0 / (zoom as f64 * px_per_unit).max(1e-6), unit == Unit::Pixels))
 }
 
+/// The spacing (document px) of the ruler ticks Shift snaps to: the minor ticks, tenths of the
+/// labelled `step` in `unit` (`px_per_unit` px each). A ruler in pixels snaps no closer than a
+/// whole pixel: deep in, its minor ticks fall between pixels, and a guide or the zero point put on
+/// one would sit across a pixel.
+fn snap_tick(unit: Unit, px_per_unit: f64, step: f64) -> f64 {
+    let tick = step / 10.0 * px_per_unit;
+    if unit == Unit::Pixels { tick.max(1.0) } else { tick }
+}
+
 /// `pos` (document px) moved to the nearest tick mark the ruler draws (counted from the zero point): where a guide lands when
-/// Shift is held while dragging it out of a ruler or moving it, as in Photoshop (#3770).
+/// Shift is held while dragging it out of a ruler or moving it, as in Photoshop (#3770). In pixels, on whole pixels at least
+/// ([`snap_tick`]).
 fn snap_to_tick(app: &PhotocraftApp, xf: &ViewXform, vertical: bool, pos: f64) -> f64 {
     // A vertical guide sits at an x position, which the top ruler measures.
     let (px_per_unit, step) = ruler_scale(app, xf, !vertical);
     // Ticks count from the zero point (#2955), which a vertical guide measures along x.
     let origin = app.session.active().map_or(0.0, |d| d.doc.ruler_origin[usize::from(!vertical)]);
-    snap_px_to_tick(pos, origin, step / 10.0 * px_per_unit)
+    snap_px_to_tick(pos, origin, snap_tick(app.session.prefs().units_and_rulers.rulers, px_per_unit, step))
 }
 
 /// The number a ruler prints at the tick `v` (in ruler units). Like Photoshop, rulers show the
@@ -451,7 +461,8 @@ fn ruler_label(v: f64, step: f64, whole: bool) -> String {
 }
 
 /// The rulers of `doc`'s view in `full`: background, ticks and labels from its zero point.
-/// Returns the top, left and corner rects, the painter, the zero point and the minor tick sizes.
+/// Returns the top, left and corner rects, the painter, the zero point and the tick sizes Shift
+/// snaps to ([`snap_tick`]).
 #[allow(clippy::type_complexity)]
 fn paint(
     app: &PhotocraftApp,
@@ -482,7 +493,7 @@ fn paint(
     for vertical in [false, true] {
         let p = p.with_clip_rect(if vertical { left } else { top });
         let (px_per_unit, step) = ruler_scale_of(app, Some(doc), xf, vertical);
-        ticks[usize::from(vertical)] = step * px_per_unit / 10.0;
+        ticks[usize::from(vertical)] = snap_tick(unit, px_per_unit, step);
         let (u0, u1) = if vertical {
             ruler_range(xf, left.left_top(), left.left_bottom(), 1, px_per_unit, origin)
         } else {
@@ -1480,6 +1491,31 @@ mod tests {
         app.run("view.setRulerOrigin", json!({"x": 3, "y": 0})).unwrap();
         assert_eq!(snap_to_tick(&app, &xf, true, 37.0), 33.0);
         assert_eq!(snap_to_tick(&app, &xf, false, 37.0), 40.0);
+    }
+
+    /// In pixels Shift snaps to whole pixels at least: deep in, where the ruler's minor ticks are
+    /// 0.5 px (labels every 5 px) or 0.1 px (labels every pixel) apart, a guide still lands on a
+    /// pixel. Other units keep their minor ticks.
+    #[test]
+    fn deep_in_shift_snaps_pixel_rulers_to_whole_pixels() {
+        let full = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+        let rect = Rect::from_min_max(full.min + vec2(RULER, RULER), full.max);
+        let xf = |zoom: f32| ViewXform { rect, zoom, center: [128.0, 64.0], flip: false, rotation: 0.0, aspect: 1.0 };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 256, "height": 128})).unwrap();
+        assert_eq!(ruler_scale(&app, &xf(16.0), false).1, 5.0, "labels every 5 px at 1600 %");
+        assert_eq!(snap_to_tick(&app, &xf(16.0), true, 37.3), 37.0);
+        assert_eq!(snap_to_tick(&app, &xf(16.0), true, 37.6), 38.0);
+        assert_eq!(ruler_scale(&app, &xf(64.0), true).1, 1.0, "labels every pixel at 6400 %");
+        assert_eq!(snap_to_tick(&app, &xf(64.0), false, 37.3), 37.0);
+        // Ticks coarser than a pixel stay as they were: every 5 px at 200 %.
+        assert_eq!(snap_to_tick(&app, &xf(2.0), true, 37.0), 35.0);
+        // Millimetres: deep in, the ticks a fraction of a pixel apart are kept.
+        app.run("prefs.set", json!({"path": "unitsAndRulers.rulers", "value": "mm"})).unwrap();
+        let (px_per_mm, step) = ruler_scale(&app, &xf(16.0), false);
+        let tick = step / 10.0 * px_per_mm;
+        assert!(tick < 1.0, "a sub-pixel tick: {tick}");
+        assert!((snap_to_tick(&app, &xf(16.0), true, 37.3) - (37.3 / tick).round() * tick).abs() < 1e-9);
     }
 
     /// A guide already on the canvas, Shift-dragged with the Move tool, lands on the nearest ruler
