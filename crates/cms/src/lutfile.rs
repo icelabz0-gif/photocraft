@@ -205,11 +205,16 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
             header |= !line.is_empty();
             continue;
         }
-        let v: Vec<f64> = line.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        // Every token is a number: a malformed one is refused rather than dropped, which could
+        // turn a shaper into an even ramp and lose it silently.
+        let v: Vec<f64> = line.split_whitespace().map(str::parse).collect::<Result<_, _>>().map_err(|_| LutError(format!("bad line `{line}`")))?;
         if v.len() == 3 {
             rows.push([v[0], v[1], v[2]]);
-        } else if v.len() > 3 && shaper.is_none() && rows.is_empty() {
-            // The input shaper: one row of values ahead of the table.
+        } else if v.len() > 3 {
+            // The input shaper: one row of values ahead of the table, and only one.
+            if shaper.is_some() || !rows.is_empty() {
+                return err(format!("a second shaper row `{line}`"));
+            }
             shaper = Some(v);
         }
     }
@@ -531,6 +536,17 @@ mod tests {
             assert!((at(2.0 / 3.0) - 512.0 / 1023.0).abs() < 1.0 / 4095.0, "{n}³: {}", at(2.0 / 3.0));
             assert!((at(0.5) - 256.0 / 1023.0).abs() < 1.0 / 4095.0, "{n}³: halfway between the knots");
         }
+    }
+
+    /// #9170 review (bommerts): a shaper row with a token that isn't a number, or a second
+    /// shaper row, is refused rather than silently dropped.
+    #[test]
+    fn three_dl_malformed_shaper_rows_are_refused() {
+        let table = identity_3dl(&[0, 1, 2, 3], 4);
+        let body = table.split_once('\n').unwrap().1;
+        assert!(parse_3dl(&format!("0 341 junk 682 1023\n{body}")).is_err(), "a junk token");
+        assert!(parse_3dl(&format!("0 114 455 1023\n0 114 455 1023\n{body}")).is_err(), "two shaper rows");
+        assert!(parse_3dl(&format!("0 114 455 1023\n{body}")).is_ok());
     }
 
     #[test]
