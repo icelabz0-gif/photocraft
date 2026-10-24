@@ -1000,7 +1000,7 @@ fn batch_plays_a_photoshop_actions_file() {
 /// `photocraft_cli::run` in-process: `(exit code, stdout, stderr)`.
 fn invoke(args: &[&str]) -> (i32, String, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let code = photocraft_cli::run(&args, &mut out, &mut err);
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
