@@ -472,13 +472,36 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
         ));
     }
     let name = desc_text(&desc, "LUT3DFileName").or_else(|| desc_text(&desc, "NM  ")).unwrap_or_default();
+    // Photoshop's defaults are data RGB and table BGR. BGR data swaps the output red and blue, RGB
+    // table order the input axes (Photoshop 27.11, #9126); baked in, so saves write the defaults.
+    let swap_out = desc_enum(&desc, "dataOrder") == Some(b"bgrOrder");
+    let swap_in = desc_enum(&desc, "tableOrder") == Some(b"rgbOrder");
+    let data = if swap_in || swap_out { reorder_lookup(&lut.data, lut.size, swap_in, swap_out) } else { lut.data };
     Ok(Adjustment::ColorLookup {
         name,
         size: lut.size as u32,
-        lut: Some(std::sync::Arc::new(lut.data)),
+        lut: Some(std::sync::Arc::new(data)),
         tetrahedral: false,
         dither: desc_bool(&desc, "Dthr").unwrap_or(false),
     })
+}
+
+/// A red-fastest `n`³ table with red and blue swapped on its input axes and/or in its outputs.
+fn reorder_lookup(data: &[f32], n: usize, swap_in: bool, swap_out: bool) -> Vec<f32> {
+    let mut out = Vec::with_capacity(data.len());
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                let at = if swap_in { (r * n + g) * n + b } else { (b * n + g) * n + r } * 3;
+                let mut c: [f32; 3] = data.get(at..at + 3).and_then(|s| s.try_into().ok()).unwrap_or_default();
+                if swap_out {
+                    c.reverse();
+                }
+                out.extend(c);
+            }
+        }
+    }
+    out
 }
 
 /// The descriptor of a `vibA` / `blwh` block: a 4-byte descriptor version (16), then the descriptor.
@@ -1161,6 +1184,42 @@ mod tests {
             let reason = unreadable_reason(b"clrL", &raw).expect("custom domain has an explanation");
             assert!(reason.contains("DOMAIN_MIN") && reason.contains("DOMAIN_MAX"), "{reason}");
             assert!(reason.to_ascii_lowercase().contains("not supported"), "{reason}");
+        }
+    }
+
+    /// Photoshop 27.11 with the issue's F(r,g,b) = (r, 0.25 + 0.5g, 0.125 + 0.25b): BGR data
+    /// swaps the output red and blue, RGB table order the input axes (#9126).
+    #[test]
+    fn color_lookup_data_and_table_order_are_baked_in() {
+        let f = |r: f32, g: f32, b: f32| [r, 0.25 + 0.5 * g, 0.125 + 0.25 * b];
+        let mut cube = String::from("LUT_3D_SIZE 2\n");
+        for i in 0..8 {
+            let [r, g, b] = f((i & 1) as f32, (i >> 1 & 1) as f32, (i >> 2 & 1) as f32);
+            cube.push_str(&format!("{r} {g} {b}\n"));
+        }
+        let en = |t: &str, val: &str| Value::Enumerated { type_id: photocraft_psd::descriptor::Id::new(t), value: photocraft_psd::descriptor::Id::new(val) };
+        // The node at input (1, 0, 0) for each order.
+        let cases = [
+            ("rgbOrder", "bgrOrder", f(1.0, 0.0, 0.0)),
+            ("bgrOrder", "bgrOrder", [0.125, 0.25, 1.0]),
+            ("rgbOrder", "rgbOrder", f(0.0, 0.0, 1.0)),
+            ("bgrOrder", "rgbOrder", [0.375, 0.25, 0.0]),
+        ];
+        for (data, table, want) in cases {
+            let desc = Descriptor::new("null")
+                .with("LUTFormat", en("LUTFormatType", "LUTFormatCUBE"))
+                .with("dataOrder", en("colorLookupOrder", data))
+                .with("tableOrder", en("colorLookupOrder", table))
+                .with("LUT3DFileData", Value::RawData(cube.clone().into_bytes()));
+            let mut block = vec![0, 1];
+            block.extend(VersionedDescriptor::new(desc).to_bytes());
+            let a = parse(b"clrL", &block, None, Channels::Rgb);
+            let Adjustment::ColorLookup { lut: Some(t), size: 2, .. } = &a else { panic!("{a:?}") };
+            assert_eq!(&t[3..6], &want, "data {data}, table {table}");
+            // Saved with the default orders, the baked table reads back unchanged.
+            let back = parse(b"clrL", &write(&a)[0].1, None, Channels::Rgb);
+            let Adjustment::ColorLookup { lut: Some(b), .. } = &back else { panic!("{back:?}") };
+            assert_eq!(b, t, "data {data}, table {table}");
         }
     }
 
