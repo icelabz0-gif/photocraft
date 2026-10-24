@@ -92,7 +92,17 @@ fn cicp_profile(img: &Image) -> Option<Arc<Vec<u8>>> {
 /// milliseconds (a still GIF has one). One frame at a time becomes a document, so the caller
 /// can flatten and drop it. Returns the number of frames; stops at the first error `each` gives.
 pub fn import_gif_frames(name: &str, bytes: &[u8], each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
-    let frames = codecs::decode_gif_frames(bytes, &codecs::DecodeOptions::default())?;
+    import_frames(name, codecs::decode_gif_frames(bytes, &codecs::DecodeOptions::default())?, each)
+}
+
+/// Every frame of a WebP as a single-layer document, as [`import_gif_frames`] does for a GIF: an
+/// animation's frames composited onto its canvas, with their durations in milliseconds; a still
+/// WebP is one frame.
+pub fn import_webp_frames(name: &str, bytes: &[u8], each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
+    import_frames(name, codecs::decode_webp_frames(bytes, &codecs::DecodeOptions::default())?, each)
+}
+
+fn import_frames(name: &str, frames: Vec<codecs::AnimationFrame>, each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
     let n = frames.len();
     for f in frames {
         each(image_to_document(name, &f.image)?.document, f.delay_ms)?;
@@ -272,7 +282,7 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
     doc.layers.push(layer);
     doc.icc_profile = img.icc.clone().map(Arc::new);
     doc.metadata.exif = img.meta.exif.clone().map(Arc::new);
-    doc.metadata.xmp = img.meta.xmp.clone();
+    doc.metadata.xmp = img.meta.xmp.as_deref().map(Arc::from);
     doc.metadata.text = img.meta.text.clone();
     if let Some((x, y)) = img.meta.dpi {
         doc.resolution_dpi = x;
@@ -403,7 +413,10 @@ struct FlatSource<'a> {
     /// The model of the pixels: the document's for the single layer, else CMYK, gray or RGB.
     mode: ColorMode,
     sample: CSample,
-    /// The CMYK profile the composite is separated through, for a CMYK target.
+    /// A CMYK composite mixed on ink values by the native CMYK compositor, so opaque pixels keep
+    /// their exact inks ([`photocraft_compose::cmyk::renders_inks`]).
+    inks: bool,
+    /// The CMYK profile any other CMYK composite is converted back through, for a CMYK target.
     space: Option<Arc<photocraft_color::convert::CmykSpace>>,
     icc: Option<Vec<u8>>,
     /// Rows per band; 0 picks them from the size (tests ask for small bands).
@@ -421,16 +434,16 @@ impl<'a> FlatSource<'a> {
         let native = single.filter(|_| fmt.mode != ColorMode::Lab || lab_target);
         let mut icc = doc.icc_profile.as_ref().map(|i| i.to_vec());
         if native.is_some() {
-            return Ok(Self { doc, native, mode: fmt.mode, sample, space: None, icc, rows: 0 });
+            return Ok(Self { doc, native, mode: fmt.mode, sample, inks: false, space: None, icc, rows: 0 });
         }
         if single.is_none() {
             let count = doc.layer_count();
             warnings.push(format!("{count} layer(s) flattened; layers, masks and blend modes are not kept"));
         }
-        let cmyk = fmt.mode == ColorMode::Cmyk && cmyk_target;
-        // Only a CMYK target needs the document's profile; RGB-only targets keep the compositor's
-        // own handling (built-in coated CMYK when the embedded profile is unusable).
-        let space = if cmyk {
+        if fmt.mode == ColorMode::Cmyk && cmyk_target {
+            // A CMYK target is written as CMYK with the document's own profile (#2220), which it
+            // therefore needs; RGB-only targets keep the compositor's own handling (built-in
+            // coated CMYK when the embedded profile is unusable).
             use photocraft_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
             let profile = match doc.icc_profile.as_ref() {
                 Some(bytes) => Profile::parse(bytes).map_err(|e| IoError::Unsupported(format!("invalid CMYK composite profile: {e}")))?,
@@ -445,23 +458,24 @@ impl<'a> FlatSource<'a> {
             if icc.is_none() {
                 icc = Some(profile.to_bytes().to_vec());
             }
-            photocraft_compose::cmyk_space(doc)
-        } else {
-            None
-        };
-        if (fmt.mode == ColorMode::Cmyk && !cmyk) || fmt.mode == ColorMode::Lab {
-            // RGB-only targets use the sRGB composite directly, without reseparating CMYK.
+            let inks = photocraft_compose::cmyk::renders_inks(doc);
+            let space = if inks {
+                None
+            } else {
+                // Through RGB and back: the colour model is kept, exact ink values are not.
+                warnings.push("CMYK composite converted back through the document's CMYK profile; ink values can differ from the layers'".to_string());
+                photocraft_compose::cmyk_space(doc)
+            };
+            return Ok(Self { doc, native: None, mode: ColorMode::Cmyk, sample, inks, space, icc, rows: 0 });
+        }
+        if matches!(fmt.mode, ColorMode::Cmyk | ColorMode::Lab) {
+            // RGB-only targets use the sRGB composite directly, without separating CMYK; the
+            // compositor renders Lab documents in sRGB. Either way the file is tagged sRGB.
             warnings.push(format!("{:?} composite written as sRGB RGB (colour-managed conversion)", fmt.mode));
             icc = Some(photocraft_cms::Builtin::Srgb.profile().to_bytes().to_vec());
         }
-        let mode = if cmyk {
-            ColorMode::Cmyk
-        } else if fmt.mode == ColorMode::Grayscale {
-            ColorMode::Grayscale
-        } else {
-            ColorMode::Rgb
-        };
-        Ok(Self { doc, native: None, mode, sample, space, icc, rows: 0 })
+        let mode = if fmt.mode == ColorMode::Grayscale { ColorMode::Grayscale } else { ColorMode::Rgb };
+        Ok(Self { doc, native: None, mode, sample, inks: false, space: None, icc, rows: 0 })
     }
 
     fn layout(&self, alpha: bool) -> ChannelLayout {
@@ -473,7 +487,7 @@ impl<'a> FlatSource<'a> {
         let doc = self.doc;
         codecs::Metadata {
             exif: doc.metadata.exif.as_ref().map(|e| e.to_vec()),
-            xmp: doc.metadata.xmp.clone(),
+            xmp: doc.metadata.xmp.as_deref().map(str::to_owned),
             text: doc.metadata.text.clone(),
             dpi: Some((doc.resolution_dpi, doc.resolution_dpi)),
             ..Default::default()
@@ -509,52 +523,74 @@ impl<'a> FlatSource<'a> {
             return Ok(());
         }
         let cs = self.sample;
-        let cmyk = self.mode == ColorMode::Cmyk;
-        let gray = self.mode == ColorMode::Grayscale;
+        let put = move |out: &mut Vec<u8>, v: f32| {
+            let v = if v.is_nan() { 0.0 } else { v };
+            match cs {
+                CSample::U8 => out.push((v.clamp(0.0, 1.0) * 255.0).round() as u8),
+                CSample::U16 => out.extend_from_slice(&((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_ne_bytes()),
+                CSample::F16 | CSample::F32 => out.extend_from_slice(&v.to_ne_bytes()),
+            }
+        };
         let colors = self.layout(false).channels();
-        let space = &self.space;
-        // Rendered and quantised in bands (no full-size float composite), with alpha.
-        photocraft_compose::render_bands(doc, doc.bounds(), self.rows, |band| -> Result<(), IoError> {
-            let translucent = band.px.iter().any(|p| p[3] < 1.0 || p[3].is_nan());
-            let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
-                photocraft_color::convert::with_cmyk_space(space.as_ref(), || {
-                    let mut out = Vec::with_capacity(range.len() * (colors + 1) * cs.bytes());
-                    let mut put = |v: f32| {
-                        let v = if v.is_nan() { 0.0 } else { v };
-                        match cs {
-                            CSample::U8 => out.push((v.clamp(0.0, 1.0) * 255.0).round() as u8),
-                            CSample::U16 => out.extend_from_slice(&((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_ne_bytes()),
-                            CSample::F16 | CSample::F32 => out.extend_from_slice(&v.to_ne_bytes()),
-                        }
-                    };
-                    let mut converted = [0.0; 5];
-                    for p in &band.px[range] {
-                        if cmyk {
-                            let channels = photocraft_raster::from_rgba_into(&fmt, *p, &mut converted);
-                            for value in converted.iter().take(channels) {
-                                put(*value);
-                            }
-                            continue;
-                        } else if gray {
-                            put(photocraft_color::convert::rgb_to_gray([p[0], p[1], p[2]]));
-                        } else {
-                            put(p[0]);
-                            put(p[1]);
-                            put(p[2]);
-                        }
-                        put(p[3]);
-                    }
-                    out
-                })
-            });
-            let mut data = Vec::with_capacity(band.px.len() * (colors + 1) * cs.bytes());
+        // Bands of quantised samples with alpha; the alpha is dropped here when not wanted.
+        let mut emit = |rows: u32, parts: Vec<Vec<u8>>, translucent: bool| -> Result<(), IoError> {
+            let mut data = Vec::with_capacity(parts.iter().map(Vec::len).sum());
             for part in parts {
                 data.extend_from_slice(&part);
             }
             if !alpha {
                 compact_alpha(&mut data, colors * cs.bytes(), cs.bytes());
             }
-            sink(band.rect.height(), data, translucent)
+            sink(rows, data, translucent)
+        };
+        if self.inks {
+            // Mixed on ink values, rendered and quantised in bands.
+            let rendered = photocraft_compose::cmyk::render_cmyk_bands(doc, doc.bounds(), self.rows, |band| -> Result<(), IoError> {
+                let translucent = band.px.iter().any(|p| p[4] < 1.0 || p[4].is_nan());
+                let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
+                    let mut out = Vec::with_capacity(range.len() * 5 * cs.bytes());
+                    for p in band.px.get(range).unwrap_or_default() {
+                        for v in p {
+                            put(&mut out, *v);
+                        }
+                    }
+                    out
+                });
+                emit(band.rect.height(), parts, translucent)
+            });
+            return rendered.unwrap_or_else(|| Err(IoError::Unsupported("the CMYK compositor can't mix this document on its inks".into())));
+        }
+        let cmyk = self.mode == ColorMode::Cmyk;
+        let gray = self.mode == ColorMode::Grayscale;
+        let space = &self.space;
+        // Rendered and quantised in bands (no full-size float composite), with alpha.
+        photocraft_compose::render_bands(doc, doc.bounds(), self.rows, |band| -> Result<(), IoError> {
+            let translucent = band.px.iter().any(|p| p[3] < 1.0 || p[3].is_nan());
+            let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
+                // A CMYK composite came through the document's CMYK profile: convert back through it.
+                photocraft_color::convert::with_cmyk_space(space.as_ref(), || {
+                    let mut out = Vec::with_capacity(range.len() * (colors + 1) * cs.bytes());
+                    let mut converted = [0.0; 5];
+                    for p in band.px.get(range).unwrap_or_default() {
+                        if cmyk {
+                            let channels = photocraft_raster::from_rgba_into(&fmt, *p, &mut converted);
+                            for value in converted.iter().take(channels) {
+                                put(&mut out, *value);
+                            }
+                            continue;
+                        } else if gray {
+                            put(&mut out, photocraft_color::convert::rgb_to_gray([p[0], p[1], p[2]]));
+                        } else {
+                            put(&mut out, p[0]);
+                            put(&mut out, p[1]);
+                            put(&mut out, p[2]);
+                        }
+                        put(&mut out, p[3]);
+                    }
+                    out
+                })
+            });
+            emit(band.rect.height(), parts, translucent)
         })
     }
 }
