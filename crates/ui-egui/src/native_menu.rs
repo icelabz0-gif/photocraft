@@ -851,6 +851,51 @@ pub(crate) fn state_hash(app: &PhotocraftApp, input: Option<u64>) -> u64 {
     h.finish()
 }
 
+/// A native menu backend for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Backend, Event, MenuBar, Node};
+
+    /// Pops context menus up for the test: records them, and reports what the test queues.
+    #[derive(Clone, Default)]
+    pub(crate) struct Popups(pub(crate) std::rc::Rc<std::cell::RefCell<(Vec<Popup>, Vec<Event>)>>);
+
+    /// A popped-up context menu: its serial, rows and position.
+    pub(crate) type Popup = (u64, Vec<Node>, [f32; 2]);
+
+    impl Backend for Popups {
+        fn sync(&mut self, _bar: &MenuBar) {}
+        fn drain(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.0.borrow_mut().1)
+        }
+        fn can_popup(&self) -> bool {
+            true
+        }
+        fn popup(&mut self, serial: u64, nodes: &[Node], pos: [f32; 2]) -> bool {
+            self.0.borrow_mut().0.push((serial, nodes.to_vec(), pos));
+            true
+        }
+    }
+
+    impl Popups {
+        /// Report `label`'s pick in the last menu, then its close, as AppKit does; the app sees them
+        /// on its next frame.
+        pub(crate) fn choose(&self, label: &str) {
+            let (serial, nodes, _) = self.0.borrow().0.last().cloned().expect("a native menu");
+            let id = find(&nodes, label).unwrap_or_else(|| panic!("{label} in {nodes:?}"));
+            self.0.borrow_mut().1.extend([Event::ContextChosen { serial, id }, Event::ContextClosed(serial)]);
+        }
+    }
+
+    fn find(nodes: &[Node], label: &str) -> Option<String> {
+        nodes.iter().find_map(|n| match n {
+            Node::Item(it) if it.label == label => Some(it.id.clone()),
+            Node::Submenu { children, .. } => find(children, label),
+            _ => None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1344,27 +1389,7 @@ mod tests {
         }
     }
 
-    /// A backend that pops context menus up for the test: it records them, and reports what the
-    /// test queues.
-    #[derive(Clone, Default)]
-    struct Popups(std::rc::Rc<std::cell::RefCell<(Vec<Popup>, Vec<Event>)>>);
-
-    /// A popped-up context menu: its serial, rows and position.
-    type Popup = (u64, Vec<Node>, [f32; 2]);
-
-    impl Backend for Popups {
-        fn sync(&mut self, _bar: &MenuBar) {}
-        fn drain(&mut self) -> Vec<Event> {
-            std::mem::take(&mut self.0.borrow_mut().1)
-        }
-        fn can_popup(&self) -> bool {
-            true
-        }
-        fn popup(&mut self, serial: u64, nodes: &[Node], pos: [f32; 2]) -> bool {
-            self.0.borrow_mut().0.push((serial, nodes.to_vec(), pos));
-            true
-        }
-    }
+    use super::testing::Popups;
 
     /// A right-click on a Layers row pops its menu up natively (no egui popup); the item chosen there
     /// runs through the panel's own code, here Color › Red on the clicked layer. With a control

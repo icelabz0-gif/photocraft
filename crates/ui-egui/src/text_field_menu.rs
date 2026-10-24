@@ -172,8 +172,14 @@ impl egui::plugin::Plugin for TextFieldMenu {
 /// field has a selection. A press inside the selection the field had at the end of the last pass
 /// (`last`) keeps it: egui moved the caret to the pointer.
 fn secondary_press_in(ctx: &Context, field: Id, last: Option<(Id, CCursorRange)>) -> Option<(Pos2, bool)> {
-    let (pressed, origin) = ctx.input(|i| (i.pointer.button_pressed(PointerButton::Secondary), i.pointer.press_origin()));
-    let pos = origin.filter(|_| pressed)?;
+    // From the press event, not egui's press origin: egui forgets that on the release, and with
+    // native menus (macOS) the release comes in the same pass (`context_menu::MenuPress`).
+    let pos = ctx.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            Event::PointerButton { pos, button: PointerButton::Secondary, pressed: true, .. } => Some(*pos),
+            _ => None,
+        })
+    })?;
     let mut state = egui::TextEdit::load_state(ctx, field)?;
     let response = ctx.read_response(field)?;
     if !response.interact_rect.contains(pos) || ctx.layer_id_at(pos) != Some(response.layer_id) {
@@ -397,5 +403,80 @@ mod tests {
         assert_eq!(choose(&mut h, "Cut").as_deref(), Some("Alpha"), "Cut copies the selected text");
         assert_eq!(text(&h), "", "and removes it from the field");
         assert!(h.ctx.memory(|m| m.has_focus(field)), "the rename is still being typed");
+    }
+
+    /// With native menus (macOS) a right press in a text field opens its edit menu as a native
+    /// menu, on the press; its Copy and Select All act on the field as the egui menu's do.
+    #[test]
+    fn the_edit_menu_is_native_with_native_menus() {
+        let popups = crate::native_menu::testing::Popups::default();
+        let (mut h, field) = renaming();
+        h.state_mut().services.native_menu = Some(crate::native_menu::NativeMenu::new(Box::new(popups.clone())));
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        // What the app's input hook does with the OS's events.
+        let feed = |h: &mut Harness<'_, PhotocraftApp>, events: Vec<Event>| {
+            let mut events = events;
+            h.state_mut().menu_press.complete(&ctx, &mut events, |_| false);
+            crate::panel_docking::take_tab_right_click(h.state(), &ctx, &mut events);
+            let mut raw = egui::RawInput { events, ..Default::default() };
+            if let Some(m) = h.state_mut().services.native_menu.as_mut() {
+                m.raw_input(&mut raw);
+            }
+            for e in raw.events {
+                h.event(e);
+            }
+            h.step();
+        };
+        let at = ctx.read_response(field).expect("field drawn").rect.center();
+        let right = |pressed| Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+        feed(&mut h, vec![Event::PointerMoved(at)]);
+        feed(&mut h, vec![right(true)]);
+        h.run_steps(2);
+        let menus = popups.0.borrow().0.clone();
+        assert_eq!(menus.len(), 1, "one native menu, on the press: {menus:?}");
+        let labels: Vec<String> = menus[0].1.iter().filter_map(|n| if let crate::native_menu::Node::Item(it) = n { Some(it.label.clone()) } else { None }).collect();
+        assert_eq!(labels, ["Undo", "Cut", "Copy", "Paste", "Delete", "Select All"]);
+        assert!(item(&h, "Copy").is_none(), "no egui menu");
+        assert!(h.state().ui.canvas_tool_menu.is_none(), "nor the canvas menu");
+        // The rename starts with the whole name selected: Copy copies it.
+        popups.choose("Copy");
+        feed(&mut h, vec![]);
+        let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+            OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        });
+        assert_eq!(copied.as_deref(), Some("Alpha"));
+        assert_eq!(open_on(&h.ctx), None, "the menu closed");
+        // The release that follows opens nothing, and the field keeps its text.
+        feed(&mut h, vec![right(false)]);
+        h.run_steps(2);
+        assert_eq!(popups.0.borrow().0.len(), 1);
+        assert_eq!(text(&h), "Alpha");
+    }
+
+    /// A right press and its release in one pass (as the app's input hook delivers a press with
+    /// native menus, `context_menu::MenuPress`) still opens the field's menu: egui has forgotten
+    /// the press origin by the end of that pass.
+    #[test]
+    fn a_press_and_release_in_one_pass_opens_the_menu() {
+        let ctx = egui::Context::default();
+        ctx.add_plugin(super::TextFieldMenu);
+        let field = Id::new("field");
+        let mut text = String::from("Alpha");
+        let mut frame = |events: Vec<Event>| {
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text).id(field));
+            })
+            .drop_without_applying_deltas();
+        };
+        frame(Vec::new());
+        ctx.memory_mut(|m| m.request_focus(field));
+        frame(Vec::new());
+        let at = ctx.read_response(field).expect("field drawn").rect.center();
+        let right = |pressed| Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+        frame(vec![Event::PointerMoved(at)]);
+        frame(vec![right(true), right(false)]);
+        assert_eq!(open_on(&ctx), Some(field));
     }
 }
