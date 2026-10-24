@@ -82,11 +82,21 @@ fn parallel_compositor_builds_leave_the_shader_cache_intact() {
         };
         let format = Compositor::preferred_acc_format(&adapter);
         // The first build compiles every shader; the rest are cache hits, so their threads take
-        // and release references to the cached shaders densely.
-        for _ in 0..builds {
-            let built = Compositor::try_new_with_format(&device, format);
-            assert!(built.is_ok(), "round {round}: {:?}", built.err());
-        }
+        // and release references to the cached shaders densely. The builds start together, so
+        // overlapping `Compositor::build` calls are exercised too (the process-wide lock).
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..builds)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let built = Compositor::try_new_with_format(&device, format);
+                        assert!(built.is_ok(), "round {round}: {:?}", built.err());
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("compositor build thread panicked");
+            }
+        });
         // Dropping the device releases every cached blob: a freed one aborts here.
     }
 }
