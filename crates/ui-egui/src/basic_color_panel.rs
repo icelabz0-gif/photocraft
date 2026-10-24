@@ -11,6 +11,7 @@
 
 use egui::{Align2, CornerRadius, Sense, Stroke, vec2};
 use photocraft_doc::{Adjustment, LayerContent, LayerId};
+use photocraft_engine::jobs::{JobId, JobInfo, Started};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -28,7 +29,7 @@ const HEADER_HEIGHT: f32 = 43.0;
 /// The height of the panel's body: the mask controls, the Basic/Color Mixer tabs, the three
 /// sections and the ten one-line Basic sliders (about 580 points). The body is this tall when the
 /// window has the room for it, and shorter — scrolling, never clipping — when it has not.
-pub const BODY_HEIGHT: f32 = 580.0;
+pub const BODY_HEIGHT: f32 = 600.0;
 
 /// Headroom on top of [`BODY_HEIGHT`], so that a small change in the panel's content does not
 /// start the body scrolling.
@@ -66,10 +67,19 @@ pub(crate) mod text {
     pub const PAINT_NEW_REGION: &str = "Paint a new region";
     pub const ADD_TO_REGION: &str = "Add to region";
     pub const AUTO_FACE: &str = "Auto-select face";
+    pub const SCAN_FACES: &str = "Scan faces";
+    pub const CANCEL: &str = "Cancel";
     pub const FACE_MODE: &str = "Faces";
+    pub const FACE_COVERAGE: &str = "Area";
     pub const ALL_FACES: &str = "All faces";
     pub const MAIN_FACE: &str = "Main face";
+    pub const FACE_NUMBER: &str = "Face {n}";
+    pub const FACE_ONLY: &str = "Face only";
+    pub const FACE_NECK: &str = "Face + neck + chest";
     pub const DETECTING_FACE: &str = "Detecting face…";
+    pub const SCANNING_FACES: &str = "Scanning faces…";
+    pub const FACES_FOUND: &str = "Found {faces} faces.";
+    pub const FACE_CANCELLED: &str = "Face detection cancelled.";
     pub const APPLY_WHOLE: &str = "Apply to whole image";
     pub const SHOW_SELECTION: &str = "Show selection";
     pub const HIDE_SELECTION: &str = "Hide selection";
@@ -104,10 +114,19 @@ pub(crate) mod text {
         PAINT_NEW_REGION,
         ADD_TO_REGION,
         AUTO_FACE,
+        SCAN_FACES,
+        CANCEL,
         FACE_MODE,
+        FACE_COVERAGE,
         ALL_FACES,
         MAIN_FACE,
+        FACE_NUMBER,
+        FACE_ONLY,
+        FACE_NECK,
         DETECTING_FACE,
+        SCANNING_FACES,
+        FACES_FOUND,
+        FACE_CANCELLED,
         APPLY_WHOLE,
         SHOW_SELECTION,
         HIDE_SELECTION,
@@ -128,19 +147,26 @@ pub(crate) mod text {
 /// Basic Color panel state, persisted in [`crate::state::UiState`] so it survives a relaunch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum FaceMode {
+pub enum FaceCoverage {
     #[default]
-    All,
-    Main,
+    FaceNeck,
+    Face,
 }
 
-impl FaceMode {
+impl FaceCoverage {
     fn as_str(self) -> &'static str {
         match self {
-            Self::All => "all",
-            Self::Main => "main",
+            Self::FaceNeck => "faceNeck",
+            Self::Face => "face",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FaceJobKind {
+    #[default]
+    Scan,
+    Apply,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -149,18 +175,26 @@ pub struct BasicColorState {
     /// The last command error shown under the controls (empty: none).
     pub status: String,
     pub status_error: bool,
-    /// Which faces the next Auto-select face run covers. Persisted.
-    pub face_mode: FaceMode,
-    /// True while a face run is waiting for the next frame (the spinner is visible then).
+    /// Which face the next Auto-select run covers: 0 = all, 1 = main, n+1 = face n.
+    /// Persisted; a stale face number falls back to all when the layer changes.
+    pub face_choice: usize,
+    /// Face-only or face + neck + upper chest. Persisted.
+    pub face_coverage: FaceCoverage,
+    /// How many faces the last scan found (0: no scan yet). Transient.
+    #[serde(skip)]
+    pub face_choices: usize,
+    /// The document/layer the face choices belong to. Transient.
+    #[serde(skip)]
+    pub face_scan_key: Option<(u64, LayerId)>,
+    /// The running scan/apply job. Transient.
+    #[serde(skip)]
+    pub face_job: Option<JobId>,
+    #[serde(skip)]
+    pub face_job_layer: Option<LayerId>,
+    #[serde(skip)]
+    pub face_job_kind: FaceJobKind,
     #[serde(skip)]
     pub face_busy: bool,
-    /// The deferred face command, run after one painted spinner frame so the synchronous detector
-    /// does not block before the progress message reaches the screen.
-    #[serde(skip)]
-    pub face_request: Option<(LayerId, FaceMode)>,
-    /// One frame of grace before `face_request` runs, so the spinner/status is presented first.
-    #[serde(skip)]
-    pub face_wait: bool,
 }
 
 /// The active layer when it is a Basic Color adjustment: everything the panel needs, copied out so
@@ -198,7 +232,9 @@ enum Action {
     Reset { layer: LayerId },
     PaintNewRegion { layer: LayerId },
     AddToRegion { layer: LayerId },
-    AutoFace { layer: LayerId, faces: FaceMode },
+    AutoFace { layer: LayerId, choice: usize, coverage: FaceCoverage },
+    ScanFaces { layer: LayerId },
+    CancelFaceJob { id: JobId },
     ApplyWhole { layer: LayerId },
     ToggleMask { layer: LayerId },
 }
@@ -238,18 +274,97 @@ fn show_selection(app: &mut PhotocraftApp, layer: LayerId) {
     }
 }
 
-fn auto_face(app: &mut PhotocraftApp, layer: LayerId, faces: FaceMode) {
-    match app.run("layer.layerMask.fromFace", json!({"layer": layer.0, "faces": faces.as_str()})) {
-        Ok(result) => {
-            let faces = result.get("faces").and_then(serde_json::Value::as_u64).unwrap_or(0).to_string();
-            let message = crate::i18n::fmt(tl!(text::FACE_STATUS), &[("faces", &faces)]);
-            set_status(&mut app.ui.basic_color, message, false);
-            show_selection(app, layer);
+fn engine_face_choice(choice: usize) -> String {
+    match choice {
+        0 => "all".into(),
+        1 => "main".into(),
+        n => n.saturating_sub(1).to_string(),
+    }
+}
+
+fn clear_face_job(app: &mut PhotocraftApp) {
+    app.ui.basic_color.face_job = None;
+    app.ui.basic_color.face_job_layer = None;
+    app.ui.basic_color.face_busy = false;
+}
+
+fn finish_face_result(app: &mut PhotocraftApp, kind: FaceJobKind, layer: LayerId, result: serde_json::Value) {
+    let faces = result.get("faces").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    app.ui.basic_color.face_choices = faces;
+    app.ui.basic_color.face_scan_key = app.session.active().map(|st| (st.doc.id.0, layer));
+    if kind == FaceJobKind::Apply {
+        let count = faces.to_string();
+        let message = crate::i18n::fmt(tl!(text::FACE_STATUS), &[("faces", &count)]);
+        set_status(&mut app.ui.basic_color, message, false);
+        show_selection(app, layer);
+    } else if faces == 0 {
+        set_status(&mut app.ui.basic_color, tl!(text::NO_FACE).to_string(), true);
+    } else {
+        let count = faces.to_string();
+        let message = crate::i18n::fmt(tl!(text::FACES_FOUND), &[("faces", &count)]);
+        set_status(&mut app.ui.basic_color, message, false);
+    }
+    clear_face_job(app);
+}
+
+fn finish_face_error(app: &mut PhotocraftApp, error: String) {
+    if app.ui.basic_color.face_job_kind == FaceJobKind::Scan {
+        app.ui.basic_color.face_choices = 0;
+    }
+    if error.contains("no face found") || error.contains("not found") {
+        set_status(&mut app.ui.basic_color, tl!(text::NO_FACE).to_string(), true);
+    } else {
+        failed(app, text::FACE_FAILED, &error);
+    }
+    clear_face_job(app);
+}
+
+fn start_face_job(app: &mut PhotocraftApp, layer: LayerId, kind: FaceJobKind, choice: usize, coverage: FaceCoverage) {
+    if app.ui.basic_color.face_busy {
+        return;
+    }
+    let (command, params, status) = match kind {
+        FaceJobKind::Scan => ("layer.layerMask.detectFaces", json!({"layer": layer.0}), text::SCANNING_FACES),
+        FaceJobKind::Apply => {
+            ("layer.layerMask.fromFace", json!({"layer": layer.0, "faces": engine_face_choice(choice), "coverage": coverage.as_str()}), text::DETECTING_FACE)
         }
-        Err(error) if error.contains("no face found") => {
-            set_status(&mut app.ui.basic_color, tl!(text::NO_FACE).to_string(), true);
+    };
+    app.ui.basic_color.face_busy = true;
+    app.ui.basic_color.face_job_kind = kind;
+    app.ui.basic_color.face_job_layer = Some(layer);
+    set_status(&mut app.ui.basic_color, tl!(status).to_string(), false);
+    match app.session.start(command, params) {
+        Ok(Started::Job(id)) => app.ui.basic_color.face_job = Some(id),
+        Ok(Started::Done(result)) => finish_face_result(app, kind, layer, result),
+        Err(error) => finish_face_error(app, error.to_string()),
+    }
+}
+
+/// Pick up a finished background scan/mask job. The panel runs every frame, so this is also where
+/// the progress message turns into the final result or error.
+fn poll_face_job(app: &mut PhotocraftApp) {
+    let Some(id) = app.ui.basic_color.face_job else { return };
+    let Some(info) = app.session.jobs_with_recent().into_iter().find(|j| j.id == id) else {
+        clear_face_job(app);
+        return;
+    };
+    match info.state {
+        "running" => {}
+        "done" => {
+            let kind = app.ui.basic_color.face_job_kind;
+            let layer = app.ui.basic_color.face_job_layer.or_else(|| app.session.active().and_then(|st| st.active_layer));
+            if let (Some(result), Some(layer)) = (info.result, layer) {
+                finish_face_result(app, kind, layer, result);
+            } else {
+                clear_face_job(app);
+            }
         }
-        Err(error) => failed(app, text::FACE_FAILED, &error),
+        "failed" => finish_face_error(app, info.error.unwrap_or_else(|| "face detection failed".into())),
+        "cancelled" => {
+            set_status(&mut app.ui.basic_color, tl!(text::FACE_CANCELLED).to_string(), false);
+            clear_face_job(app);
+        }
+        _ => {}
     }
 }
 
@@ -283,13 +398,12 @@ fn apply(app: &mut PhotocraftApp, action: Action) {
             paint_setup(app);
             show_selection(app, layer);
         }
-        Action::AutoFace { layer, faces } => {
-            // Defer the synchronous detector by one frame: the status and spinner get painted
-            // before the frame loop blocks, then `window` runs the command at the next frame.
-            app.ui.basic_color.face_busy = true;
-            app.ui.basic_color.face_request = Some((layer, faces));
-            app.ui.basic_color.face_wait = true;
-            set_status(&mut app.ui.basic_color, tl!(text::DETECTING_FACE).to_string(), false);
+        Action::AutoFace { layer, choice, coverage } => start_face_job(app, layer, FaceJobKind::Apply, choice, coverage),
+        Action::ScanFaces { layer } => start_face_job(app, layer, FaceJobKind::Scan, 0, FaceCoverage::FaceNeck),
+        Action::CancelFaceJob { id } => {
+            app.session.cancel_job(id);
+            set_status(&mut app.ui.basic_color, tl!(text::FACE_CANCELLED).to_string(), false);
+            clear_face_job(app);
         }
         Action::ApplyWhole { layer } => {
             if let Err(error) = app.run("layer.layerMask.revealAll", json!({"layer": layer.0})) {
@@ -306,25 +420,72 @@ fn apply(app: &mut PhotocraftApp, action: Action) {
     }
 }
 
-fn face_row(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode, face_busy: bool, with_apply: bool, actions: &mut Vec<Action>) {
+#[allow(clippy::too_many_arguments)]
+fn face_row(
+    ui: &mut egui::Ui,
+    info: &ActiveBasic,
+    choice: &mut usize,
+    face_choices: usize,
+    coverage: &mut FaceCoverage,
+    job: Option<&JobInfo>,
+    with_apply: bool,
+    actions: &mut Vec<Action>,
+) {
+    let t = Tokens::get(ui.ctx());
+    if let Some(job) = job {
+        let message = if job.message.is_empty() { tl!(text::DETECTING_FACE) } else { job.message.as_str() };
+        ui.horizontal_wrapped(|ui| {
+            ui.spinner();
+            ui.label(egui::RichText::new(message).size(11.0).color(t.text_dim));
+            if widgets::secondary_button(ui, tl!(text::CANCEL), 0.0).clicked() {
+                actions.push(Action::CancelFaceJob { id: job.id });
+            }
+        });
+        ui.add(egui::ProgressBar::new(job.progress).desired_width(ui.available_width()).show_percentage());
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         if with_apply && widgets::secondary_button(ui, tl!(text::APPLY_WHOLE), 0.0).clicked() {
             actions.push(Action::ApplyWhole { layer: info.id });
         }
-        if face_busy {
-            ui.spinner();
-            ui.label(egui::RichText::new(tl!(text::DETECTING_FACE)).size(11.0).color(Tokens::get(ui.ctx()).text_dim));
-            return;
-        }
         if widgets::secondary_button(ui, tl!(text::AUTO_FACE), 0.0).clicked() {
-            actions.push(Action::AutoFace { layer: info.id, faces: *face_mode });
+            actions.push(Action::AutoFace { layer: info.id, choice: *choice, coverage: *coverage });
         }
-        ui.label(egui::RichText::new(tl!(text::FACE_MODE)).size(10.5).color(Tokens::get(ui.ctx()).text_faint));
-        widgets::dropdown(ui, "basic-color-face-mode", face_mode, &[(FaceMode::All, text::ALL_FACES), (FaceMode::Main, text::MAIN_FACE)], 104.0);
+        if widgets::secondary_button(ui, tl!(text::SCAN_FACES), 0.0).clicked() {
+            actions.push(Action::ScanFaces { layer: info.id });
+        }
+    });
+    if *choice >= face_choices + 2 {
+        *choice = 0;
+    }
+    let mut labels = vec![tl!(text::ALL_FACES).to_string(), tl!(text::MAIN_FACE).to_string()];
+    for n in 1..=face_choices {
+        labels.push(crate::i18n::fmt(tl!(text::FACE_NUMBER), &[("n", &n.to_string())]));
+    }
+    let options: Vec<(usize, &str)> = labels.iter().enumerate().map(|(i, s)| (i, s.as_str())).collect();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(tl!(text::FACE_MODE)).size(10.5).color(t.text_faint));
+        widgets::dropdown_literal(ui, "basic-color-face-choice", choice, &options, 108.0);
+        ui.label(egui::RichText::new(tl!(text::FACE_COVERAGE)).size(10.5).color(t.text_faint));
+        widgets::dropdown(
+            ui,
+            "basic-color-face-coverage",
+            coverage,
+            &[(FaceCoverage::FaceNeck, text::FACE_NECK), (FaceCoverage::Face, text::FACE_ONLY)],
+            142.0,
+        );
     });
 }
 
-fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode, face_busy: bool, actions: &mut Vec<Action>) {
+fn mask_controls(
+    ui: &mut egui::Ui,
+    info: &ActiveBasic,
+    choice: &mut usize,
+    face_choices: usize,
+    coverage: &mut FaceCoverage,
+    job: Option<&JobInfo>,
+    actions: &mut Vec<Action>,
+) {
     let t = Tokens::get(ui.ctx());
     widgets::hairline(ui);
     ui.add_space(2.0);
@@ -332,7 +493,7 @@ fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode
     if !info.has_mask {
         // Vector mask only, or none: painting needs a pixel mask, so the paint controls wait.
         ui.add(egui::Label::new(egui::RichText::new(tl!(text::NO_PIXEL_MASK)).size(11.0).color(t.text_faint)).wrap());
-        face_row(ui, info, face_mode, face_busy, true, actions);
+        face_row(ui, info, choice, face_choices, coverage, job, true, actions);
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -352,7 +513,7 @@ fn mask_controls(ui: &mut egui::Ui, info: &ActiveBasic, face_mode: &mut FaceMode
             actions.push(Action::ToggleMask { layer: info.id });
         }
     });
-    face_row(ui, info, face_mode, face_busy, false, actions);
+    face_row(ui, info, choice, face_choices, coverage, job, false, actions);
     let hint = if info.overlay { tl!(text::SELECTION_HINT) } else { tl!(text::HINT) };
     ui.add(egui::Label::new(egui::RichText::new(hint).size(10.5).color(t.text_faint)).wrap());
 }
@@ -362,21 +523,21 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !app.ui.panels.basic_color {
         return;
     }
-    // The click frame drew the spinner/status and returned; this next frame is already on screen,
-    // so the synchronous detector can run now without hiding the progress message.
-    if app.ui.basic_color.face_request.is_some() {
-        if app.ui.basic_color.face_wait {
-            app.ui.basic_color.face_wait = false;
-            ctx.request_repaint();
-        } else if let Some((layer, faces)) = app.ui.basic_color.face_request.take() {
-            auto_face(app, layer, faces);
-            app.ui.basic_color.face_busy = false;
-        }
-    }
+    poll_face_job(app);
     let has_document = app.session.active_index().is_some();
     let active = active_basic_color(app);
-    let mut face_mode = app.ui.basic_color.face_mode;
-    let face_busy = app.ui.basic_color.face_busy;
+    if let Some(info) = &active {
+        let key = app.session.active().map(|st| (st.doc.id.0, info.id));
+        if app.ui.basic_color.face_scan_key != key && !app.ui.basic_color.face_busy {
+            app.ui.basic_color.face_choices = 0;
+            app.ui.basic_color.face_choice = if app.ui.basic_color.face_choice == 1 { 1 } else { 0 };
+            app.ui.basic_color.face_scan_key = key;
+        }
+    }
+    let mut face_choice = app.ui.basic_color.face_choice;
+    let face_choices = app.ui.basic_color.face_choices;
+    let mut face_coverage = app.ui.basic_color.face_coverage;
+    let face_job = app.ui.basic_color.face_job.and_then(|id| app.session.jobs_with_recent().into_iter().find(|j| j.id == id && j.state == "running"));
     let mut open = true;
     let mut actions = Vec::new();
     let t = Tokens::get(ctx);
@@ -387,7 +548,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let frame_margin = frame.total_margin().sum().y;
     // The body may not grow past the window: it is capped by the room below the panel's top
     // edge, which is where the panel opens (or where the user dragged it to).
-    let default_top = canvas.top() + 24.0;
+    let default_top = canvas.top() + 8.0;
     let panel_top = ctx.memory(|mem| mem.area_rect(panel_id())).map_or(default_top, |rect| rect.top());
     let room = (ctx.content_rect().bottom() - panel_top.min(default_top) - frame_margin - HEADER_HEIGHT).max(0.0);
     let body_height = (BODY_HEIGHT + BODY_HEADROOM).min(room);
@@ -448,7 +609,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                                 }
                             });
                         });
-                        mask_controls(ui, info, &mut face_mode, face_busy, &mut actions);
+                        mask_controls(ui, info, &mut face_choice, face_choices, &mut face_coverage, face_job.as_ref(), &mut actions);
                         ui.add_space(4.0);
                         crate::adjust_editors::layer_editor(app, ui, info.id, &info.adjustment);
                     }
@@ -476,7 +637,8 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !open {
         app.ui.panels.basic_color = false;
     }
-    app.ui.basic_color.face_mode = face_mode;
+    app.ui.basic_color.face_choice = face_choice;
+    app.ui.basic_color.face_coverage = face_coverage;
     for action in actions {
         apply(app, action);
     }
@@ -628,18 +790,28 @@ mod tests {
     }
 
     #[test]
+    fn face_choice_maps_to_engine_numbers() {
+        assert_eq!(engine_face_choice(0), "all");
+        assert_eq!(engine_face_choice(1), "main");
+        assert_eq!(engine_face_choice(2), "1");
+        assert_eq!(engine_face_choice(5), "4");
+    }
+
+    #[test]
     fn default_state_round_trips_through_serde() {
         let state = BasicColorState::default();
         assert!(state.status.is_empty() && !state.status_error);
-        assert_eq!(state.face_mode, FaceMode::All);
+        assert_eq!(state.face_choice, 0);
+        assert_eq!(state.face_coverage, FaceCoverage::FaceNeck);
         let json = serde_json::to_string(&state).expect("serialize");
         let back: BasicColorState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(state, back);
         // An older layout without the field gets the whole default state.
         let fresh: BasicColorState = serde_json::from_str("{}").expect("missing fields default");
         assert_eq!(fresh, BasicColorState::default());
-        let main: BasicColorState = serde_json::from_str(r#"{"faceMode":"main"}"#).expect("main face mode");
-        assert_eq!(main.face_mode, FaceMode::Main);
+        let main: BasicColorState = serde_json::from_str(r#"{"faceChoice":1,"faceCoverage":"face"}"#).expect("main face mode");
+        assert_eq!(main.face_choice, 1);
+        assert_eq!(main.face_coverage, FaceCoverage::Face);
     }
 
     #[test]
@@ -747,10 +919,12 @@ mod tests {
         );
 
         // Auto-select face is deferred by one painted frame so the spinner/status is visible.
-        apply(&mut app, Action::AutoFace { layer: id, faces: FaceMode::Main });
+        apply(&mut app, Action::AutoFace { layer: id, choice: 1, coverage: FaceCoverage::FaceNeck });
         assert!(app.ui.basic_color.face_busy);
-        assert_eq!(app.ui.basic_color.face_request, Some((id, FaceMode::Main)));
+        let job = app.ui.basic_color.face_job.expect("the face command starts a background job");
         assert!(app.ui.basic_color.status.contains("Đang nhận diện") || app.ui.basic_color.status.contains("Detecting"));
+        apply(&mut app, Action::CancelFaceJob { id: job });
+        assert!(!app.ui.basic_color.face_busy && app.ui.basic_color.face_job.is_none());
     }
 
     #[test]
@@ -778,10 +952,65 @@ mod tests {
     }
 
     #[test]
+    fn scan_faces_reports_when_no_face_is_found() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        h.get_by_label(text::SCAN_FACES).click();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            h.state_mut().session.poll_jobs();
+            h.run_steps(1);
+            if h.state().ui.basic_color.status.contains("Không tìm thấy") || h.state().ui.basic_color.status.contains("No face") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(h.state().ui.basic_color.face_choices, 0);
+        assert!(h.query_all_by_label(text::NO_FACE).next().is_some(), "the scan says no face was found");
+    }
+
+    #[test]
+    fn scanned_faces_appear_in_the_choice_dropdown() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        h.state_mut().ui.basic_color.face_choices = 2;
+        h.state_mut().ui.basic_color.face_choice = 0;
+        h.run_steps(2);
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).next().expect("face choice combo").click();
+        h.run_steps(2);
+        h.get_by_label("Face 2").click();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.basic_color.face_choice, 3, "Face 2 maps to choice index 3");
+    }
+
+    #[test]
+    fn coverage_dropdown_switches_face_only_and_face_neck() {
+        let mut h = harness(vec2(1440.0, 900.0));
+        let combos: Vec<_> = h.query_all_by_role(egui::accesskit::Role::ComboBox).collect();
+        assert!(combos.len() >= 2, "face choice and coverage combos");
+        combos[1].click();
+        h.run_steps(2);
+        h.get_by_label(text::FACE_ONLY).click();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.basic_color.face_coverage, FaceCoverage::Face);
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).nth(1).expect("coverage combo").click();
+        h.run_steps(2);
+        h.get_by_label(text::FACE_NECK).click();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.basic_color.face_coverage, FaceCoverage::FaceNeck);
+    }
+
+    #[test]
     fn auto_face_explains_when_no_face_is_found() {
         let mut h = harness(vec2(1440.0, 900.0));
         h.get_by_label(text::AUTO_FACE).click();
-        h.run_steps(6);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            h.state_mut().session.poll_jobs();
+            h.run_steps(1);
+            if h.state().ui.basic_color.status.contains("Không tìm thấy") || h.state().ui.basic_color.status.contains("No face") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(h.query_all_by_label(text::NO_FACE).next().is_some(), "the panel says no face was found");
     }
 
@@ -792,7 +1021,7 @@ mod tests {
         h.run_steps(2);
         h.get_by_label(text::MAIN_FACE).click();
         h.run_steps(2);
-        assert_eq!(h.state().ui.basic_color.face_mode, FaceMode::Main);
+        assert_eq!(h.state().ui.basic_color.face_choice, 1);
     }
 
     #[test]

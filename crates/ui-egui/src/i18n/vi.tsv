@@ -3819,10 +3819,17 @@ curves	Smooth	Làm mượt
 	Paint a new region	Tô vùng mới
 	Add to region	Thêm vào vùng
 	Auto-select face	Tự chọn vùng mặt
+	Scan faces	Quét khuôn mặt
 	Faces	Khuôn mặt
 	All faces	Tất cả khuôn mặt
 	Main face	Mặt chính
+	Face {n}	Khuôn mặt {n}
+	Face only	Chỉ khuôn mặt
+	Face + neck + chest	Mặt + cổ + ngực
 	Detecting face…	Đang nhận diện khuôn mặt…
+	Scanning faces…	Đang quét khuôn mặt…
+	Found {faces} faces.	Đã tìm thấy {faces} khuôn mặt.
+	Face detection cancelled.	Đã hủy nhận diện khuôn mặt.
 	Apply to whole image	Áp dụng cho toàn ảnh
 	Show selection	Hiện vùng chọn
 	Hide selection	Ẩn vùng chọn

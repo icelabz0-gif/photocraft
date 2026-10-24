@@ -34,6 +34,7 @@ use crate::{EngineError, Result, Session};
 const RUN: &str = "retouchAI.run";
 const ANALYZE: &str = "retouchAI.analyze";
 const FROM_FACE: &str = "layer.layerMask.fromFace";
+const DETECT_FACES: &str = "layer.layerMask.detectFaces";
 const MAX_TOOLS: usize = 14;
 const ANALYSIS_SIDE: u32 = 1600;
 const MASK_COVERAGE: f32 = 0.004;
@@ -428,10 +429,26 @@ fn face_skin_region(f: Rect, grid: Rect) -> Rect {
     .intersect(&grid)
 }
 
+/// The tighter gate for `coverage:"face"`: the detected face box with a little padding for the
+/// chin and forehead, but not the neck or upper chest.
+fn face_only_region(f: Rect, grid: Rect) -> Rect {
+    let fw = f.width().max(1) as f32;
+    let fh = f.height().max(1) as f32;
+    let pad_x = (fw * 0.08).max(2.0);
+    let pad_y = (fh * 0.08).max(2.0);
+    Rect::new(
+        (f.x0 as f32 - pad_x).floor() as i32,
+        (f.y0 as f32 - pad_y).floor() as i32,
+        (f.x1 as f32 + pad_x).ceil() as i32,
+        (f.y1 as f32 + pad_y).ceil() as i32,
+    )
+    .intersect(&grid)
+}
+
 /// Zero skin coverage outside the detected faces and return the tight full-resolution content
 /// bbox, padded a little for the mask's soft edge. With no face detector (or no face), the raw
 /// classifier remains the only signal, so its own content bbox is used.
-fn clean_skin(data: &mut [f32], aw: usize, ah: usize, canvas: Rect, faces: &[Rect], subject_bbox: Rect) -> Rect {
+fn clean_skin(data: &mut [f32], aw: usize, ah: usize, canvas: Rect, faces: &[Rect], subject_bbox: Rect, coverage: FaceCoverage) -> Rect {
     const SKIN_THRESHOLD: f32 = 0.12;
     if aw == 0 || ah == 0 || data.len() != aw.saturating_mul(ah) {
         return Rect::EMPTY;
@@ -440,7 +457,10 @@ fn clean_skin(data: &mut [f32], aw: usize, ah: usize, canvas: Rect, faces: &[Rec
         let grid = Rect::new(0, 0, aw as i32, ah as i32);
         let mut allowed = vec![false; data.len()];
         for f in faces {
-            let r = face_skin_region(*f, grid);
+            let r = match coverage {
+                FaceCoverage::Face => face_only_region(*f, grid),
+                FaceCoverage::FaceNeck => face_skin_region(*f, grid),
+            };
             for y in r.y0.max(0)..r.y1.min(ah as i32) {
                 let row = y as usize * aw;
                 for x in r.x0.max(0)..r.x1.min(aw as i32) {
@@ -629,7 +649,7 @@ fn analyze(doc: &Document, source: Option<LayerId>, all_layers: bool) -> Result<
     // tool and of `skinMask`.
     let raw_skin = selection::skin_tones(&px, 40.0);
     let mut skin_data = matting::box_mean(&raw_skin, aw, ah, 1);
-    let skin_bbox = clean_skin(&mut skin_data, aw, ah, canvas, &face_rects, subject_bbox);
+    let skin_bbox = clean_skin(&mut skin_data, aw, ah, canvas, &face_rects, subject_bbox, FaceCoverage::FaceNeck);
     let skin = Field::filled(canvas, aw, ah, skin_data).with_content(skin_bbox);
 
     let mut eye_data = vec![0.0f32; aw * ah];
@@ -1635,25 +1655,57 @@ fn analyze_cmd(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FaceMode {
+enum FaceChoice {
     All,
     Main,
+    /// 1-based order in the reading order (left to right, then top to bottom).
+    Index(usize),
 }
 
-impl FaceMode {
+impl FaceChoice {
     fn parse(p: &Value) -> Result<Self> {
+        let bad_faces = || bad(FROM_FACE, "`faces` must be \"all\", \"main\" or a 1-based face number");
         match p.get("faces") {
-            None => Ok(FaceMode::All),
-            Some(Value::String(s)) if s == "all" => Ok(FaceMode::All),
-            Some(Value::String(s)) if s == "main" => Ok(FaceMode::Main),
-            Some(_) => Err(bad(FROM_FACE, "`faces` must be \"all\" or \"main\"")),
+            None => Ok(Self::All),
+            Some(Value::String(s)) if s == "all" => Ok(Self::All),
+            Some(Value::String(s)) if s == "main" => Ok(Self::Main),
+            Some(Value::Number(n)) => n.as_u64().filter(|n| *n >= 1).map(|n| Self::Index(n as usize)).ok_or_else(bad_faces),
+            Some(Value::String(s)) => s.parse::<usize>().ok().filter(|n| *n >= 1).map(Self::Index).ok_or_else(bad_faces),
+            Some(_) => Err(bad_faces()),
+        }
+    }
+
+    fn id(self) -> String {
+        match self {
+            Self::All => "all".into(),
+            Self::Main => "main".into(),
+            Self::Index(n) => n.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaceCoverage {
+    /// The face box only (a small padding for the chin/forehead).
+    Face,
+    /// Face, neck and a little upper chest (the Retouch AI portrait gate).
+    FaceNeck,
+}
+
+impl FaceCoverage {
+    fn parse(p: &Value) -> Result<Self> {
+        match p.get("coverage") {
+            None => Ok(Self::FaceNeck),
+            Some(Value::String(s)) if s == "faceNeck" => Ok(Self::FaceNeck),
+            Some(Value::String(s)) if s == "face" => Ok(Self::Face),
+            Some(_) => Err(bad(FROM_FACE, "`coverage` must be \"face\" or \"faceNeck\"")),
         }
     }
 
     fn id(self) -> &'static str {
         match self {
-            FaceMode::All => "all",
-            FaceMode::Main => "main",
+            Self::Face => "face",
+            Self::FaceNeck => "faceNeck",
         }
     }
 }
@@ -1681,20 +1733,23 @@ fn face_rects_at(px: &[[f32; 4]], aw: usize, ah: usize, override_rects: Option<&
         None if faces::AVAILABLE => dedupe_faces(faces::detect(px, aw, ah, crate::face_cmds::MIN_SCORE).unwrap_or_default()).iter().map(face_rect).collect(),
         None => Vec::new(),
     };
-    rects.into_iter().map(|r| r.intersect(&grid)).filter(|r| !r.is_empty()).collect()
+    let mut rects: Vec<Rect> = rects.into_iter().map(|r| r.intersect(&grid)).filter(|r| !r.is_empty()).collect();
+    // Stable labels for the face picker: left to right, then top to bottom.
+    rects.sort_by_key(|r| (r.x0, r.y0));
+    rects
 }
 
 /// The skin coverage of the chosen faces: the Color Range skin classifier, smoothed, gated to
 /// the face/neck/upper-chest region around those boxes, then turned into a layer mask that hides
 /// everything else.
-fn face_mask(doc: &Document, px: &[[f32; 4]], aw: usize, ah: usize, faces: &[Rect]) -> Option<LayerMask> {
+fn face_mask(doc: &Document, px: &[[f32; 4]], aw: usize, ah: usize, faces: &[Rect], coverage: FaceCoverage) -> Option<LayerMask> {
     let canvas = doc.bounds();
     if canvas.is_empty() || aw == 0 || ah == 0 {
         return None;
     }
     let raw_skin = selection::skin_tones(px, 40.0);
     let mut skin_data = matting::box_mean(&raw_skin, aw, ah, 1);
-    let skin_bbox = clean_skin(&mut skin_data, aw, ah, canvas, faces, Rect::EMPTY);
+    let skin_bbox = clean_skin(&mut skin_data, aw, ah, canvas, faces, Rect::EMPTY, coverage);
     if skin_bbox.is_empty() {
         return None;
     }
@@ -1706,54 +1761,178 @@ fn face_mask(doc: &Document, px: &[[f32; 4]], aw: usize, ah: usize, faces: &[Rec
     Some(hide_mask(surface))
 }
 
-fn from_face_cmd(s: &mut Session, p: &Value) -> Result<Value> {
-    from_face_cmd_with(s, p, None)
+/// What a face analysis found, shared by the mask command and the picker's scan.
+struct FaceAnalysis {
+    faces: usize,
+    selected: usize,
+    boxes: Vec<[i32; 4]>,
+    mask: Option<LayerMask>,
+    mode: FaceChoice,
+    coverage: FaceCoverage,
 }
 
-fn from_face_cmd_with(s: &mut Session, p: &Value, override_rects: Option<&[Rect]>) -> Result<Value> {
-    let mode = FaceMode::parse(p)?;
-    let id = crate::commands::layer_param(s, p)?;
-    let doc = {
-        let d = s.active().ok_or(EngineError::NoDocument)?;
-        let layer = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
-        if !matches!(layer.content, LayerContent::Adjustment(_)) {
-            return Err(bad(
-                FROM_FACE,
-                format!(
-                    "layer \"{}\" is {} {} layer; a mask from a face needs an adjustment layer",
-                    layer.name,
-                    layer.content.article(),
-                    layer.content.kind_name()
-                ),
-            ));
-        }
-        d.doc.clone()
-    };
+/// Analyse the snapshot without the target layer's own colour effect, then optionally build the
+/// soft skin mask. `ctx` carries progress and cancellation; the detector itself is a single call,
+/// so cancellation is checked around the stages.
+fn analyze_faces(
+    doc: &Document,
+    target: Option<LayerId>,
+    choice: FaceChoice,
+    coverage: FaceCoverage,
+    override_rects: Option<&[Rect]>,
+    build_mask: bool,
+    ctx: &crate::jobs::JobCtx,
+) -> Result<FaceAnalysis> {
     let canvas = doc.bounds();
     if canvas.is_empty() {
         return Err(EngineError::Other("the document has no pixels to analyse".into()));
     }
+    let base = target.map(|id| without_layer(doc, id));
+    let source = base.as_ref().unwrap_or(doc);
     let (aw, ah) = analysis_size(canvas);
-    let px = photocraft_compose::render_reduced(&without_layer(&doc, id), aw as u32, ah as u32).px;
+    ctx.progress(0.05, "Preparing image");
+    let px = photocraft_compose::render_reduced(source, aw as u32, ah as u32).px;
     if px.len() != aw.saturating_mul(ah) {
         return Err(EngineError::Other("the reduced analysis image has an unexpected size".into()));
     }
+    ctx.check()?;
+    ctx.progress(0.25, "Detecting faces");
     let found = face_rects_at(&px, aw, ah, override_rects);
+    ctx.check()?;
     if found.is_empty() {
         return Err(EngineError::Other("no face found".into()));
     }
-    let faces =
-        if mode == FaceMode::Main { found.iter().copied().max_by(|a, b| rect_area(*a).total_cmp(&rect_area(*b))).into_iter().collect() } else { found.clone() };
-    let mask = face_mask(&doc, &px, aw, ah, &faces).ok_or_else(|| EngineError::Other("no face found".into()))?;
+    let faces: Vec<Rect> = match choice {
+        FaceChoice::All => found.clone(),
+        FaceChoice::Main => found.iter().copied().max_by(|a, b| rect_area(*a).total_cmp(&rect_area(*b))).into_iter().collect(),
+        FaceChoice::Index(n) => found.get(n.saturating_sub(1)).copied().into_iter().collect(),
+    };
+    if faces.is_empty() {
+        return Err(EngineError::Other(format!(
+            "face {} of {} not found",
+            match choice {
+                FaceChoice::Index(n) => n,
+                _ => 0,
+            },
+            found.len()
+        )));
+    }
+    ctx.progress(0.65, "Building mask");
+    let mask = if build_mask { Some(face_mask(doc, &px, aw, ah, &faces, coverage).ok_or_else(|| EngineError::Other("no face found".into()))?) } else { None };
+    ctx.check()?;
+    ctx.progress(0.95, "Finalizing");
+    let sx = canvas.width() as f32 / aw.max(1) as f32;
+    let sy = canvas.height() as f32 / ah.max(1) as f32;
+    let boxes = found
+        .iter()
+        .map(|r| {
+            [
+                canvas.x0 + (r.x0 as f32 * sx).round() as i32,
+                canvas.y0 + (r.y0 as f32 * sy).round() as i32,
+                (r.width() as f32 * sx).round() as i32,
+                (r.height() as f32 * sy).round() as i32,
+            ]
+        })
+        .collect();
+    Ok(FaceAnalysis { faces: found.len(), selected: faces.len(), boxes, mask, mode: choice, coverage })
+}
+
+fn face_result(id: LayerId, a: FaceAnalysis) -> Value {
+    json!({
+        "layer": id.0,
+        "faces": a.faces,
+        "selected": a.selected,
+        "mode": a.mode.id(),
+        "coverage": a.coverage.id(),
+        "boxes": a.boxes,
+    })
+}
+
+/// Validate the explicit target before a job starts: only adjustment layers can take the mask.
+fn face_target(s: &Session, id: LayerId) -> Result<()> {
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    let layer = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+    if !matches!(layer.content, LayerContent::Adjustment(_)) {
+        return Err(bad(
+            FROM_FACE,
+            format!(
+                "layer \"{}\" is {} {} layer; a mask from a face needs an adjustment layer",
+                layer.name,
+                layer.content.article(),
+                layer.content.kind_name()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn from_face_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let mode = FaceChoice::parse(p)?;
+    let coverage = FaceCoverage::parse(p)?;
+    let id = crate::commands::layer_param(s, p)?;
+    face_target(s, id)?;
+    crate::jobs::edit_job(
+        s,
+        "Layer Mask from Face",
+        move |doc, _, ctx| {
+            let mut a = analyze_faces(doc, Some(id), mode, coverage, None, true, ctx)?;
+            let mask = a.mask.take().ok_or_else(|| EngineError::Other("no face found".into()))?;
+            doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
+            Ok(a)
+        },
+        move |a| face_result(id, a),
+    )
+}
+
+#[cfg(test)]
+fn from_face_cmd_with(s: &mut Session, p: &Value, override_rects: Option<&[Rect]>) -> Result<Value> {
+    let mode = FaceChoice::parse(p)?;
+    let coverage = FaceCoverage::parse(p)?;
+    let id = crate::commands::layer_param(s, p)?;
+    face_target(s, id)?;
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    let mut a = analyze_faces(&doc, Some(id), mode, coverage, override_rects, true, &crate::jobs::JobCtx::new())?;
+    let mask = a.mask.take().ok_or_else(|| EngineError::Other("no face found".into()))?;
     s.edit("Layer Mask from Face", |doc, _| {
         doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
         Ok(())
     })?;
-    Ok(json!({
-        "layer": id.0,
-        "faces": found.len(),
-        "mode": mode.id(),
-    }))
+    Ok(face_result(id, a))
+}
+
+/// A fast, read-only scan for the face picker: returns every face box in document coordinates.
+fn detect_faces_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let target = p.get("layer").and_then(Value::as_u64).map(LayerId);
+    if let Some(id) = target
+        && s.active().and_then(|d| d.doc.layer(id)).is_none()
+    {
+        return Err(EngineError::NoLayer(id));
+    }
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    crate::jobs::run(
+        s,
+        "Detect Faces",
+        true,
+        move |ctx| {
+            let target = target.filter(|id| doc.layer(*id).is_some_and(|l| matches!(l.content, LayerContent::Adjustment(_))));
+            analyze_faces(&doc, target, FaceChoice::All, FaceCoverage::FaceNeck, None, false, ctx)
+        },
+        move |_, a| Ok(json!({"faces": a.faces, "boxes": a.boxes})),
+    )
+}
+
+#[cfg(test)]
+fn detect_faces_with(s: &mut Session, p: &Value, override_rects: Option<&[Rect]>) -> Result<Value> {
+    let target = p.get("layer").and_then(Value::as_u64).map(LayerId);
+    if let Some(id) = target
+        && s.active().and_then(|d| d.doc.layer(id)).is_none()
+    {
+        return Err(EngineError::NoLayer(id));
+    }
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    let target = target.filter(|id| doc.layer(*id).is_some_and(|l| matches!(l.content, LayerContent::Adjustment(_))));
+    let a = analyze_faces(&doc, target, FaceChoice::All, FaceCoverage::FaceNeck, override_rects, false, &crate::jobs::JobCtx::new())?;
+    Ok(json!({"faces": a.faces, "boxes": a.boxes}))
 }
 
 fn has_adjustment_layer(s: &Session) -> std::result::Result<(), String> {
@@ -1793,10 +1972,20 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Layer Mask from Face",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id? (adjustment layer; default active layer),"faces":"all"|"main"="all"} → {"layer":id,"faces":count,"mode":"all"|"main"}"##,
+            params: r##"{"layer":id? (adjustment layer; default active layer),"faces":"all"|"main"|1..n="all","coverage":"face"|"faceNeck"="faceNeck"} → {"layer":id,"faces":count,"selected":count,"mode":"all"|"main"|n,"coverage":"face"|"faceNeck","boxes":[[x,y,w,h],…]}"##,
             enabled: has_adjustment_layer,
             run: from_face_cmd,
             journal: true,
+        },
+        CommandSpec {
+            id: DETECT_FACES,
+            label: "Detect Faces",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id? (adjustment layer to exclude from the analysis)} → {"faces":count,"boxes":[[x,y,w,h],…]} (read-only scan in reading order)"##,
+            enabled: has_doc,
+            run: detect_faces_cmd,
+            journal: false,
         },
     ]
 }
@@ -1910,7 +2099,7 @@ mod tests {
         // A wall-coloured background that the Color Range classifier calls skin everywhere.
         let mut data = vec![0.5f32; 400 * 300];
         let face = Rect::from_xywh(180, 120, 40, 40);
-        let bounds = clean_skin(&mut data, 400, 300, canvas, &[face], Rect::EMPTY);
+        let bounds = clean_skin(&mut data, 400, 300, canvas, &[face], Rect::EMPTY, FaceCoverage::FaceNeck);
         assert!(!bounds.is_empty());
         assert!(bounds.width() < 200 && bounds.height() < 200, "skin bbox must stay near the face: {bounds:?}");
         assert!(bounds.contains(200, 140));
@@ -1918,7 +2107,7 @@ mod tests {
         assert!(data[140 * 400 + 200] > 0.0);
         // Without a face, the subject bbox provides the spatial gate.
         let mut data = vec![0.5f32; 400 * 300];
-        let bounds = clean_skin(&mut data, 400, 300, canvas, &[], Rect::from_xywh(80, 60, 120, 90));
+        let bounds = clean_skin(&mut data, 400, 300, canvas, &[], Rect::from_xywh(80, 60, 120, 90), FaceCoverage::FaceNeck);
         assert!(bounds.width() < 200 && bounds.height() < 200, "subject-gated skin bbox: {bounds:?}");
         assert!(bounds.contains(120, 90));
         assert_eq!(data[0], 0.0);
@@ -2313,6 +2502,65 @@ mod tests {
         let d = s.active().unwrap();
         assert_eq!(d.doc.layer(id).unwrap().mask, before_mask, "one undo restores the mask the layer had before");
         assert_eq!(d.history.undo_label().map(str::to_string), label);
+    }
+
+    #[test]
+    fn from_face_coverage_face_omits_the_neck() {
+        let (mut s, id) = adjustment_session();
+        let rect = Rect::from_xywh(70, 48, 52, 58);
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0, "coverage": "face"}), Some(&[rect])).unwrap();
+        assert_eq!(r["coverage"], "face");
+        let d = s.active().unwrap();
+        let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
+        assert!(mask.value(96, 78) > 0.5, "the face skin stays");
+        assert!(mask.value(96, 125) < 0.02, "the neck/chest is outside the face-only gate");
+    }
+
+    #[test]
+    fn from_face_index_uses_reading_order() {
+        let (mut s, id) = adjustment_session();
+        let mut doc = (*s.active().unwrap().doc).clone();
+        add_skin_blob(&mut doc, 18, 100, 10, 10);
+        s.active_mut().unwrap().doc = std::sync::Arc::new(doc);
+        let big = Rect::from_xywh(70, 45, 52, 60);
+        let small = Rect::from_xywh(8, 90, 20, 20);
+
+        // Left to right: the small box is face 1, the big one face 2.
+        let r = from_face_cmd_with(&mut s, &json!({"layer": id.0, "faces": 2}), Some(&[big, small])).unwrap();
+        assert_eq!(r["mode"], "2");
+        let d = s.active().unwrap();
+        let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
+        assert!(mask.value(96, 78) > 0.5, "face 2 is the larger, right-hand face");
+        assert!(mask.value(18, 100) < 0.02, "face 1 stays out");
+
+        let _ = from_face_cmd_with(&mut s, &json!({"layer": id.0, "faces": 1}), Some(&[big, small])).unwrap();
+        let d = s.active().unwrap();
+        let mask = d.doc.layer(id).unwrap().mask.as_ref().unwrap();
+        assert!(mask.value(18, 100) > 0.2, "face 1 is the left-hand face");
+        assert!(mask.value(96, 78) < 0.05, "face 2 stays out");
+    }
+
+    #[test]
+    fn detect_faces_returns_boxes_and_touches_nothing() {
+        let (mut s, id) = adjustment_session();
+        let before_mask = s.active().unwrap().doc.layer(id).unwrap().mask.clone();
+        let label = s.active().unwrap().history.undo_label().map(str::to_string);
+        let big = Rect::from_xywh(70, 45, 52, 60);
+        let small = Rect::from_xywh(8, 90, 20, 20);
+        let r = detect_faces_with(&mut s, &json!({"layer": id.0}), Some(&[big, small])).unwrap();
+        assert_eq!(r["faces"], 2);
+        assert_eq!(r["boxes"], json!([[8, 90, 20, 20], [70, 45, 52, 60]]), "boxes are in reading order");
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layer(id).unwrap().mask, before_mask, "a scan never changes the mask");
+        assert_eq!(d.history.undo_label().map(str::to_string), label, "a scan is not a history step");
+    }
+
+    #[test]
+    fn from_face_rejects_bad_coverage_and_face_numbers() {
+        let (mut s, id) = adjustment_session();
+        for params in [json!({"layer": id.0, "coverage": "hair"}), json!({"layer": id.0, "faces": 0}), json!({"layer": id.0, "faces": -1})] {
+            assert!(from_face_cmd_with(&mut s, &params, Some(&[Rect::from_xywh(70, 48, 52, 58)])).is_err(), "{params}");
+        }
     }
 
     #[test]
