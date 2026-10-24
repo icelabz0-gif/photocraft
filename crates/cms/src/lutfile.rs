@@ -245,8 +245,8 @@ fn three_dl_scale(max: f64, header: bool) -> f64 {
 /// input channel ahead of the 3-D table (input `x` reads the shaper, sampled evenly over 0..1,
 /// at `x`, interpolated linearly), so each node of the table becomes the table's own trilinear
 /// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
-/// With as many shaper points as table nodes, as in Lustre files, the result is exact for an
-/// identity table and an approximation, at the table's resolution, otherwise.
+/// The table is baked with at least as many nodes as the shaper has points (up to [`MAX_SIZE`]):
+/// exact for an identity table, an approximation at that resolution otherwise.
 fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
     let m = shaper.len();
     if m < 2 || shaper.iter().any(|v| !v.is_finite()) {
@@ -268,9 +268,11 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
         let (a, b) = (shaper.get(i).copied().unwrap_or(0.0), shaper.get(i + 1).copied().unwrap_or(0.0));
         ((a + (b - a) * f) / scale).clamp(0.0, 1.0) as f32
     };
-    let n = lut.size;
+    // A shaper finer than the table is baked at the shaper's resolution (up to MAX_SIZE), so its
+    // curve survives a small table: a 2-node table would otherwise read it only at its two ends.
+    let n = lut.size.max(m.min(MAX_SIZE));
     let step = (n - 1) as f64;
-    let mut out = lut.clone();
+    let mut out = LutFile { size: n, data: vec![0.0; n * n * n * 3], ..lut.clone() };
     for b in 0..n {
         for g in 0..n {
             for r in 0..n {
@@ -479,6 +481,17 @@ mod tests {
         assert_eq!(grey(&with("0 0.1 0.3 1.0")), 51.0);
         // An even float ramp, written to three decimals, still changes nothing.
         assert_eq!(grey(&with("0 0.333 0.667 1.0")), 128.0);
+    }
+
+    /// #9170 review: a shaper with more points than the table keeps its curve: the table is
+    /// resampled at the shaper's resolution rather than reading the shaper at its own two nodes.
+    #[test]
+    fn three_dl_shaper_finer_than_the_table_keeps_its_curve() {
+        let grey = |l: &LutFile| (sample(l, [128.0 / 255.0; 3])[0] * 255.0).round();
+        let small = parse_3dl(&identity_3dl(&[0, 0, 512, 1023], 2)).unwrap();
+        // 0.502 lands between 0 and 512 at 0.506 of the way: 259 / 1023, so grey 65.
+        assert_eq!(grey(&small), 65.0);
+        assert_eq!(sample(&small, [1.0, 0.0, 1.0]), [1.0, 0.0, 1.0], "the ends stay put");
     }
 
     #[test]
