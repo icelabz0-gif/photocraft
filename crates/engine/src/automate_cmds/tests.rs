@@ -55,6 +55,38 @@ fn browse_runs_a_script_file() {
 }
 
 #[test]
+fn script_steps_can_name_the_active_documents_file() {
+    let dir = tmp("doc-tokens");
+    let psd = format!("{dir}/car.psd");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 6, "height": 4})).unwrap();
+    // A document that was never saved has no path: the step fails and nothing is written.
+    let steps = json!([["file.saveACopy", {"path": "{documentDir}/never.tga", "tgaBits": 32}]]);
+    let r = s.execute("file.scripts.browse", json!({"steps": steps})).unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(r["results"][0]["error"].as_str().unwrap().contains("no file yet"), "{r}");
+    assert!(!std::path::Path::new(&format!("{dir}/never.tga")).exists());
+    s.execute("file.saveACopy", json!({"path": psd})).unwrap();
+    s.active_mut().unwrap().path = Some(psd.clone());
+    let script = r#"
+        file.saveACopy {"path": "{documentPath}", "overwrite": true}
+        file.saveACopy {"path": "{documentDir}/{documentStem}_spec.tga", "layers": false, "tgaBits": 32}
+        file.saveACopy {"path": "{documentDir}/{documentName}.png", "layers": false}
+    "#;
+    let r = s.execute("file.scripts.browse", json!({"script": script})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    for name in ["car_spec.tga", "car.psd.png"] {
+        assert!(std::path::Path::new(&format!("{dir}/{name}")).exists(), "{name} is written beside the document");
+    }
+    // Only strings are expanded, at any depth; other text is left alone.
+    let v = expand_document_tokens(&json!({"a": ["{documentStem}", 3, {"b": "{documentName}-{documentDir}"}], "c": "{other}"}), Some("/x/y/z.psd"), 0).unwrap();
+    assert_eq!(v, json!({"a": ["z", 3, {"b": "z.psd-/x/y"}], "c": "{other}"}));
+    assert_eq!(expand_document_tokens(&json!("{documentDir}"), Some("/z.psd"), 0).unwrap(), json!("/"));
+    assert_eq!(expand_document_tokens(&json!("{documentDir}"), Some("z.psd"), 0).unwrap(), json!("."));
+    assert_eq!(expand_document_tokens(&json!("{documentDir}"), Some(r"C:\art\z.psd"), 0).unwrap(), json!(r"C:\art"));
+}
+
+#[test]
 fn browse_rejects_photoshop_extendscript() {
     let dir = tmp("jsx");
     let jsx = format!("{dir}/hello.jsx");

@@ -119,10 +119,57 @@ fn check_known(steps: &[(String, Value)], cmd: &str) -> Result<()> {
     }
 }
 
+/// Placeholders a script step's string params may carry for the active document's file (#7804),
+/// the counterpart of ExtendScript's `docRef.path` / `.name`.
+const DOCUMENT_TOKENS: [&str; 4] = ["{documentPath}", "{documentDir}", "{documentName}", "{documentStem}"];
+
+/// Deepest nesting of params searched for tokens.
+const TOKEN_DEPTH: usize = 16;
+
+type Expanded<T> = std::result::Result<T, String>;
+
+/// `params` with `{documentPath}`, `{documentDir}`, `{documentName}` and `{documentStem}` replaced
+/// by parts of the active document's file path. A document that was never saved has no path: a
+/// step using one of them then fails instead of writing next to the working directory.
+fn expand_document_tokens(params: &Value, doc_path: Option<&str>, depth: usize) -> Expanded<Value> {
+    match params {
+        Value::String(text) if DOCUMENT_TOKENS.iter().any(|t| text.contains(t)) => {
+            let path = doc_path.ok_or("the active document has no file yet, so the document path placeholders have nothing to stand for")?;
+            let dir = match path.rfind(['/', '\\']) {
+                Some(0) => path.get(..1).unwrap_or("/"),
+                Some(i) => path.get(..i).unwrap_or("."),
+                None => ".",
+            };
+            Ok(Value::String(
+                text.replace("{documentPath}", path)
+                    .replace("{documentDir}", dir)
+                    .replace("{documentName}", &file_name(path))
+                    .replace("{documentStem}", &stem(path)),
+            ))
+        }
+        Value::Array(items) if depth < TOKEN_DEPTH => {
+            items.iter().map(|v| expand_document_tokens(v, doc_path, depth + 1)).collect::<Expanded<Vec<_>>>().map(Value::Array)
+        }
+        Value::Object(map) if depth < TOKEN_DEPTH => map
+            .iter()
+            .map(|(k, v)| expand_document_tokens(v, doc_path, depth + 1).map(|v| (k.clone(), v)))
+            .collect::<Expanded<serde_json::Map<_, _>>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
+    }
+}
+
 fn run_steps(s: &mut Session, steps: &[(String, Value)]) -> Vec<Value> {
     let mut results = Vec::new();
     for (id, params) in steps {
-        match s.execute(id, params.clone()) {
+        let params = match expand_document_tokens(params, s.active().and_then(|d| d.path.as_deref()), 0) {
+            Ok(p) => p,
+            Err(e) => {
+                results.push(json!({"command": id, "error": e}));
+                break;
+            }
+        };
+        match s.execute(id, params) {
             // A called action reports a failed step inside an `Ok`; it stops the script too.
             Ok(r) => match crate::actions_cmds::nested_failure(id, &r) {
                 Some(error) => {
@@ -586,7 +633,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.scripts.browse",
             "Browse…",
             &["File", "Scripts"],
-            r##"{"path":script file | "script":text | "steps":[[id,params]…]} (JSON action, or one `command.id {json}` per line) → {steps, ok, results}"##,
+            r##"{"path":script file | "script":text | "steps":[[id,params]…]} (JSON action, or one `command.id {json}` per line; string params may use {documentPath}, {documentDir}, {documentName} and {documentStem} for the active document's file) → {steps, ok, results}"##,
             |_| Ok(()),
             browse
         ),
