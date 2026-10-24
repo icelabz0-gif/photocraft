@@ -433,14 +433,12 @@ pub(crate) fn browser(
                         st.toggled.insert(k);
                     }
                 }
-                hresp.context_menu(|ui| {
-                    if ui.button(tl!("Rename Group…")).clicked() {
+                crate::context_menu::show(&hresp, |m| {
+                    if m.item(tl!("Rename Group…")) {
                         st.renaming = Some((panel.to_string(), format!("group:{}", g.name), g.name.clone()));
-                        ui.close();
                     }
-                    if ui.button(tl!("Delete Group")).clicked() {
+                    if m.item(tl!("Delete Group")) {
                         ev.push(Ev::DeleteGroup(g.name.clone()));
-                        ui.close();
                     }
                 });
                 if hresp.dragged()
@@ -523,20 +521,17 @@ pub(crate) fn browser(
                     {
                         dropped = Some((it.key.clone(), pp));
                     }
-                    resp.context_menu(|ui| {
-                        if ui.button(tl!("Rename…")).clicked() {
+                    crate::context_menu::show(&resp, |m| {
+                        if m.item(tl!("Rename…")) {
                             st.renaming = Some((panel.to_string(), it.key.clone(), it.name.clone()));
-                            ui.close();
                         }
-                        if ui.button(tl!("Delete")).clicked() {
+                        if m.item(tl!("Delete")) {
                             ev.push(Ev::Delete(it.key.clone()));
-                            ui.close();
                         }
-                        ui.menu_button(tl!("Move to"), |ui| {
+                        m.submenu(tl!("Move to"), |m| {
                             for gname in group_names.iter().filter(|n| **n != g.name) {
-                                if ui.button(gname).clicked() {
+                                if m.item(gname) {
                                     ev.push(Ev::Move(it.key.clone(), gname.clone()));
-                                    ui.close();
                                 }
                             }
                         });
@@ -1172,14 +1167,12 @@ pub fn tool_presets_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             if resp.clicked() {
                 pick = Some(name.clone());
             }
-            resp.context_menu(|ui| {
-                if ui.button(tl!("Rename Tool Preset…")).clicked() {
+            crate::context_menu::show(&resp, |m| {
+                if m.item(tl!("Rename Tool Preset…")) {
                     app.ui.presets_ui.renaming = Some(("toolPresets".into(), name.clone(), name.clone()));
-                    ui.close();
                 }
-                if ui.button(tl!("Delete Tool Preset")).clicked() {
+                if m.item(tl!("Delete Tool Preset")) {
                     action = Some(("tool.presets.edit".into(), json!({"action": "delete", "preset": name})));
-                    ui.close();
                 }
             });
         }

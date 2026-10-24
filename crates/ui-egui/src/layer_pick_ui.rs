@@ -74,6 +74,23 @@ pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
     }
     let active = app.session.active().and_then(|st| st.active_layer).map(|l| l.0);
     let id = menu_id();
+    // A native menu where the app has them (`context_menu`).
+    let mut picked = None;
+    let native = crate::context_menu::show_native(ctx, id, egui::pos2(menu.pos[0], menu.pos[1]), |m| {
+        for (layer, name) in &menu.layers {
+            if m.check(Some(*layer) == active, name) {
+                picked = Some(*layer);
+            }
+        }
+    });
+    if let Some(open) = native {
+        if let Some(layer) = picked {
+            choose(app, layer);
+        } else if !open {
+            app.ui.layer_menu = None;
+        }
+        return;
+    }
     let screen = ctx.content_rect();
     let size = ctx.memory(|m| m.area_rect(id)).map_or(egui::vec2(200.0, 24.0 * menu.layers.len() as f32 + 12.0), |r| r.size());
     let pos = egui::pos2(menu.pos[0].min(screen.right() - size.x).max(screen.left()), menu.pos[1].min(screen.bottom() - size.y).max(screen.top()));

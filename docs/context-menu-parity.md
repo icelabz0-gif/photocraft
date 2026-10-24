@@ -1,6 +1,6 @@
 # Context-menu parity contract
 
-> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-20 · **Change:** minor (Zoom tool menu order, #6005; Type tool menu over committed type, #7324; earlier: Path Selection canvas menu, #1056; pasteboard row: the menu exists, #2462) · **Target:** Adobe Photoshop 2026
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-24 · **Change:** minor (macOS right-click menus are native NSMenus; earlier: Zoom tool menu order, #6005; Type tool menu over committed type, #7324; earlier: Path Selection canvas menu, #1056; pasteboard row: the menu exists, #2462) · **Target:** Adobe Photoshop 2026
 
 Status: implementation contract, updated 2026-10-09. Scope: canvas, document tabs, and panels. “Right-click” means a secondary pointer click; macOS Control-click should also open the same menu where the platform sends a context-menu gesture. Photoshop changes a context menu with the active tool, selection, and panel item. Adobe documents that principle but does not publish a complete current menu catalog. **Documented** means an Adobe source explicitly names the gesture or action. **Inferred** means a PhotoCraft design target or an item known from a main menu whose presence in a Photoshop context menu still needs a current-product capture. Do not present inferred rows as exact Photoshop menus. [Adobe: panels and menus](https://helpx.adobe.com/photoshop/using/panels-menus.html), [Adobe: shortcuts and context menus](https://helpx.adobe.com/sa_en/photoshop/using/customizing-keyboard-shortcuts.html).
 
@@ -13,6 +13,7 @@ Status: implementation contract, updated 2026-10-09. Scope: canvas, document tab
 5. Anchor at the pointer and clamp to the viewport; support keyboard context-menu key/Shift+F10 where available, Escape/outside click, separators only between nonempty groups, checked/radio state, keyboard navigation, and screen-reader labels.
 6. Use the same command id and enablement as the menu bar/options bar. Provide UI inspection data and control-channel operations to select a menu item without pixel coordinates, while retaining real pointer tests and screenshots.
 7. Test each menu model independently for conditional rows and wrong-state safety; test actual secondary-click routing, menu selection, undo/redo, and no accidental primary action.
+8. On macOS every right-click menu is a native `NSMenu`, as in Photoshop and every Mac app; elsewhere it is an egui popup. Write a menu once, against `context_menu::MenuUi` (items, check items, separators, submenus), and open it with `context_menu::show` (a widget's right-click) or `context_menu::show_native` (a menu the app opens from its own state, like the canvas menus). The native menu's choice runs the same code as an egui click. Native menus open on the right button's press, as a Mac app's do (`context_menu::RightPress` completes the press into a click; a press that may start a right-drag, Alt brush resize or right-click erase, keeps its release); egui menus open on the release. With a control channel attached the menus stay egui popups, so agents can inspect, click and screenshot them. A menu holding a slider or field (`MenuUi::egui_only`) stays an egui popup everywhere.
 
 ## Canvas tool matrix
 
@@ -100,6 +101,7 @@ Each slice needs pure model tests (including every item dispatching a known comm
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | macOS: every right-click menu (canvas, panels, tabs, text fields, dialogs) is a native NSMenu; dispatch rule 8 |
 | 2026-10-20 | trivial | Zoom tool menu order (#6005) |
 | 2026-10-18 | minor | Type tool menu over committed type (#7324) |
 | 2026-10-15 | trivial | Pasteboard row: the colour menu exists since #2462 |

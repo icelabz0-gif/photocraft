@@ -205,7 +205,19 @@ fn enabled(open: &Open, action: Action) -> bool {
 pub fn show(ctx: &Context) {
     let mut state = State::load(ctx);
     let Some(open) = state.open else { return };
-    if let Some(action) = draw(ctx, &open) {
+    // A native menu where the app has them (`context_menu`).
+    let mut chosen = None;
+    let action = match crate::context_menu::show_native(ctx, menu_id(), open.pos, |m| rows(m, &open, &mut chosen)) {
+        // Closed without a choice.
+        Some(false) if chosen.is_none() => {
+            state.close();
+            state.store(ctx);
+            return;
+        }
+        Some(_) => chosen,
+        None => draw(ctx, &open),
+    };
+    if let Some(action) = action {
         // The field keeps its focus through this pass's click; the rule comes back next pass.
         state.close();
         state.store(ctx);
@@ -233,22 +245,31 @@ fn draw(ctx: &Context, open: &Open) -> Option<Action> {
             v.widgets.hovered.corner_radius = egui::CornerRadius::same(3);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.set_width(170.0);
-            for row in ROWS {
-                let Some((label, keys, action)) = *row else {
-                    ui.separator();
-                    continue;
-                };
-                let mut item = egui::Button::new(tl!(label)).min_size(egui::vec2(170.0, 20.0));
-                if !keys.is_empty() {
-                    item = item.shortcut_text(crate::shortcuts::pretty(keys));
-                }
-                if ui.add_enabled(enabled(open, action), item).clicked() {
-                    chosen = Some(action);
-                }
-            }
+            rows(&mut crate::context_menu::MenuUi::egui(ui), open, &mut chosen);
         });
     });
     chosen
+}
+
+/// The menu's rows; `chosen` gets the chosen one.
+fn rows(m: &mut crate::context_menu::MenuUi, open: &Open, chosen: &mut Option<Action>) {
+    for row in ROWS {
+        let Some((label, keys, action)) = *row else {
+            m.separator();
+            continue;
+        };
+        let (label, on) = (tl!(label), enabled(open, action));
+        let draw = |ui: &mut Ui| {
+            let mut item = egui::Button::new(label).min_size(egui::vec2(170.0, 20.0));
+            if !keys.is_empty() {
+                item = item.shortcut_text(crate::shortcuts::pretty(keys));
+            }
+            ui.add_enabled(on, item)
+        };
+        if m.row_open(crate::context_menu::Row::new(label).enabled(on).shortcut(keys), draw) {
+            *chosen = Some(action);
+        }
+    }
 }
 
 /// Do `action` in `field`: give it its focus back and the input that does the same from the

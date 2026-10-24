@@ -5,6 +5,8 @@
 use photocraft_doc::{LabelColor, Layer, LayerContent};
 use serde_json::{Value, json};
 
+use crate::context_menu::{MenuUi, Row};
+
 /// One entry: label, command id. `None` = separator.
 pub type Entry = Option<(&'static str, &'static str)>;
 
@@ -143,80 +145,76 @@ pub fn effects_entries() -> Vec<Entry> {
 
 /// Render the menu. Pushes `(command, params)` actions; `Value::Null` params mean "invoke like the
 /// menu item" (opens the command's dialog when it has one).
-pub fn show(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) -> bool {
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(220.0);
+pub fn show(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) -> bool {
+    m.scroll(|m| {
+        m.min_width(220.0);
         let mut rename = false;
         let has_selection = app.session.active().is_some_and(|s| s.doc.selection.is_some());
-        items(app, ui, l, on_set, entries(l, on_set, has_selection), actions);
-        ui.separator();
-        if ui.button(tl!("Rename Layer…")).clicked() {
+        items(app, m, l, on_set, entries(l, on_set, has_selection), actions);
+        m.separator();
+        if m.item(tl!("Rename Layer…")) {
             rename = true;
-            ui.close();
         }
-        color_menu(app, ui, l, on_set, actions);
+        color_menu(app, m, l, on_set, actions);
         rename
     })
 }
 
 /// The menu of `l`'s layer-mask thumbnail (#4575), in Photoshop's order. It acts on `l`, which it
 /// selects first like the row menu.
-pub fn show_mask(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, actions: &mut Vec<(String, Value)>) {
+pub fn show_mask(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, actions: &mut Vec<(String, Value)>) {
     let Some(mask) = &l.mask else { return };
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(220.0);
+    m.scroll(|m| {
+        m.min_width(220.0);
         let edits = vec![
             Some((tl!(mask_toggle_label(mask.enabled)), "layer.layerMask.enabled")),
             Some((tl!("Delete Layer Mask"), "layer.layerMask.delete")),
             Some((tl!("Apply Layer Mask"), "layer.layerMask.apply")),
         ];
-        items(app, ui, l, false, edits, actions);
-        ui.separator();
+        items(app, m, l, false, edits, actions);
+        m.separator();
         // ⌘⇧-, ⌘⌥- and ⌘⇧⌥-clicking the thumbnail, as menu items.
         let loads =
             [(tl!("Add Mask to Selection"), "add"), (tl!("Subtract Mask from Selection"), "subtract"), (tl!("Intersect Mask with Selection"), "intersect")];
         for (label, operation) in loads {
-            if ui.button(label).clicked() {
+            if m.item(label) {
                 actions.push(("layer.select".into(), json!({"layer": l.id.0})));
                 actions.push(("select.loadSelection".into(), json!({"channel": "mask", "layer": l.id.0, "operation": operation})));
-                ui.close();
             }
         }
-        ui.separator();
-        if ui.add_enabled(crate::menus::is_enabled(app, "select.selectAndMask"), egui::Button::new(tl!("Select and Mask…"))).clicked() {
+        m.separator();
+        if m.item_enabled(crate::menus::is_enabled(app, "select.selectAndMask"), tl!("Select and Mask…")) {
             // Like double-clicking the thumbnail with that preference on: it refines the mask.
             actions.push(("layer.select".into(), json!({"layer": l.id.0})));
             actions.push(("ui.maskTarget".into(), json!(true)));
             actions.push(("select.selectAndMask".into(), Value::Null));
-            ui.close();
         }
         // Layer Mask Display Options: the rubylith's colour and opacity (`channel.options`).
-        if ui.button(tl!("Mask Options…")).clicked() {
+        if m.item(tl!("Mask Options…")) {
             actions.push(("layer.select".into(), json!({"layer": l.id.0})));
             actions.push(("ui.maskTarget".into(), json!(true)));
             actions.push(("channel.options".into(), Value::Null));
-            ui.close();
         }
     });
 }
 
 /// Render the layer style menu of `l`'s effect rows ([`effects_entries`]); the actions select `l`
 /// first when it isn't the active layer.
-pub fn show_effects(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, actions: &mut Vec<(String, Value)>) {
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(200.0);
-        items(app, ui, l, false, effects_entries(), actions);
+pub fn show_effects(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, actions: &mut Vec<(String, Value)>) {
+    m.scroll(|m| {
+        m.min_width(200.0);
+        items(app, m, l, false, effects_entries(), actions);
     });
 }
 
 /// The command items of a layer menu, separators collapsed.
-fn items(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, entries: Vec<Entry>, actions: &mut Vec<(String, Value)>) {
+fn items(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, on_set: bool, entries: Vec<Entry>, actions: &mut Vec<(String, Value)>) {
     let mut last_sep = true;
     for e in entries {
         match e {
             None => {
                 if !last_sep {
-                    ui.separator();
+                    m.separator();
                 }
                 last_sep = true;
             }
@@ -230,12 +228,11 @@ fn items(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool,
                 // selected first when clicked, so its items stay available.
                 let is_active = app.session.active().is_some_and(|s| s.active_layer == Some(l.id));
                 let enabled = !(on_set && single_layer_only(id)) && if on_set || is_active { crate::menus::is_enabled(app, id) } else { true };
-                if ui.add_enabled(enabled, egui::Button::new(tl!(&label))).clicked() {
+                if m.item_enabled(enabled, tl!(&label)) {
                     if !on_set {
                         actions.push(("layer.select".into(), json!({"layer": l.id.0})));
                     }
                     actions.push((id.into(), Value::Null));
-                    ui.close();
                 }
             }
         }
@@ -257,22 +254,23 @@ fn common_color(app: &crate::PhotocraftApp, l: &Layer, on_set: bool) -> Option<L
     labels.all(|c| c == first).then_some(first)
 }
 
-fn color_menu(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) {
-    ui.menu_button(tl!("Color"), |ui| {
-        color_choices(app, ui, l, on_set, actions);
+fn color_menu(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) {
+    m.submenu(tl!("Color"), |m| {
+        color_choices(app, m, l, on_set, actions);
     });
 }
 
 /// The eye column opens the same color choices directly, without the row's full context menu.
-pub(crate) fn color_choices(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) {
+pub(crate) fn color_choices(app: &crate::PhotocraftApp, m: &mut MenuUi, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) {
     let current = common_color(app, l, on_set);
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(170.0);
+    m.scroll(|m| {
+        m.min_width(170.0);
         for color in LabelColor::ALL {
             if color == LabelColor::Red {
-                ui.separator();
+                m.separator();
             }
-            if color_button(ui, color, current == Some(color)).clicked() {
+            let checked = current == Some(color);
+            if m.row(Row::new(color_name(color)).checked(checked), |ui| color_button(ui, color, checked)) {
                 let params = if on_set {
                     json!({"color": color.id()})
                 } else {
@@ -280,7 +278,6 @@ pub(crate) fn color_choices(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &L
                     json!({"layer": l.id.0, "color": color.id()})
                 };
                 actions.push(("layer.setLabelColor".into(), params));
-                ui.close();
             }
         }
     });
@@ -392,7 +389,7 @@ mod tests {
                     let st = app.session.active().unwrap();
                     let l = st.doc.layer(clicked).unwrap().clone();
                     let mut actions = Vec::new();
-                    show(app, ui, &l, false, &mut actions);
+                    show(app, &mut MenuUi::egui(ui), &l, false, &mut actions);
                     for (id, params) in actions {
                         crate::menus::invoke(app, ui.ctx(), &id, params).unwrap();
                     }
@@ -562,7 +559,7 @@ mod tests {
                 egui::Area::new(id).order(egui::Order::Foreground).default_pos(egui::pos2(300.0, 250.0)).show(ui.ctx(), |ui| {
                     egui::Frame::menu(ui.style()).show(ui, |ui| {
                         let start = ui.next_widget_position().y;
-                        show(&app, ui, &layer, false, &mut Vec::new());
+                        show(&app, &mut MenuUi::egui(ui), &layer, false, &mut Vec::new());
                         content = ui.min_rect().bottom() - start;
                     });
                 });

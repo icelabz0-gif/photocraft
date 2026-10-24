@@ -12,14 +12,28 @@
 //!   equivalents go back to egui as the key press that was made (the event's modifiers, not the
 //!   item's: AppKit may match ⌘R to a ⇧⌘R item), so PhotoCraft's key rules still apply.
 //! - Hide is a custom item calling `NSApplication hide:`, as the predefined one always takes ⌘H.
+//!
+//! **Context menus** (`photocraft_ui_egui::context_menu`) are `NSMenu`s popped up at the pointer,
+//! with muda's items, so a choice arrives through the same `MenuEvent` handler. muda only pops a
+//! menu up through an `unsafe` call (it takes a raw `NSView` pointer), and the workspace forbids
+//! `unsafe`, so the menu goes the safe way round: built as a muda submenu, it is appended to the
+//! menu bar just long enough to take its `NSMenu` back from `NSApp.mainMenu` and detach it, all
+//! before AppKit draws again, and then `popUpMenuPositioningItem:atLocation:inView:` (safe in
+//! objc2) shows it. That call runs AppKit's menu tracking loop until the menu closes, and winit
+//! panics if its event handler is entered again meanwhile, so it runs from the main queue, once
+//! winit's handler (and the egui frame) has returned.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Mutex, PoisonError};
 
+use dispatch2::MainThreadBound;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSEventType};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSMenu};
+use objc2_foundation::NSPoint;
 use photocraft_ui_egui::native_menu::{self, Backend, Chord, Event, MenuBar, MenuRole, Node, Standard};
 
 enum Handle {
@@ -45,21 +59,43 @@ struct Chosen {
     mods: [bool; 4],
 }
 
+enum Msg {
+    Chosen(Chosen),
+    /// Context menu `serial` closed.
+    Closed(u64),
+}
+
+/// The context menu showing.
+struct ContextMenu {
+    serial: u64,
+    /// Kept alive while it shows: dropping it cancels the menu.
+    _menu: Submenu,
+    /// Its items' context ids, by muda id.
+    ids: HashMap<String, String>,
+}
+
 pub struct MacMenu {
     menu: Option<Menu>,
     /// By muda id.
     entries: HashMap<String, Entry>,
-    rx: Receiver<Chosen>,
+    rx: Receiver<Msg>,
+    tx: Sender<Msg>,
+    repaint: egui::Context,
     structure: u64,
     /// The Window menu, the muda ids of its items, and its [`native_menu::window_key`].
     window: Option<(Submenu, Vec<String>, u64)>,
+    context: Option<ContextMenu>,
 }
+
+/// Where muda's event handler sends a choice: the newest [`MacMenu`]'s channel, and the context to
+/// wake. muda keeps the first handler for the life of the process.
+static CHOSEN: Mutex<Option<(Sender<Msg>, egui::Context)>> = Mutex::new(None);
 
 impl MacMenu {
     pub fn new(ctx: &egui::Context) -> MacMenu {
         let (tx, rx) = channel();
-        let repaint = ctx.clone();
-        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        *CHOSEN.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx.clone(), ctx.clone()));
+        MenuEvent::set_event_handler(Some(|e: MenuEvent| {
             // AppKit calls this on the main thread, from the event that chose the item: a key
             // equivalent is a key-down, a click a mouse-up (or ↩ inside the open menu).
             let event = MainThreadMarker::new().and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent());
@@ -67,11 +103,38 @@ impl MacMenu {
             let flags = event.as_ref().map(|ev| ev.modifierFlags()).unwrap_or(NSEventModifierFlags::empty());
             let mods = [NSEventModifierFlags::Command, NSEventModifierFlags::Control, NSEventModifierFlags::Option, NSEventModifierFlags::Shift]
                 .map(|m| flags.contains(m));
-            let _ = tx.send(Chosen { id: e.id.0, key, mods });
-            // Wake egui, so the item runs now rather than on the next mouse move.
-            repaint.request_repaint();
+            if let Some((tx, repaint)) = CHOSEN.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                let _ = tx.send(Msg::Chosen(Chosen { id: e.id.0, key, mods }));
+                // Wake egui, so the item runs now rather than on the next mouse move.
+                repaint.request_repaint();
+            }
         }));
-        MacMenu { menu: None, entries: HashMap::new(), rx, structure: 0, window: None }
+        MacMenu { menu: None, entries: HashMap::new(), rx, tx, repaint: ctx.clone(), structure: 0, window: None, context: None }
+    }
+
+    /// Build context menu `serial` and take its `NSMenu`, detached from the menu bar (see the
+    /// module docs). `None` before the menu bar is installed, or if AppKit's menu bar isn't ours.
+    pub(crate) fn context_menu(&mut self, serial: u64, nodes: &[Node]) -> Option<Retained<NSMenu>> {
+        let mtm = MainThreadMarker::new()?;
+        let bar = self.menu.as_ref()?;
+        // The title finds it in the menu bar; a popped-up menu shows no title.
+        let title = format!("PhotoCraft context menu {serial}");
+        let menu = Submenu::new(&title, true);
+        let mut ids = HashMap::new();
+        append_context(&menu, nodes, serial, &mut ids);
+        bar.append(&menu).ok()?;
+        let ns_bar = NSApplication::sharedApplication(mtm).mainMenu();
+        let last = ns_bar.as_ref().map_or(0, |b| b.numberOfItems()) - 1;
+        let host = ns_bar.filter(|_| last >= 0).and_then(|b| b.itemAtIndex(last));
+        let ns_menu = host.as_ref().and_then(|h| h.submenu()).filter(|m| m.title().to_string() == title);
+        if let (Some(host), Some(_)) = (&host, &ns_menu) {
+            host.setSubmenu(None);
+        }
+        // Out of the menu bar again before AppKit draws it.
+        let _ = bar.remove(&menu);
+        let ns_menu = ns_menu?;
+        self.context = Some(ContextMenu { serial, _menu: menu, ids });
+        Some(ns_menu)
     }
 
     fn build(&mut self, bar: &MenuBar) {
@@ -226,7 +289,23 @@ impl Backend for MacMenu {
 
     fn drain(&mut self) -> Vec<Event> {
         let mut out = Vec::new();
-        while let Ok(chosen) = self.rx.try_recv() {
+        while let Ok(msg) = self.rx.try_recv() {
+            let chosen = match msg {
+                Msg::Chosen(chosen) => chosen,
+                Msg::Closed(serial) => {
+                    if self.context.as_ref().is_some_and(|c| c.serial == serial) {
+                        self.context = None;
+                    }
+                    out.push(Event::ContextClosed(serial));
+                    continue;
+                }
+            };
+            if let Some(c) = &self.context
+                && let Some(id) = c.ids.get(&chosen.id)
+            {
+                out.push(Event::ContextChosen { serial: c.serial, id: id.clone() });
+                continue;
+            }
             // Ids that aren't ours are AppKit's own items (Services, Zoom, …), already handled.
             let Some(e) = self.entries.get(&chosen.id) else { continue };
             if e.command == native_menu::HIDE {
@@ -247,6 +326,62 @@ impl Backend for MacMenu {
             });
         }
         out
+    }
+
+    fn can_popup(&self) -> bool {
+        true
+    }
+
+    fn popup(&mut self, serial: u64, nodes: &[Node], pos: [f32; 2]) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let Some(ns_menu) = self.context_menu(serial, nodes) else { return false };
+        let ns_menu = MainThreadBound::new(ns_menu, mtm);
+        let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
+        let at = NSPoint::new(f64::from(pos[0]), f64::from(pos[1]));
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                pop_up(&ns_menu.into_inner(mtm), mtm, at);
+            }
+            let _ = tx.send(Msg::Closed(serial));
+            repaint.request_repaint();
+        });
+        true
+    }
+}
+
+/// Show `menu` at `at` (points from the top left of the key window's content) until it closes.
+fn pop_up(menu: &NSMenu, mtm: MainThreadMarker, at: NSPoint) {
+    let app = NSApplication::sharedApplication(mtm);
+    // winit's content view is flipped: its origin is the top left, as egui's.
+    match app.keyWindow().or_else(|| app.mainWindow()).and_then(|w| w.contentView()) {
+        Some(view) => menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&view)),
+        None => menu.popUpMenuPositioningItem_atLocation_inView(None, NSEvent::mouseLocation(), None),
+    };
+}
+
+/// Context menu `serial`'s rows; muda ids `context.<serial>.<id>`, recorded in `ids`.
+fn append_context(sub: &Submenu, nodes: &[Node], serial: u64, ids: &mut HashMap<String, String>) {
+    for n in nodes {
+        match n {
+            Node::Separator => {
+                let _ = sub.append(&PredefinedMenuItem::separator());
+            }
+            Node::Submenu { label, children, .. } => {
+                let s = Submenu::new(escape(label), !children.is_empty());
+                append_context(&s, children, serial, ids);
+                let _ = sub.append(&s);
+            }
+            Node::Item(it) => {
+                let id = format!("context.{serial}.{}", it.id);
+                let accel = it.shortcut.as_deref().and_then(Chord::parse).filter(Chord::native_ok).as_ref().and_then(accelerator);
+                let _ = match it.checked {
+                    Some(c) => sub.append(&CheckMenuItem::with_id(id.clone(), escape(&it.label), it.enabled, c, accel)),
+                    None => sub.append(&MenuItem::with_id(id.clone(), escape(&it.label), it.enabled, accel)),
+                };
+                ids.insert(id, it.id.clone());
+            }
+            Node::Standard(_) => {}
+        }
     }
 }
 

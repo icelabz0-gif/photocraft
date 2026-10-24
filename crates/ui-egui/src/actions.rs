@@ -926,10 +926,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 if hresp.clicked() {
                     set_toggled = Some(set.to_string());
                 }
-                hresp.context_menu(|ui| {
-                    if ui.button(tl!("Save Set…")).clicked() {
+                crate::context_menu::show(&hresp, |m| {
+                    if m.item(tl!("Save Set…")) {
                         save_set = Some(set.to_string());
-                        ui.close();
                     }
                 });
             }
@@ -1012,28 +1011,27 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
             // Clicks inside stay open, so Shift and Command can both be ticked; every item that
             // finishes closes the menu itself.
-            egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                ui.label(tl!("Keyboard Shortcuts"));
+            crate::context_menu::show_with(&resp, egui::PopupCloseBehavior::CloseOnClickOutside, |m| {
+                m.label(tl!("Keyboard Shortcuts"));
                 let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
                 // Photoshop's Action Options: a function key, with Shift and Command (#7646).
                 let (key, mut shift, mut command) = photocraft_engine::atn_cmds::parse_function_key(&current).unwrap_or((0, false, false));
                 for n in std::iter::once(0).chain(1..=12) {
                     let label = if n == 0 { tl!("None").to_string() } else { format!("F{n}") };
-                    if ui.selectable_label(key == n, label).clicked() {
+                    if m.check(key == n, &label) {
                         let chosen = if n == 0 { String::new() } else { photocraft_engine::atn_cmds::function_key_name(n, shift, command) };
                         let _ = assign_shortcut(app, name, &chosen);
-                        ui.close();
                     }
                 }
-                ui.add_enabled_ui(key > 0, |ui| {
-                    let command_label = if cfg!(target_os = "macos") { tl!("Command") } else { tl!("Ctrl") };
-                    let toggled = ui.checkbox(&mut shift, tl!("Shift")).changed() | ui.checkbox(&mut command, command_label).changed();
-                    if toggled {
-                        let _ = assign_shortcut(app, name, &photocraft_engine::atn_cmds::function_key_name(key, shift, command));
-                    }
-                });
-                ui.separator();
-                ui.menu_button(tl!("Color"), |ui| {
+                let on = key > 0;
+                let command_label = if cfg!(target_os = "macos") { tl!("Command") } else { tl!("Ctrl") };
+                let mut toggled = m.toggle(&mut shift, crate::context_menu::Row::new(tl!("Shift")).enabled(on), |ui, v| ui.add_enabled(on, egui::Checkbox::new(v, tl!("Shift"))));
+                toggled |= m.toggle(&mut command, crate::context_menu::Row::new(command_label).enabled(on), |ui, v| ui.add_enabled(on, egui::Checkbox::new(v, command_label)));
+                if toggled {
+                    let _ = assign_shortcut(app, name, &photocraft_engine::atn_cmds::function_key_name(key, shift, command));
+                }
+                m.separator();
+                m.submenu(tl!("Color"), |m| {
                     for (id, label) in [
                         ("", tl!("None")),
                         ("red", tl!("Red")),
@@ -1044,9 +1042,8 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ("violet", tl!("Violet")),
                         ("gray", tl!("Gray")),
                     ] {
-                        if ui.selectable_label(swatch == id, label).clicked() {
+                        if m.check(swatch == id, label) {
                             let _ = app.run("actions.setColor", json!({"action": i, "color": id}));
-                            ui.close();
                         }
                     }
                 });

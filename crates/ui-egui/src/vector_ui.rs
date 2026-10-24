@@ -1873,24 +1873,23 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 {
                     ui.ctx().data_mut(|d| d.insert_temp(rename_id, PathRename { key: key.clone(), text, focused: false }));
                 }
-                resp.context_menu(|ui| {
-                    crate::widgets::menu_scroll(ui, |ui| {
-                        ui.set_min_width(190.0);
+                crate::context_menu::show(&resp, |m| {
+                    m.scroll(|m| {
+                        m.min_width(190.0);
                         let entry = PathEntry { name: name.clone(), path: path.clone(), kind: *kind };
                         let can_paint = app.session.active().and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id))).is_some_and(|l| l.surface().is_some());
                         for (label, cmd, params) in path_context_actions(&entry, &doc, st_layer) {
                             let enabled = !matches!(cmd, "path.fill" | "path.stroke") || can_paint;
-                            if ui.add_enabled(enabled, egui::Button::new(tl!(label))).clicked() {
+                            if m.item_enabled(enabled, tl!(label)) {
                                 if cmd == "path.stroke" {
                                     // Stroke Path… asks for the tool first, as in Photoshop (#2978).
                                     stroke_dialog = Some(params.get("name").and_then(Value::as_str).unwrap_or("work").to_string());
                                 } else if cmd == "path.rename" && params.get("to").is_none() {
                                     let edit = PathRename { key: key.clone(), text: name.clone(), focused: false };
-                                    ui.ctx().data_mut(|d| d.insert_temp(rename_id, edit));
+                                    resp.ctx.data_mut(|d| d.insert_temp(rename_id, edit));
                                 } else {
                                     action = Some((cmd, params));
                                 }
-                                ui.close();
                             }
                         }
                     });

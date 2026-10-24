@@ -3016,8 +3016,8 @@ pub(crate) fn position_size_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t
     lbl(ui, "H:");
     let rh = crate::widgets::value_field_extent(ui, &mut h, -hlim_u..=hlim_u, suffix, size_w, places, units, side_h);
     for r in [&rw, &rh] {
-        r.context_menu(|ui| {
-            if let Some(name) = crate::rulers::unit_menu(ui, u.unit) {
+        crate::context_menu::show(r, |m| {
+            if let Some(name) = crate::rulers::unit_menu(m, u.unit) {
                 set_size_unit(app, name);
             }
         });

@@ -167,10 +167,9 @@ pub(super) fn row(
                         if resp.clicked() {
                             chosen_user = Some(contour_param(u));
                         }
-                        resp.context_menu(|ui| {
-                            if ui.button(tl!("Delete Contour")).clicked() {
+                        crate::context_menu::show(&resp, |m| {
+                            if m.item(tl!("Delete Contour")) {
                                 delete = Some(name.clone());
-                                ui.close();
                             }
                         });
                         if i % 4 == 3 {

@@ -515,9 +515,11 @@ fn ramp(app: &mut PhotocraftApp, ui: &mut egui::Ui, height: f32) {
         let c = ramp_color(cp.ramp, cp.web_safe_ramp, fg, bg, x, y);
         set_color(app, ui.ctx(), target, c);
     }
-    resp.context_menu(|ui| {
-        widgets::style_spectrum_popup_menu(ui);
-        ramp_menu(app, ui);
+    crate::context_menu::show(&resp, |m| {
+        if let Some(ui) = m.ui() {
+            widgets::style_spectrum_popup_menu(ui);
+        }
+        ramp_menu(app, m);
     });
     for (r, c, name) in [(white, [1.0; 3], "White"), (black, [0.0; 3], "Black")] {
         let b = ui.interact(r, ui.id().with(("color-panel-box", name)), Sense::click());
@@ -723,22 +725,29 @@ pub(crate) fn hex_code(rgb: [f32; 3]) -> String {
 
 /// A panel menu row with Photoshop's check mark column.
 fn check_item(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
-    ui.button(format!("{}{}", if on { "✔ " } else { "   " }, tl!(label))).clicked()
+    check_row(&mut crate::context_menu::MenuUi::egui(ui), on, label)
+}
+
+/// A check row: a ✔ before the label in egui, a native check mark otherwise. Closes the menu
+/// when chosen.
+fn check_row(m: &mut crate::context_menu::MenuUi, on: bool, label: &str) -> bool {
+    let label = tl!(label);
+    m.row_open(crate::context_menu::Row::new(label).checked(on), |ui| ui.button(format!("{}{}", if on { "✔ " } else { "   " }, label)))
 }
 
 /// The ramp choices and Make Ramp Web Safe (the panel menu's last section and the ramp's
 /// right-click menu).
-fn ramp_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+fn ramp_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
     for r in ColorRamp::ALL {
-        if check_item(ui, app.ui.color_panel.ramp == r, r.label()) {
+        if check_row(m, app.ui.color_panel.ramp == r, r.label()) {
             app.ui.color_panel.ramp = r;
-            ui.close();
+            m.close();
         }
     }
-    ui.separator();
-    if check_item(ui, app.ui.color_panel.web_safe_ramp, "Make Ramp Web Safe") {
+    m.separator();
+    if check_row(m, app.ui.color_panel.web_safe_ramp, "Make Ramp Web Safe") {
         app.ui.color_panel.web_safe_ramp = !app.ui.color_panel.web_safe_ramp;
-        ui.close();
+        m.close();
     }
 }
 
@@ -762,5 +771,5 @@ pub(crate) fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.close();
     }
     ui.separator();
-    ramp_menu(app, ui);
+    ramp_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
 }

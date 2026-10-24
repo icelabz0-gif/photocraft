@@ -252,48 +252,48 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                 }
             }
-            resp.context_menu(|ui| {
-                crate::widgets::menu_scroll(ui, |ui| {
-                    ui.set_min_width(210.0);
+            crate::context_menu::show(&resp, |m| {
+                m.scroll(|m| {
+                    m.min_width(210.0);
                     let a = &mut actions;
                     match row {
                         Row::Alpha(i) => {
-                            let ch = &doc.channels[i];
-                            item(ui, a, "Duplicate Channel", "channel.duplicate", json!({ "channel": i }));
-                            item(ui, a, "Delete Channel", "channel.delete", json!({ "channel": i }));
-                            item(ui, a, "Rename Channel…", "ui.renameChannel", json!(i));
-                            item(ui, a, "Channel Options…", "ui.channelOptions", json!(i));
-                            ui.separator();
+                            let Some(ch) = doc.channels.get(i) else { return };
+                            item(m, a, "Duplicate Channel", "channel.duplicate", json!({ "channel": i }));
+                            item(m, a, "Delete Channel", "channel.delete", json!({ "channel": i }));
+                            item(m, a, "Rename Channel…", "ui.renameChannel", json!(i));
+                            item(m, a, "Channel Options…", "ui.channelOptions", json!(i));
+                            m.separator();
                             if ch.spot.is_some() {
-                                item(ui, a, "Merge Spot Channel", "channel.mergeSpot", json!({ "channel": i }));
-                                item(ui, a, "Convert to Alpha Channel", "channel.options", json!({ "channel": i, "indicates": "masked" }));
+                                item(m, a, "Merge Spot Channel", "channel.mergeSpot", json!({ "channel": i }));
+                                item(m, a, "Convert to Alpha Channel", "channel.options", json!({ "channel": i, "indicates": "masked" }));
                             } else {
-                                indicates_items(ui, a, json!(i), ch.indicates);
-                                overlay_colors(ui, a, json!(i));
+                                indicates_items(m, a, json!(i), ch.indicates);
+                                overlay_colors(m, a, json!(i));
                             }
                         }
                         Row::QuickMask => {
-                            item(ui, a, "Exit Quick Mask", "select.editInQuickMaskMode", json!({ "on": false }));
-                            item(ui, a, "Quick Mask Options…", "ui.channelOptions", json!("quickMask"));
-                            indicates_items(ui, a, json!("quickMask"), doc.quick_mask.as_ref().map(|q| q.indicates).unwrap_or_default());
-                            overlay_colors(ui, a, json!("quickMask"));
+                            item(m, a, "Exit Quick Mask", "select.editInQuickMaskMode", json!({ "on": false }));
+                            item(m, a, "Quick Mask Options…", "ui.channelOptions", json!("quickMask"));
+                            indicates_items(m, a, json!("quickMask"), doc.quick_mask.as_ref().map(|q| q.indicates).unwrap_or_default());
+                            overlay_colors(m, a, json!("quickMask"));
                         }
                         Row::Composite | Row::Color(_) => {
-                            item(ui, a, "Duplicate Channel", "channel.duplicate", json!({ "channel": row.reference() }));
+                            item(m, a, "Duplicate Channel", "channel.duplicate", json!({ "channel": row.reference() }));
                         }
                         Row::LayerMask => {
                             let enabled = masked.as_ref().and_then(|l| l.mask.as_ref()).is_none_or(|m| m.enabled);
-                            item(ui, a, crate::layer_menu_ui::mask_toggle_label(enabled), "layer.layerMask.enabled", json!({}));
-                            item(ui, a, "Delete Layer Mask", "layer.layerMask.delete", json!({}));
-                            item(ui, a, "Layer Mask Display Options…", "ui.channelOptions", json!("mask"));
+                            item(m, a, crate::layer_menu_ui::mask_toggle_label(enabled), "layer.layerMask.enabled", json!({}));
+                            item(m, a, "Delete Layer Mask", "layer.layerMask.delete", json!({}));
+                            item(m, a, "Layer Mask Display Options…", "ui.channelOptions", json!("mask"));
                         }
                     }
-                    ui.separator();
-                    item(ui, a, "New Channel…", "channel.new", json!({}));
-                    item(ui, a, "New Spot Channel…", "ui.newSpotChannel", json!({}));
-                    ui.separator();
-                    item(ui, a, "Split Channels", "channel.split", json!({}));
-                    item(ui, a, "Merge Channels…", "channel.merge", json!({}));
+                    m.separator();
+                    item(m, a, "New Channel…", "channel.new", json!({}));
+                    item(m, a, "New Spot Channel…", "ui.newSpotChannel", json!({}));
+                    m.separator();
+                    item(m, a, "Split Channels", "channel.split", json!({}));
+                    item(m, a, "Merge Channels…", "channel.merge", json!({}));
                 });
             });
         }
@@ -420,24 +420,27 @@ pub fn fit_thumb(cell: Rect, w: u32, h: u32) -> (Rect, Rect) {
     (Rect::from_center_size(cell.center(), size), uv)
 }
 
-fn item(ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>, label: &str, cmd: &str, p: Value) {
-    if ui.button(tl!(&label)).clicked() {
+fn item(m: &mut crate::context_menu::MenuUi, actions: &mut Vec<(String, Value)>, label: &str, cmd: &str, p: Value) {
+    if m.item(tl!(&label)) {
         actions.push((cmd.into(), p));
-        ui.close();
     }
 }
 
 /// Channel Options › Color Indicates.
-fn indicates_items(ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>, channel: Value, current: ColorIndicates) {
+fn indicates_items(m: &mut crate::context_menu::MenuUi, actions: &mut Vec<(String, Value)>, channel: Value, current: ColorIndicates) {
     let masked = current == ColorIndicates::MaskedAreas;
-    let check = |on: bool, s: &str| if on { format!("✓ {s}") } else { s.to_string() };
-    item(ui, actions, &check(masked, "Color Indicates Masked Areas"), "channel.options", json!({ "channel": channel.clone(), "indicates": "masked" }));
-    item(ui, actions, &check(!masked, "Color Indicates Selected Areas"), "channel.options", json!({ "channel": channel, "indicates": "selected" }));
+    for (on, label, indicates) in [(masked, "Color Indicates Masked Areas", "masked"), (!masked, "Color Indicates Selected Areas", "selected")] {
+        let label = tl!(label);
+        let row = crate::context_menu::Row::new(label).checked(on);
+        if m.row(row, |ui| ui.button(if on { format!("✓ {label}") } else { label.to_string() })) {
+            actions.push(("channel.options".into(), json!({ "channel": channel.clone(), "indicates": indicates })));
+        }
+    }
 }
 
 /// Overlay colour presets (Channel Options › Color) and opacity.
-fn overlay_colors(ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>, channel: Value) {
-    ui.menu_button(tl!("Overlay Color"), |ui| {
+fn overlay_colors(m: &mut crate::context_menu::MenuUi, actions: &mut Vec<(String, Value)>, channel: Value) {
+    m.submenu(tl!("Overlay Color"), |m| {
         for (label, hex) in [
             (tl!("Red"), "#ff0000"),
             (tl!("Green"), "#00c000"),
@@ -446,17 +449,15 @@ fn overlay_colors(ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>, channel
             (tl!("Magenta"), "#e000c0"),
             (tl!("Yellow"), "#f0d000"),
         ] {
-            if ui.button(tl!(&label)).clicked() {
+            if m.item(tl!(&label)) {
                 actions.push(("channel.options".into(), json!({ "channel": channel.clone(), "color": hex })));
-                ui.close();
             }
         }
     });
-    ui.menu_button(tl!("Overlay Opacity"), |ui| {
+    m.submenu(tl!("Overlay Opacity"), |m| {
         for o in [25, 50, 75, 100] {
-            if ui.button(format!("{o}%")).clicked() {
+            if m.item(&format!("{o}%")) {
                 actions.push(("channel.options".into(), json!({ "channel": channel.clone(), "opacity": o })));
-                ui.close();
             }
         }
     });

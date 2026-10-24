@@ -190,20 +190,17 @@ pub(crate) fn interact(ui: &mut Ui, state: &mut CameraRawPreviewState, viewport:
         }
         ui.ctx().data_mut(|data| data.remove::<ZoomCapture>(capture_id));
     }
-    response.context_menu(|ui| {
-        if ui.button(tl!("Fit in View")).clicked() {
+    crate::context_menu::show(&response, |m| {
+        if m.item(tl!("Fit in View")) {
             state.fit();
-            ui.close();
         }
-        if ui.button(tl!("100%")).clicked() {
+        if m.item(tl!("100%")) {
             state.zoom_at(1.0, at, viewport, size);
-            ui.close();
         }
-        ui.menu_button(tl!("Zoom Tool"), |ui| {
+        m.submenu(tl!("Zoom Tool"), |m| {
             for percent in [25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1600.0] {
-                if ui.button(format!("{percent:.0}%")).clicked() {
+                if m.item(&format!("{percent:.0}%")) {
                     state.zoom_at(percent / 100.0, at, viewport, size);
-                    ui.close();
                 }
             }
         });

@@ -202,6 +202,59 @@ fn main() {
     let window = submenu(&main_menu(), "Window");
     assert!(checked(&window, rows[0]) && !checked(&window, rows[1]), "the check moved in place");
 
+    // A context menu: built as a submenu of the menu bar only long enough to take its NSMenu back,
+    // so the menu bar is as it was and the menu has no parent to pop up from. Choosing an item
+    // reports it as the context menu's, not as a menu bar click.
+    use photocraft_ui_egui::native_menu::{Backend, Event, Item, Node};
+    let mut backend = mac_menu::MacMenu::new(&ctx);
+    backend.sync(&native_menu::photocraft_layout(&photocraft_ui_egui::menus::menu_items(&app), photocraft_ui_egui::i18n::Lang::EN, "auto").bar);
+    let tops_before = titles(&main_menu());
+    let item = |id: &str, label: &str, checked: Option<bool>| {
+        Node::Item(Item { id: id.into(), label: label.into(), shortcut: (id == "0").then(|| "Cmd+X".into()), enabled: id != "1", checked, role: None })
+    };
+    let nodes = vec![
+        item("0", "Cut", None),
+        item("1", "Merge Down", None),
+        Node::Separator,
+        item("2", "Snap", Some(true)),
+        Node::Submenu { label: "Color".into(), children: vec![item("3", "Red & Blue", None)], role: None },
+    ];
+    let menu = backend.context_menu(7, &nodes).expect("a context menu");
+    assert_eq!(titles(&main_menu()), tops_before, "the menu bar is as it was");
+    let bar = main_menu();
+    let held = (0..bar.numberOfItems()).filter_map(|i| bar.itemAtIndex(i)?.submenu()).any(|m| Retained::as_ptr(&m) == Retained::as_ptr(&menu));
+    assert!(!held, "detached from the menu bar");
+    assert_eq!(titles(&menu), ["Cut", "Merge Down", "Snap", "Color"]);
+    let cut = menu.itemAtIndex(0).expect("Cut");
+    assert_eq!((cut.keyEquivalent().to_string().as_str(), cut.keyEquivalentModifierMask()), ("x", NSEventModifierFlags::Command), "shortcuts show");
+    assert!(!menu.itemAtIndex(1).expect("Merge Down").isEnabled());
+    assert_eq!(menu.itemAtIndex(3).expect("Snap").state(), 1, "checked");
+    assert_eq!(titles(&submenu(&menu, "Color")), ["Red & Blue"], "& is no mnemonic");
+    dequeue(&other());
+    submenu(&menu, "Color").performActionForItemAtIndex(0);
+    assert_eq!(backend.drain(), [Event::ContextChosen { serial: 7, id: "3".into() }]);
+    dequeue(&other());
+    menu.performActionForItemAtIndex(0);
+    assert_eq!(backend.drain(), [Event::ContextChosen { serial: 7, id: "0".into() }]);
+
+    // The real pop-up: AppKit's menu tracking loop, run from the main queue once the frame is done.
+    // ↓ and ↩ wait in the event queue, so the menu chooses its first item and closes by itself.
+    assert!(backend.popup(8, &nodes, [10.0, 10.0]), "popped up");
+    assert!(backend.drain().is_empty(), "nothing yet: it shows after the frame");
+    for (chars, code) in ["\u{f701}", "\r"].into_iter().zip([125, 36]) {
+        nsapp.postEvent_atStart(&key_down(chars, code, NSEventModifierFlags::empty()), false);
+    }
+    let mode = NSString::from_str("kCFRunLoopDefaultMode");
+    let mut got = Vec::new();
+    for _ in 0..200 {
+        objc2_foundation::NSRunLoop::mainRunLoop().runMode_beforeDate(&mode, &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
+        got.extend(backend.drain());
+        if got.contains(&Event::ContextClosed(8)) {
+            break;
+        }
+    }
+    assert_eq!(got, [Event::ContextChosen { serial: 8, id: "0".into() }, Event::ContextClosed(8)], "the choice, then the close");
+
     println!("mac_menu_appkit: ok");
 }
 
