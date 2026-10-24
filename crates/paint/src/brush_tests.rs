@@ -279,6 +279,14 @@ fn pixel_steps_put_every_dab_one_pixel_further_on_the_grid() {
         let f = if b.size == 10.0 { 0.0 } else { 0.5 };
         assert!(c.iter().all(|&(x, y)| x.fract() == f && y.fract() == f), "{c:?}");
     }
+    // Scattered dabs land back on the grid.
+    let mut scattered = soft.clone();
+    scattered.scattering.enabled = true;
+    scattered.scattering.both_axes = true;
+    scattered.scattering.scatter.jitter = 2.0;
+    let c = steps(&scattered, &pts);
+    assert!(c.iter().all(|&(x, y)| x.rem_euclid(1.0) == 0.5 && y.rem_euclid(1.0) == 0.5), "scattered off the grid: {c:?}");
+    assert!(c.iter().zip(steps(&soft, &pts)).any(|(a, b)| *a != b), "the scatter still moves dabs");
     // Moving inside one pixel adds nothing; without pixel steps the dabs stay where the pointer was.
     assert_eq!(steps(&soft, &[StrokePoint::new(4.1, 4.1, 1.0), StrokePoint::new(4.9, 4.8, 1.0)]), vec![(4.5, 4.5)]);
     let mut free = StrokeRenderer::new(&soft, None, 8.0).pixel_steps(false).record_dabs();

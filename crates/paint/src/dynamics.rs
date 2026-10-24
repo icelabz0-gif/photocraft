@@ -547,11 +547,14 @@ pub struct DabBuilder {
     /// Per-stroke colour (Color Dynamics with per-tip off), computed at the first step.
     stroke_color: Option<[f32; 4]>,
     next_index: u64,
+    /// Pixel steps' dab-centre offset ([`DabGenerator::pixel_steps`]): scattered dabs land back
+    /// on the grid.
+    grid: Option<f64>,
 }
 
 impl DabBuilder {
     pub fn new(brush: &BrushSettings) -> Self {
-        Self { brush: brush.clone(), seed: brush.seed, stroke_color: None, next_index: 0 }
+        Self { brush: brush.clone(), seed: brush.seed, stroke_color: None, next_index: 0, grid: None }
     }
 
     pub fn step_len(&self, p: &StrokePoint) -> f64 {
@@ -630,6 +633,9 @@ impl DabBuilder {
                     c.x += -dy * ox;
                     c.y += dx * ox;
                 }
+            }
+            if let Some(offset) = self.grid {
+                (c.x, c.y) = (grid_cell(c.x, offset), grid_cell(c.y, offset));
             }
             // Transfer.
             let tr = &b.transfer;
@@ -795,6 +801,7 @@ impl DabGenerator {
     pub fn pixel_steps(mut self) -> Self {
         let offset = f64::from(crate::render::grid_center(0.0, 0.0, self.builder.brush.size).0);
         self.walker = self.walker.pixel_steps(offset);
+        self.builder.grid = Some(offset);
         self
     }
 
