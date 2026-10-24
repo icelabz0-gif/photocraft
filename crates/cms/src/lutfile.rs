@@ -201,9 +201,9 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
     let mut shaper: Option<Vec<f64>> = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
-        // Headers: `Mesh 4 12` and the like start with a letter; the `3DMESH` preamble with a digit.
-        let preamble = line.split_whitespace().next().is_some_and(|t| t.eq_ignore_ascii_case("3DMESH"));
-        if line.is_empty() || preamble || line.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        // A header (`3DMESH`, `Mesh 4 12`…) starts with a word that isn't a number. `NaN` and
+        // `inf` are numbers: a row starting with one is a shaper or table row, read strictly.
+        if line.split_whitespace().next().is_none_or(|t| t.parse::<f64>().is_err()) {
             header |= !line.is_empty();
             continue;
         }
@@ -577,6 +577,17 @@ mod tests {
         let body = identity_3dl(&[0, 1, 2, 3], 4);
         let body = body.split_once('\n').unwrap().1;
         for shaper in ["0 NaN 682 1023", "0 341 inf 1023", "-inf 341 682 1023"] {
+            assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
+        }
+    }
+
+    /// #9170 review: a shaper row that starts with `NaN` or `inf` is a shaper, not a header, so
+    /// it reaches the non-finite refusal instead of being skipped.
+    #[test]
+    fn three_dl_shaper_starting_non_finite_is_refused() {
+        let body = identity_3dl(&[0, 1, 2, 3], 4);
+        let body = body.split_once('\n').unwrap().1;
+        for shaper in ["NaN 341 682 1023", "inf 341 682 1023", "-inf 341 682 1023"] {
             assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
         }
     }
