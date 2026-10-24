@@ -2,6 +2,7 @@
 
 use egui::{Color32, Stroke};
 use photocraft_doc::{Document, Guides};
+use photocraft_engine::prefs::Unit;
 use serde_json::{Map, Value, json};
 
 use crate::{PhotocraftApp, theme::Tokens, widgets};
@@ -42,7 +43,14 @@ pub fn reset(app: &PhotocraftApp, f: &mut Map<String, Value>) {
         k.starts_with("__")
             && !matches!(
                 k.as_str(),
-                "__preset" | "__columnsEnabled" | "__rowsEnabled" | "__marginEnabled" | "__previewGuides" | "__previewParams" | "__previewSource"
+                "__preset"
+                    | "__columnsEnabled"
+                    | "__rowsEnabled"
+                    | "__marginEnabled"
+                    | "__marginUnit"
+                    | "__previewGuides"
+                    | "__previewParams"
+                    | "__previewSource"
             )
     });
     f.extend(defaults);
@@ -63,6 +71,17 @@ fn on(f: &Map<String, Value>, key: &str, fallback: bool) -> bool {
 }
 fn positive(f: &Map<String, Value>, key: &str) -> bool {
     f.get(key).and_then(Value::as_f64).is_some_and(|n| n > 0.0)
+}
+
+/// The unit the Margin fields are shown in: the dialog's transient `__marginUnit`, defaulting to
+/// the Units & Rulers preference (as Photoshop reads a size in the current ruler unit). Percent is
+/// never offered — a margin is a length in the document, not a share of the page.
+fn margin_unit(app: &PhotocraftApp, f: &Map<String, Value>) -> photocraft_engine::prefs::Unit {
+    use photocraft_engine::prefs::Unit;
+    f.get("__marginUnit").and_then(Value::as_str).and_then(Unit::parse).unwrap_or_else(|| match app.session.prefs().units_and_rulers.rulers {
+        Unit::Percent => Unit::Pixels,
+        unit => unit,
+    })
 }
 
 pub fn open(app: &mut PhotocraftApp) -> u64 {
@@ -163,7 +182,8 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     app.ui.extras.guides = true;
     app.session.prefs.edit(|prefs| prefs.guides_grid_and_slices.guide_color = hex);
     let mut remembered = f.clone();
-    for key in [MARK, "__command", "__label", "__document", "__previewGuides", "__previewParams", "__previewSource"] {
+    // The unit is the dialog's own view (transient), never a parameter or a remembered default.
+    for key in [MARK, "__command", "__label", "__document", "__marginUnit", "__previewGuides", "__previewParams", "__previewSource"] {
         remembered.remove(key);
     }
     app.ui.view.guide_layout = Value::Object(remembered);
@@ -330,17 +350,35 @@ fn main_fields(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value
     });
     ui.add_space(10.0);
     group(ui, |ui| {
-        let enabled = check(ui, f, "__marginEnabled", tl!("Margin"), true);
+        let mut enabled = true;
+        ui.horizontal(|ui| {
+            enabled = check(ui, f, "__marginEnabled", tl!("Margin"), true);
+            ui.add_space(6.0);
+            let mut picked = margin_unit(app, f);
+            let options: Vec<(Unit, &str)> = crate::rulers::LENGTH_UNITS.iter().map(|&u| (u, crate::rulers::unit_label(u))).collect();
+            if widgets::dropdown(ui, "margin-unit", &mut picked, &options, 96.0) {
+                f.insert("__marginUnit".into(), json!(picked.name()));
+            }
+        });
         let mut margins = f.get("margin").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![json!(0); 4]);
+        // Margins are document pixels from edge to edge; the unit only changes how they are read
+        // and typed, converting at the document's resolution so a printed margin is the right size
+        // (0.5 cm at 300 ppi is 59 px, and the guides actually sit at 59). One unit for all four.
+        let unit = margin_unit(app, f);
+        let dpi = app.session.active().map_or(72.0, |st| f64::from(st.doc.resolution_dpi.max(1.0)));
+        let ppi = app.session.prefs().units_and_rulers.point_size.per_inch();
+        let to_unit = |px: f64| unit.from_px(px, dpi, 1.0, ppi) as f32;
         ui.add_space(5.0);
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal(|ui| {
                 for (value, label) in margins.iter_mut().zip([tl!("Top:"), tl!("Left:"), tl!("Bottom:"), tl!("Right:")]) {
                     ui.vertical(|ui| {
                         ui.label(label);
-                        let mut n = value.as_f64().unwrap_or(0.0) as f32;
-                        if widgets::value_field(ui, &mut n, 0.0..=300_000.0, "px", 64.0).changed() {
-                            *value = json!(n);
+                        let mut n = to_unit(value.as_f64().unwrap_or(0.0));
+                        let resp = widgets::value_field_prec_step(ui, &mut n, 0.0..=to_unit(300_000.0), unit.suffix(), 64.0, unit.decimals() as u32);
+                        if resp.changed() {
+                            // Committed parameters stay in pixels whatever the field showed.
+                            *value = json!(unit.to_px(f64::from(n), dpi, 1.0, ppi));
                         }
                     });
                 }
