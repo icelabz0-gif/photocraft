@@ -201,7 +201,9 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
     let mut shaper: Option<Vec<f64>> = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() || line.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        // Headers: `Mesh 4 12` and the like start with a letter; the `3DMESH` preamble with a digit.
+        let preamble = line.split_whitespace().next().is_some_and(|t| t.eq_ignore_ascii_case("3DMESH"));
+        if line.is_empty() || preamble || line.starts_with(|c: char| c.is_ascii_alphabetic()) {
             header |= !line.is_empty();
             continue;
         }
@@ -547,6 +549,20 @@ mod tests {
         assert!(parse_3dl(&format!("0 341 junk 682 1023\n{body}")).is_err(), "a junk token");
         assert!(parse_3dl(&format!("0 114 455 1023\n0 114 455 1023\n{body}")).is_err(), "two shaper rows");
         assert!(parse_3dl(&format!("0 114 455 1023\n{body}")).is_ok());
+    }
+
+    /// #9170 review (bommerts): the standard `3DMESH` / `Mesh 4 12` preamble still reads; only
+    /// the rows after it are parsed strictly.
+    #[test]
+    fn three_dl_mesh_preamble_is_accepted() {
+        let grey = |l: &LutFile| (sample(l, [128.0 / 255.0; 3])[0] * 255.0).round();
+        let plain = identity_3dl(&[0, 114, 455, 1023], 4);
+        let headed = parse_3dl(&format!("3DMESH\nMesh 4 12\n{plain}")).unwrap();
+        assert_eq!(headed, parse_3dl(&plain).unwrap(), "the preamble changes nothing");
+        assert_eq!(grey(&headed), 71.0, "the bent shaper still applies");
+        let even = identity_3dl(&[0, 341, 682, 1023], 4);
+        assert_eq!(grey(&parse_3dl(&format!("3dmesh\nMesh 4 12\n{even}")).unwrap()), 128.0);
+        assert!(parse_3dl(&format!("3DMESH\nMesh 4 12\n0 341 junk 682 1023\n{}", even.split_once('\n').unwrap().1)).is_err(), "still strict after it");
     }
 
     #[test]
