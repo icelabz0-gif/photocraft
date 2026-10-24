@@ -490,6 +490,28 @@ fn package_never_overwrites_one_link_copy_with_another() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A second package into the same folder copies its links beside the first one's, never over them.
+#[test]
+fn package_keeps_files_already_in_links() {
+    let dir = tmp("package-again");
+    let link = format!("{dir}/art.png");
+    let mut src = Session::new();
+    src.execute("file.new", json!({"width": 4, "height": 4, "background": "#ff0000"})).unwrap();
+    crate::file_cmds::save_doc(&src.active().unwrap().doc, &link, None).unwrap();
+    let mut s = session("rgb", 8);
+    s.execute("file.placeLinked", json!({"path": link})).unwrap();
+    let first = s.execute("file.package", json!({"dir": format!("{dir}/pkg")})).unwrap();
+    let first = first["links"][0].as_str().unwrap().to_string();
+    let kept = std::fs::read(&first).unwrap();
+    let second = s.execute("file.package", json!({"dir": format!("{dir}/pkg")})).unwrap();
+    let second = second["links"][0].as_str().unwrap();
+    assert_ne!(second, first);
+    assert!(second.ends_with("Links/0-art.png"), "{second}");
+    assert_eq!(std::fs::read(&first).unwrap(), kept);
+    assert_eq!(std::fs::read(second).unwrap(), kept);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A missing link placed twice is reported once.
 #[test]
 fn package_lists_a_missing_link_once() {

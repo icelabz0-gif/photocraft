@@ -1150,9 +1150,12 @@ fn package(s: &mut Session, p: &Value) -> Result<Value> {
             Some((_, t)) => t.clone(),
             None => {
                 // A name no earlier copy has, ignoring case (macOS and Windows folders do): a
-                // renamed copy can't take the name of another link either.
+                // renamed copy can't take the name of another link either. A file already in
+                // Links (an earlier package into the same folder) is never overwritten.
                 let base = file_name(path);
-                let taken = |n: &str| copied.iter().any(|(_, t)| file_name(t).to_lowercase() == n.to_lowercase());
+                let taken = |n: &str| {
+                    copied.iter().any(|(_, t)| file_name(t).to_lowercase() == n.to_lowercase()) || std::path::Path::new(&join(&links_dir, n)).exists()
+                };
                 let mut fname = base.clone();
                 let mut k = copied.len();
                 while taken(&fname) {
