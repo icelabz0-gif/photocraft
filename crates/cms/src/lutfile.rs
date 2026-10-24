@@ -201,10 +201,11 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
     let mut shaper: Option<Vec<f64>> = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
-        // A header (`3DMESH`, `Mesh 4 12`…) starts with a word that isn't a number. `NaN` and
-        // `inf` are numbers: a row starting with one is a shaper or table row, read strictly.
-        if line.split_whitespace().next().is_none_or(|t| t.parse::<f64>().is_err()) {
-            header |= !line.is_empty();
+        // A header is `3DMESH` or starts with a word (`Mesh 4 12`): a letter, and not a number.
+        // `NaN` and `inf` are numbers, and `0oops` starts like one: those rows are read strictly.
+        let Some(first) = line.split_whitespace().next() else { continue };
+        if first.eq_ignore_ascii_case("3DMESH") || first.starts_with(char::is_alphabetic) && first.parse::<f64>().is_err() {
+            header = true;
             continue;
         }
         // Every token is a number: a malformed one is refused rather than dropped, which could
@@ -592,6 +593,20 @@ mod tests {
         for shaper in ["NaN 341 682 1023", "inf 341 682 1023", "-inf 341 682 1023"] {
             assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
         }
+    }
+
+    /// #9170 review: only a line starting with a word is a header. One whose first token looks
+    /// like a number but isn't (`0oops`) is read strictly and refused, not skipped with its shaper.
+    #[test]
+    fn three_dl_malformed_first_token_is_refused() {
+        let body = identity_3dl(&[0, 1, 2, 3], 4);
+        let body = body.split_once('\n').unwrap().1;
+        for shaper in ["0oops 114 455 1023", "-x 114 455 1023", ".5x 114 455 1023", "+ 114 455 1023"] {
+            assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
+        }
+        let (first, rest) = body.split_once('\n').unwrap();
+        assert!(parse_3dl(&format!("0 114 455 1023\n{first}\n1x 0 0\n{rest}")).is_err(), "a table row too");
+        assert!(parse_3dl(&format!("3DMESH\nMesh 4 12\n0 114 455 1023\n{body}")).is_ok(), "headers still skip");
     }
 
     /// #9170 review: a bent shaper whose knots can't all be kept within MAX_SIZE is refused rather
