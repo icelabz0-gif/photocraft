@@ -245,8 +245,9 @@ fn three_dl_scale(max: f64, header: bool) -> f64 {
 /// input channel ahead of the 3-D table (input `x` reads the shaper, sampled evenly over 0..1,
 /// at `x`, interpolated linearly), so each node of the table becomes the table's own trilinear
 /// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
-/// The table is baked with at least as many nodes as the shaper has points (up to [`MAX_SIZE`]):
-/// exact for an identity table, an approximation at that resolution otherwise.
+/// The table is baked on a grid holding both its own nodes and the shaper's knots (up to
+/// [`MAX_SIZE`] nodes; past that, the finer of the two): exact for an identity table, an
+/// approximation at that resolution otherwise.
 fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     let m = shaper.len();
     if m < 2 || shaper.iter().any(|v| !v.is_finite()) {
@@ -270,9 +271,19 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
         let (a, b) = (shaped.get(i).copied().unwrap_or(0.0), shaped.get(i + 1).copied().unwrap_or(0.0));
         (a + (b - a) * f).clamp(0.0, 1.0) as f32
     };
-    // A shaper finer than the table is baked at the shaper's resolution (up to MAX_SIZE), so its
-    // curve survives a small table: a 2-node table would otherwise read it only at its two ends.
-    let n = lut.size.max(m.min(MAX_SIZE));
+    // The bake grid holds both the table's nodes and the shaper's knots (lcm of their intervals),
+    // so the curve keeps its breakpoints whatever the table's size: exact on an identity table. A
+    // grid that would pass MAX_SIZE falls back to the finer of the two, an approximation between
+    // the knots.
+    let gcd = |mut a: usize, mut b: usize| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let (a, k) = (lut.size - 1, m - 1);
+    let aligned = (a / gcd(a, k)).checked_mul(k).map(|l| l + 1).filter(|&l| l <= MAX_SIZE);
+    let n = aligned.unwrap_or_else(|| lut.size.max(m.min(MAX_SIZE)));
     let step = (n - 1) as f64;
     let mut out = LutFile { size: n, data: vec![0.0; n * n * n * 3], ..lut.clone() };
     for b in 0..n {
@@ -504,6 +515,21 @@ mod tests {
         // Refused or baked, but never a table holding NaN.
         if let Ok(l) = parse_3dl(&text) {
             assert!(l.data.iter().all(|v| v.is_finite()), "baked a non-finite value");
+        }
+    }
+
+    /// #9170 review (bommerts): the shaper's breakpoints survive a table whose grid doesn't line
+    /// up with them. The bake grid holds both the table's nodes and the shaper's knots, so on an
+    /// identity table the curve is exact: `0 0 512 1023` is 0 at ⅓ over 5³ and 17³ tables.
+    #[test]
+    fn three_dl_shaper_knots_survive_a_nonaligned_table() {
+        for n in [5, 17] {
+            let l = parse_3dl(&identity_3dl(&[0, 0, 512, 1023], n)).unwrap();
+            let at = |x: f32| sample(&l, [x, 0.0, 0.0])[0];
+            assert!(at(1.0 / 3.0).abs() < 1e-6, "{n}³: {}", at(1.0 / 3.0));
+            // The helper's 12-bit nodes are truncated, so the table itself is within a 12-bit step.
+            assert!((at(2.0 / 3.0) - 512.0 / 1023.0).abs() < 1.0 / 4095.0, "{n}³: {}", at(2.0 / 3.0));
+            assert!((at(0.5) - 256.0 / 1023.0).abs() < 1.0 / 4095.0, "{n}³: halfway between the knots");
         }
     }
 
