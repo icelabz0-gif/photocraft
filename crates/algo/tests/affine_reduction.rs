@@ -178,3 +178,68 @@ fn implicit_pixels_and_sparse_reductions_keep_their_coverage() {
         assert!(out.pixel(15, 20)[3] > 0.0);
     }
 }
+
+#[test]
+fn subpixel_rectangles_cover_only_their_geometric_area() {
+    for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for (width, height, sx, sy) in [(1, 16, 0.5_f64, 1.0_f64), (16, 1, 1.0, -0.5), (1, 1, -0.5, 0.5), (1, 1, 1.0 / 16.0, -1.0 / 16.0)] {
+            let rect = Rect::new(-7, 11, -7 + width, 11 + height);
+            let mut src = Surface::new(PixelFormat::new(ColorMode::Rgb, sample, true));
+            src.fill_rect(rect, &[0.25, 0.5, 0.75, 1.0]);
+            let tx = 10.5 - sx * (f64::from(rect.x0) + f64::from(width) / 2.0);
+            let ty = 15.5 - sy * (f64::from(rect.y0) + f64::from(height) / 2.0);
+            let h = Homography([sx, 0.0, tx, 0.0, sy, ty, 0.0, 0.0, 1.0]);
+            let expected = ((f64::from(width) * sx.abs()).min(1.0) * (f64::from(height) * sy.abs()).min(1.0)) as f32;
+            for interp in [Interp::Bicubic, Interp::BicubicCoverage] {
+                let out = warp_surface(&src, rect, &h, interp).unwrap();
+                let got = out.pixel(10, 15);
+                let tolerance = match sample {
+                    SampleType::U8 => 1.0 / 255.0,
+                    SampleType::U16 => 1.0 / 65535.0,
+                    SampleType::F32 => 1e-6,
+                };
+                assert!((got[3] - expected).abs() <= tolerance, "{sample:?} {width}x{height} {sx}x{sy} {interp:?}: {got:?}, alpha {expected}");
+                assert!(got[..3].iter().zip(src.pixel(rect.x0, rect.y0)).all(|(a, b)| (a - b).abs() < 1e-6));
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_alpha_affects_only_the_sampled_pixel_footprint() {
+    let rect = Rect::new(0, 0, 64, 64);
+    let mut src = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true));
+    src.write_pixel(12, 12, &[0.1, 0.5, 0.85, 1.0]);
+    src.write_pixel(60, 60, &[0.1, 0.5, 0.85, -0.1]);
+    let h = Homography([0.75, 0.0, 0.5, 0.0, 0.75, 0.5, 0.0, 0.0, 1.0]);
+    let full = warp_surface(&src, rect, &h, Interp::BicubicCoverage).unwrap();
+    let clipped = warp_surface_clipped(&src, rect, &h, Interp::BicubicCoverage, Rect::new(8, 8, 9, 9)).unwrap();
+    let shifted = warp_surface(&src, rect, &Homography([0.75, 0.0, 244.5, 0.0, 0.75, 0.5, 0.0, 0.0, 1.0]), Interp::BicubicCoverage).unwrap();
+    assert_eq!(full.pixel(8, 8)[3], 0.0, "distant signed alpha enabled a negative-lobe product");
+    assert_eq!(full.pixel(8, 8), clipped.pixel(8, 8));
+    assert_eq!(full.pixel(8, 8), shifted.pixel(252, 8));
+    // Signed alpha inside the actual kernel still needs the conservative fallback: a
+    // negative sample times a negative weight can legitimately produce positive alpha.
+    let mut signed = Surface::new(src.format());
+    signed.write_pixel(12, 12, &[0.1, 0.5, 0.85, -0.1]);
+    let regular = warp_surface(&signed, rect, &h, Interp::Bicubic).unwrap();
+    let covered = warp_surface(&signed, rect, &h, Interp::BicubicCoverage).unwrap();
+    assert!(regular.pixel(8, 9)[3] > 0.0);
+    assert_eq!(covered.pixel(8, 9), regular.pixel(8, 9));
+}
+
+#[test]
+fn equivalent_homogeneous_matrices_have_identical_reduced_bounds_and_pixels() {
+    let rect = Rect::new(0, 0, 16, 16);
+    let mut src = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true));
+    src.fill_rect(rect, &[0.25, 0.5, 0.75, 1.0]);
+    let h = Homography([0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0]);
+    for interp in [Interp::Bicubic, Interp::BicubicCoverage] {
+        let expected = warp_surface(&src, rect, &h, interp).unwrap();
+        for factor in [0.00015, -0.00015, 0.5, 1024.0] {
+            let other = warp_surface(&src, rect, &Homography(h.0.map(|v| v * factor)), interp).unwrap();
+            assert_eq!(other.content_bounds(), expected.content_bounds(), "homogeneous factor {factor}");
+            assert_eq!(other.read_region(rect), expected.read_region(rect), "homogeneous factor {factor}");
+        }
+    }
+}

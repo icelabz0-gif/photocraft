@@ -42,7 +42,11 @@ struct Tap {
 
 fn taps(o: i32, scale: f64, shift: f64, first: i32, end: i32) -> Tap {
     let center = (f64::from(o) + 0.5 - shift) / scale;
-    let coverage = ((center - f64::from(first)).min(f64::from(end) - center) * scale.abs() + 0.5).clamp(0.0, 1.0);
+    // Intersect both rectangle edges with the destination pixel. A nearest-edge ramp
+    // overestimates coverage when the entire reduced rectangle is narrower than a pixel.
+    let left = (f64::from(first) - center) * scale.abs();
+    let right = (f64::from(end) - center) * scale.abs();
+    let coverage = (right.min(0.5) - left.max(-0.5)).clamp(0.0, 1.0);
     if !center.is_finite() || coverage <= 0.0 {
         return Tap { samples: Vec::new(), coverage: 0.0 };
     }
@@ -125,9 +129,10 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
     }
     let mut acc: Vec<f64> = zeroed(len)?;
     let mut supported: Vec<bool> = zeroed(len / n)?;
+    let mut invalid_alpha: Vec<bool> = zeroed(len / n)?;
     let mut horizontal: Vec<f64> = zeroed(nx * n)?;
     let mut positive: Vec<bool> = zeroed(nx)?;
-    let mut nonnegative_alpha = true;
+    let mut horizontal_invalid: Vec<bool> = zeroed(nx)?;
     let mut y = y0;
     while y <= y1 {
         if ctl.cancelled() {
@@ -136,10 +141,10 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
         let end = y.saturating_add(rows_per_read).min(y1.saturating_add(1));
         let px = src.try_read_region(Rect::new(x0, y, x1.saturating_add(1), end))?;
         for (sy, row) in (y..end).zip(px.chunks_exact(read_channels)) {
-            nonnegative_alpha &= row.chunks_exact(n).all(|p| p.last().is_some_and(|a| a.is_finite() && *a >= 0.0));
             horizontal.fill(0.0);
             positive.fill(false);
-            for ((tap, out), support) in xs.iter().zip(horizontal.chunks_exact_mut(n)).zip(&mut positive) {
+            horizontal_invalid.fill(false);
+            for (((tap, out), support), invalid) in xs.iter().zip(horizontal.chunks_exact_mut(n)).zip(&mut positive).zip(&mut horizontal_invalid) {
                 for &(sx, weight) in &tap.samples {
                     if weight == 0.0 {
                         continue;
@@ -148,6 +153,7 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
                     if let Some(p) = row.get(at..at + n) {
                         let alpha = f64::from(p.last().copied().unwrap_or(0.0));
                         *support |= weight > 0.0 && alpha > 0.0;
+                        *invalid |= !alpha.is_finite() || alpha < 0.0;
                         for (c, (v, sample)) in out.iter_mut().zip(p).enumerate() {
                             *v += f64::from(*sample) * weight * if c + 1 == n { 1.0 } else { alpha };
                         }
@@ -158,6 +164,13 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
                 if let Some(out) = acc.get_mut(dy * nx * n..(dy + 1) * nx * n) {
                     for (v, h) in out.iter_mut().zip(&horizontal) {
                         *v += weight * h;
+                    }
+                }
+                // The conservative signed-alpha fallback belongs to this output's kernel,
+                // not the tile's read window: unrelated samples must not change its coverage.
+                if let Some(out) = invalid_alpha.get_mut(dy * nx..(dy + 1) * nx) {
+                    for (v, h) in out.iter_mut().zip(&horizontal_invalid) {
+                        *v |= h;
                     }
                 }
                 if weight > 0.0
@@ -175,12 +188,14 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
         y = end;
     }
     let mut any = false;
-    for (dy, ((row, dst), support)) in acc.chunks_exact(nx * n).zip(result.chunks_exact_mut(nx * n)).zip(supported.chunks_exact(nx)).enumerate() {
-        for (((p, out), support), x) in row.chunks_exact(n).zip(dst.chunks_exact_mut(n)).zip(support).zip(&xs) {
+    for (dy, (((row, dst), support), invalid)) in
+        acc.chunks_exact(nx * n).zip(result.chunks_exact_mut(nx * n)).zip(supported.chunks_exact(nx)).zip(invalid_alpha.chunks_exact(nx)).enumerate()
+    {
+        for ((((p, out), support), invalid), x) in row.chunks_exact(n).zip(dst.chunks_exact_mut(n)).zip(support).zip(invalid).zip(&xs) {
             let alpha = p.last().copied().unwrap_or(0.0);
             let coverage = x.coverage * ys.get(dy).map_or(0.0, |y| y.coverage);
             let a = (alpha * coverage).clamp(0.0, 1.0);
-            if a <= 0.0 || (interp == Interp::BicubicCoverage && nonnegative_alpha && !support) {
+            if a <= 0.0 || (interp == Interp::BicubicCoverage && !invalid && !support) {
                 continue;
             }
             any = true;
@@ -193,19 +208,14 @@ fn tile(src: &Surface, rect: Rect, dst: Rect, m: Mapping, interp: Interp, ctl: &
     Ok(any.then_some(result))
 }
 
-pub(super) fn warp(
-    src: &Surface,
-    rect: Rect,
-    h: &Homography,
-    m: Mapping,
-    interp: Interp,
-    clip: Option<Rect>,
-    ctl: &Interrupt,
-) -> Result<Surface, AllocationError> {
+pub(super) fn warp(src: &Surface, rect: Rect, m: Mapping, interp: Interp, clip: Option<Rect>, ctl: &Interrupt) -> Result<Surface, AllocationError> {
     if src.tiles().next().is_none() && src.default_pixel().iter().all(|v| *v == 0.0) {
         return Ok(Surface::new(src.format()));
     }
-    let bounds = warp_output_bounds(rect, h).unwrap_or(Rect::EMPTY);
+    // Homogeneous rescaling must not affect inverse validity or output bounds. Dispatch
+    // has already normalized this diagonal mapping, so use that representation here too.
+    let h = Homography([m.sx, 0.0, m.tx, 0.0, m.sy, m.ty, 0.0, 0.0, 1.0]);
+    let bounds = warp_output_bounds(rect, &h).unwrap_or(Rect::EMPTY);
     let dst = clip.map_or(bounds, |c| bounds.intersect(&c));
     let count = dst.tiles().count();
     let bytes = count.checked_mul(std::mem::size_of::<Rect>()).ok_or(AllocationError::SizeOverflow)?;

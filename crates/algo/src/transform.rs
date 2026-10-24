@@ -321,7 +321,7 @@ fn warp(
         return Ok(out);
     }
     if let Some(mapping) = axis_aligned::Mapping::reduction(h, interp) {
-        return axis_aligned::warp(src, src_rect, h, mapping, interp, clip, ctl);
+        return axis_aligned::warp(src, src_rect, mapping, interp, clip, ctl);
     }
     let mut h = *h;
     let mut src_rect = src_rect;
