@@ -13,7 +13,9 @@ labels and path segments, `menus.rs` UI commands, and engine `CommandSpec` label
 is checked against that universe by the xtask itself; "rows" are the non-comment, non-blank lines
 of the `.tsv`. Catalogs hold more rows than the universe because they also translate dynamic `tl!(expr)` strings (~159 call
 sites the tool can't enumerate). **Not covered anywhere:** engine error and status messages and
-filter parameter help, which are English in every language; so no language is `full`.
+filter parameter help, which are English in every language; so no language is `full`. The report
+also lists, per language, the keys its catalog lacks; those show in English. `cargo xtask ci` prints
+it as its last step and never fails on it.
 
 **Photoshop 2026** ships UI language packs for cs, da, de, en, es, fi, fr (and fr-CA), hu, it,
 ja, ko, nb, nl, pl, pt-BR, ru, sk, sv, tr, uk, zh-Hans, zh-Hant (24 `.lproj` markers; one pack is
