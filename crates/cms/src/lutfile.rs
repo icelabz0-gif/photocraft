@@ -191,12 +191,14 @@ pub fn parse_cube(text: &str) -> Result<LutFile, LutError> {
     err("no LUT_3D_SIZE in .cube file")
 }
 
-/// Lustre `.3dl`: an optional shaper line of input values, then integer RGB rows with **blue**
-/// varying fastest; the output bit depth is inferred from the largest value, and is at least 12
-/// bits in a file without a header.
+/// Lustre `.3dl`: an optional shaper line, then integer RGB rows with **blue** varying fastest;
+/// the output bit depth is inferred from the largest value, and is at least 12 bits in a file
+/// without a header. A shaper that isn't the even ramp is applied before the table, as Photoshop
+/// does (#8982): see [`apply_shaper`].
 pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
     let mut rows: Vec<[f64; 3]> = Vec::new();
     let mut header = false;
+    let mut shaper: Option<Vec<f64>> = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -206,17 +208,17 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
         let v: Vec<f64> = line.split_whitespace().filter_map(|s| s.parse().ok()).collect();
         if v.len() == 3 {
             rows.push([v[0], v[1], v[2]]);
+        } else if v.len() > 3 && shaper.is_none() && rows.is_empty() {
+            // The input shaper: one row of values ahead of the table.
+            shaper = Some(v);
         }
-        // Lines with more than three numbers are the input shaper; it is assumed linear.
     }
     let n = (rows.len() as f64).cbrt().round() as usize;
     if n < 2 || n * n * n != rows.len() {
         return err(format!("{} rows is not a cube", rows.len()));
     }
     let max = rows.iter().flatten().fold(0.0f64, |a, &b| a.max(b));
-    // Photoshop 27.11 reads a headerless table peaking at 255 or 1023 on the 12-bit scale (#9121).
-    let depths: &[f64] = if header { &[1023.0, 4095.0, 16383.0, 65535.0] } else { &[4095.0, 16383.0, 65535.0] };
-    let scale = if max <= 1.0 { 1.0 } else { depths.iter().copied().find(|&s| max <= s).unwrap_or(max) };
+    let scale = three_dl_scale(max, header);
     let mut data = vec![0.0f32; n * n * n * 3];
     for (i, row) in rows.iter().enumerate() {
         let (r, g, b) = (i / (n * n), (i / n) % n, i % n);
@@ -225,7 +227,86 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
             data[at + k] = (row[k] / scale) as f32;
         }
     }
-    LutFile { title: String::new(), size: n, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()
+    let lut = LutFile { title: String::new(), size: n, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()?;
+    Ok(match shaper {
+        Some(shaper) => apply_shaper(lut, &shaper),
+        None => lut,
+    })
+}
+
+/// The scale of a `.3dl`'s integer values: the bit depth whose largest code holds `max`. A table
+/// without a header is read on at least the 12-bit scale, as Photoshop 27.11 does (#9121).
+fn three_dl_scale(max: f64, header: bool) -> f64 {
+    let depths: &[f64] = if header { &[1023.0, 4095.0, 16383.0, 65535.0] } else { &[4095.0, 16383.0, 65535.0] };
+    if max <= 1.0 { 1.0 } else { depths.iter().copied().find(|&s| max <= s).unwrap_or(max) }
+}
+
+/// Bakes a `.3dl` shaper into the table. Photoshop applies the shaper row as a 1-D curve on each
+/// input channel ahead of the 3-D table (input `x` reads the shaper, sampled evenly over 0..1,
+/// at `x`, interpolated linearly), so each node of the table becomes the table's own trilinear
+/// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
+/// With as many shaper points as table nodes, as in Lustre files, the result is exact for an
+/// identity table and an approximation, at the table's resolution, otherwise.
+fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
+    let m = shaper.len();
+    if m < 2 || shaper.iter().any(|v| !v.is_finite()) {
+        return lut;
+    }
+    // The shaper's own depth, from 10 bits up: a 0..1023 ramp is the even ramp with or without a header.
+    let scale = three_dl_scale(shaper.iter().fold(0.0f64, |a, &b| a.max(b)), true);
+    let even = |k: usize| scale * k as f64 / (m - 1) as f64;
+    // Integer shapers round their ramp: within one code is still the even ramp.
+    if shaper.iter().enumerate().all(|(k, &v)| (v - even(k)).abs() <= 1.0) {
+        return lut;
+    }
+    let curve = |x: f64| -> f32 {
+        let p = x.clamp(0.0, 1.0) * (m - 1) as f64;
+        let i = (p.floor() as usize).min(m - 2);
+        let f = p - i as f64;
+        let (a, b) = (shaper.get(i).copied().unwrap_or(0.0), shaper.get(i + 1).copied().unwrap_or(0.0));
+        ((a + (b - a) * f) / scale).clamp(0.0, 1.0) as f32
+    };
+    let n = lut.size;
+    let step = (n - 1) as f64;
+    let mut out = lut.clone();
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                let at = ((b * n + g) * n + r) * 3;
+                let v = sample(&lut, [curve(r as f64 / step), curve(g as f64 / step), curve(b as f64 / step)]);
+                if let Some(dst) = out.data.get_mut(at..at + 3) {
+                    dst.copy_from_slice(&v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Trilinear lookup of `rgb` (0..1) in a [`LutFile`] (red fastest).
+fn sample(l: &LutFile, rgb: [f32; 3]) -> [f32; 3] {
+    let n = l.size;
+    let loc = |v: f32| {
+        let p = v.clamp(0.0, 1.0) * (n - 1) as f32;
+        let i = (p as usize).min(n.saturating_sub(2));
+        (i, p - i as f32)
+    };
+    let (r0, fr) = loc(rgb[0]);
+    let (g0, fg) = loc(rgb[1]);
+    let (b0, fb) = loc(rgb[2]);
+    let at = |r: usize, g: usize, b: usize, k: usize| l.data.get(((b * n + g) * n + r) * 3 + k).copied().unwrap_or(0.0);
+    let mut o = [0.0f32; 3];
+    for (k, ov) in o.iter_mut().enumerate() {
+        let c = |r, g, b| at(r, g, b, k);
+        let x00 = c(r0, g0, b0) + (c(r0 + 1, g0, b0) - c(r0, g0, b0)) * fr;
+        let x10 = c(r0, g0 + 1, b0) + (c(r0 + 1, g0 + 1, b0) - c(r0, g0 + 1, b0)) * fr;
+        let x01 = c(r0, g0, b0 + 1) + (c(r0 + 1, g0, b0 + 1) - c(r0, g0, b0 + 1)) * fr;
+        let x11 = c(r0, g0 + 1, b0 + 1) + (c(r0 + 1, g0 + 1, b0 + 1) - c(r0, g0 + 1, b0 + 1)) * fr;
+        let y0 = x00 + (x10 - x00) * fg;
+        let y1 = x01 + (x11 - x01) * fg;
+        *ov = y0 + (y1 - y0) * fb;
+    }
+    o
 }
 
 /// SpeedGrade `.look`: `<size>` and a hex `<data>` string of little-endian float32 RGB triplets
@@ -345,6 +426,43 @@ pub fn builtin(id: &str) -> Option<LutFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An identity `.3dl` of edge `n` (12-bit nodes, blue fastest) under `shaper`.
+    fn identity_3dl(shaper: &[u32], n: usize) -> String {
+        let mut t = shaper.iter().map(u32::to_string).collect::<Vec<_>>().join(" ") + "\n";
+        let node = |i: usize| (i * 4095 / (n - 1)).to_string();
+        for r in 0..n {
+            for g in 0..n {
+                for b in 0..n {
+                    t += &format!("{} {} {}\n", node(r), node(g), node(b));
+                }
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn three_dl_shaper_applies_before_the_table() {
+        // #8982: Photoshop applies a .3dl's shaper row as a curve ahead of the 3-D table. On grey
+        // 128 an identity table with the shaper 0 114 455 1023 gives 71 there, and a 17-point
+        // squared shaper 64 (reported measurements); even ramps leave grey 128 as it is.
+        let grey = |l: &LutFile| (sample(l, [128.0 / 255.0; 3])[0] * 255.0).round();
+        let bent = parse_3dl(&identity_3dl(&[0, 114, 455, 1023], 4)).unwrap();
+        assert_eq!(grey(&bent), 71.0);
+        let squared: Vec<u32> = (0..17).map(|i| (1023.0 * (i as f64 / 16.0).powi(2)).round() as u32).collect();
+        assert_eq!(grey(&parse_3dl(&identity_3dl(&squared, 17)).unwrap()), 64.0);
+        let even4 = parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4)).unwrap();
+        assert_eq!(grey(&even4), 128.0);
+        assert_eq!(even4, parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4).lines().skip(1).collect::<Vec<_>>().join("\n")).unwrap());
+        let even17: Vec<u32> = (0..17).map(|i| (1023.0 * i as f64 / 16.0).round() as u32).collect();
+        assert_eq!(grey(&parse_3dl(&identity_3dl(&even17, 17)).unwrap()), 128.0);
+        // The ends stay put, and the shaper bends each channel on its own.
+        assert_eq!(sample(&bent, [0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]);
+        let c = sample(&bent, [1.0 / 3.0, 0.0, 2.0 / 3.0]);
+        assert!((c[0] - 114.0 / 1023.0).abs() < 1e-4 && (c[2] - 455.0 / 1023.0).abs() < 1e-4, "{c:?}");
+        // A shaper that isn't finite is ignored rather than trusted.
+        assert!(parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4).replacen("341", "NaN", 1)).is_ok());
+    }
 
     #[test]
     fn cube_title_with_hash_round_trips() {
