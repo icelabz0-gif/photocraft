@@ -685,6 +685,9 @@ blurring an unchanged axis or making the result depend on the source's coordinat
 clipping, sparse surfaces and colour depths. Reductions below 1/64 on either axis and
 non-axis-aligned warps retain the existing prefilter path. For a specific display size, direct
 placement at that size avoids an additional export reduction with a different sampling grid.
+The same `stroke_repro` example generates `detail.psb`, `detail-master.psd` and `detail.png`:
+horizontal stripes reduced only in width, so vertical detail should remain unchanged.
+See the [synthetic before/after pictures](rendering-regressions/README.md) for both defects.
 
 `cargo xtask test-corpus -p io -- --nocapture` compares our composite of every corpus PSD with
 Photoshop's own merged image (PASS ≤ 2/255) and checks that export → re-import renders the same,

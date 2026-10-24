@@ -8,9 +8,34 @@ mod stroke_fixture;
 
 use std::{error::Error, path::PathBuf, sync::Arc};
 
-use photocraft_color::SampleType;
-use photocraft_doc::{Document, Layer, LayerContent, SmartSource};
+use photocraft_color::{ColorMode, PixelFormat, SampleType};
+use photocraft_doc::{Document, Layer, LayerContent, SmartObject, SmartSource};
+use photocraft_geom::{Affine, Rect, Size};
 use photocraft_io::{ExportOptions, export};
+use photocraft_raster::Surface;
+
+fn detail_repro(path: &std::path::Path, opts: &ExportOptions) -> Result<(), Box<dyn Error>> {
+    // Horizontal lines must survive a reduction of the width alone. The old isotropic
+    // prefilter blurred them vertically before placing the already-reduced image again.
+    let mut pixels = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::U8, true));
+    for y in 0..80 {
+        let v = if y % 3 == 0 { 0.8 } else { 0.2 };
+        pixels.fill_rect(Rect::new(0, y, 96, y + 1), &[v, 1.0 - v, 0.4, 1.0]);
+    }
+    let mut source = Document::new("Original stripe pattern", Size::new(96, 80), ColorMode::Rgb, SampleType::U8);
+    source.layers.push(Layer::new("Stripes", LayerContent::Raster(pixels.clone())));
+    let bytes = export(&source, "detail.psb", opts)?.bytes;
+    std::fs::write(path.join("detail.psb"), &bytes)?;
+    std::fs::write(path.join("detail-source.png"), export(&source, "detail.png", opts)?.bytes)?;
+    let transform = Affine { m: [0.5, 0.0, 0.0, 1.0, 12.25, 12.0] };
+    let placed = photocraft_algo::warp::place_source(&pixels, source.bounds(), &transform, None)?;
+    let smart = SmartObject::new(SmartSource::Embedded { file_name: "detail.psb".into(), bytes: Arc::new(bytes) }, transform, Some(placed));
+    let mut master = Document::new("One-axis detail reproduction", Size::new(80, 104), ColorMode::Rgb, SampleType::U8);
+    master.layers.push(Layer::new("Detail", LayerContent::Smart(smart)));
+    std::fs::write(path.join("detail-master.psd"), export(&master, "detail.psd", opts)?.bytes)?;
+    std::fs::write(path.join("detail.png"), export(&master, "detail.png", opts)?.bytes)?;
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(std::env::args_os().nth(1).ok_or("provide an output directory")?);
@@ -46,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     std::fs::write(path.join("shifted-master.psd"), export(&shifted, "shifted.psd", &opts)?.bytes)?;
     std::fs::write(path.join("shifted.png"), export(&shifted, "shifted.png", &opts)?.bytes)?;
-    println!("Generated master.psd and shifted-master.psd; use photocraft-cli info to find their layer ids.");
+    detail_repro(&path, &opts)?;
+    println!("Generated master.psd, shifted-master.psd and detail-master.psd; use photocraft-cli info to find their layer ids.");
     Ok(())
 }
