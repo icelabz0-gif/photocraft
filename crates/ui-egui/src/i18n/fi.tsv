@@ -3223,3 +3223,272 @@ curves	Smooth	Tasoita
 # File › Save when another app changed the file (#6596)
 	{name} was changed by another app after it was opened or saved here.	Toinen ohjelma on muuttanut tiedostoa {name} sen jälkeen, kun se avattiin tai tallennettiin täällä.
 	Replace it with this document, or cancel and use File › Save As to keep both.	Korvaa se tällä dokumentilla tai peruuta ja säilytä molemmat valitsemalla Tiedosto › Tallenna nimellä.
+
+# Layer Mask Display Options (the layer mask rubylith's colour and opacity)
+	Mask Options…	Maskin asetukset…
+	Layer Mask Display Options…	Tasomaskin näyttöasetukset…
+
+# Custom print paper (#3820)
+	Overprint	Päällepainatus
+
+# Field Blur pins (#3373)
+	Edits	Muokkaukset
+
+# Layers-panel trash confirmation
+	Drag on the image to add a constraint; Shift for horizontal/vertical; right-click a constraint to change or delete it.	Vedä kuvan päällä lisätäksesi rajoitteen; Shift vaakasuoraan/pystysuoraan; oikeanapsauta rajoitetta muuttaaksesi tai poistaaksesi sen.
+	Override Tilt X	Ohita kallistus X
+	Override Tilt Y	Ohita kallistus Y
+	Create warped text	Luo taivutettua tekstiä
+	LUT folder	LUT-kansio
+	Current Brush Load	Siveltimen nykyinen maalimäärä
+	Load Brush	Lisää maalia siveltimeen
+	Clean Brush	Puhdista sivellin
+	Load the brush after each stroke	Lisää maalia siveltimeen jokaisen vedon jälkeen
+	Clean the brush after each stroke	Puhdista sivellin jokaisen vedon jälkeen
+
+# Gradient Editor window, opened from the options bar's gradient swatch.
+	Damaged Photoshop document	Vioittunut Photoshop-dokumentti
+	The document “{name}” may be damaged.	Dokumentti ”{name}” saattaa olla vioittunut.
+	Some layers, pixels or masks could not be read. Do you want to continue opening it?	Joitakin tasoja, pikseleitä tai maskeja ei voitu lukea. Haluatko jatkaa avaamista?
+	If you continue, saving over the original may permanently discard unreadable data. Save a copy to keep the original.	Jos jatkat, alkuperäisen päälle tallentaminen voi hävittää lukukelvottomat tiedot pysyvästi. Säilytä alkuperäinen tallentamalla kopio.
+	Continue	Jatka
+	Rename Path…	Nimeä polku uudelleen…
+	Retry GPU tries the graphics processor again now.	Yritä GPU:ta uudelleen -toiminto kokeilee grafiikkasuoritinta heti uudelleen.
+	GPU acceleration resumed.	GPU-kiihdytys on taas käytössä.
+	JPEG Options	JPEG-asetukset
+	Image Options	Kuva-asetukset
+	Format Options	Muotoasetukset
+	Baseline ("Standard")	Perus ("vakio")
+	Baseline Optimized	Perus, optimoitu
+
+# Edit › Content-Aware Fill workspace
+	Sampling Brush Tool	Näytteistyssivellin
+	Sampling Area Overlay	Näytteistysalueen peite
+	Show Sampling Area	Näytä näytteistysalue
+	Indicates	Ilmaisee
+	Sampling Area	Näytteistysalue
+	Excluded Area	Pois jätetty alue
+	Sampling Area Options	Näytteistysalueen asetukset
+	Rectangular	Suorakulmainen
+	Fill Settings	Täyttöasetukset
+	Rotation Adaptation	Kierron mukautus
+	Very High	Erittäin korkea
+	Full	Täysi
+	Mirror	Peilaus
+	Output Settings	Tulosasetukset
+	Output To	Tuloksen kohde
+	Duplicate Layer	Monista taso
+	Contract	Supista
+	Animation Options	Animaatioasetukset
+	Entire Document	Koko dokumentti
+	Filter Options	Suodatinasetukset
+	Layer Bounds	Tason rajat
+	Layers Panel Options	Tasot-paneelin asetukset
+	Lock Layers	Lukitse tasot
+	New Artboard…	Uusi piirtoalue…
+	New Group…	Uusi ryhmä…
+	New Layer…	Uusi taso…
+	Panel Options…	Paneelin asetukset…
+	Prevent Auto-Nesting	Estä automaattinen sisäkkäistys
+	Show Layers	Näytä tasot
+	Thumbnail Contents	Pikkukuvan sisältö
+	Thumbnail Size	Pikkukuvan koko
+	Use Default Masks on Fill Layers	Käytä oletusmaskeja täyttötasoissa
+	Expand New Effects	Laajenna uudet tehosteet
+	Add “copy” to Copied Layers and Groups	Lisää ”kopio” kopioitujen tasojen ja ryhmien nimiin
+	Preview on canvas when reordering layers	Esikatsele kankaalla tasojen järjestystä muutettaessa
+	Show layer mask badges	Näytä tasomaskien merkit
+
+# Smart Filter editors
+	Blending Options ({filter})	Sekoitusasetukset ({filter})
+	Hide the layer's effects and Smart Filters  ({key}-click: all layers)	Piilota tason tehosteet ja älykkäät suodattimet  ({key}-napsautus: kaikki tasot)
+	Show the layer's effects and Smart Filters  ({key}-click: all layers)	Näytä tason tehosteet ja älykkäät suodattimet  ({key}-napsautus: kaikki tasot)
+	Wait for the current job to finish.	Odota, että nykyinen työ valmistuu.
+	The document or Smart Filter changed. Reopen its dialog.	Dokumentti tai älykäs suodatin muuttui. Avaa sen valintaikkuna uudelleen.
+	Opacity must be between 0% and 100%.	Peittävyyden on oltava välillä 0–100 %.
+	Dissolve is approximated: it blends without Photoshop's dither.	Liuota on likimääräinen: se sekoittaa ilman Photoshopin ditteröintiä.
+
+# History panel menu (#2966)
+	Step Forward	Askel eteenpäin
+	Step Backward	Askel taaksepäin
+	Clear History	Tyhjennä historia
+	New Snapshot…	Uusi tilannevedos…
+	History Options…	Historian asetukset…
+
+# View › Guides › New Guide… › Color
+	Stop	Pysäytä
+
+# Shortcut editor commands without a menu item
+	Previous Brush	Edellinen sivellin
+	Next Brush	Seuraava sivellin
+	First Brush	Ensimmäinen sivellin
+	Last Brush	Viimeinen sivellin
+	Preview size	Esikatselun koko
+
+# Document Info and color profiles
+	Copyright Info URL	Tekijänoikeustietojen URL
+	Copyright Notice	Tekijänoikeusilmoitus
+	Document Title	Dokumentin otsikko
+
+# Find and Replace, image size, Warp and Layer Style blending options
+	The active layer has no pixels here — turn on Sample All Layers or select a layer with pixels	Aktiivisella tasolla ei ole tässä pikseleitä — ota käyttöön Ota näyte kaikilta tasoilta tai valitse taso, jossa on pikseleitä
+	Load Contours…	Lataa kontuureja…
+	Replace Contours…	Korvaa kontuurit…
+	Save Contours…	Tallenna kontuurit…
+	Delete Contour	Poista kontuuri
+	Loaded contours from {file}	Kontuurit ladattu tiedostosta {file}
+	Saved contours to {file}	Kontuurit tallennettu tiedostoon {file}
+
+# Actions panel: Load/Save Actions (.atn) and kept Photoshop steps
+	New Action…	Uusi toiminto…
+	Start Recording	Aloita nauhoitus
+	Stop Recording	Lopeta nauhoitus
+
+# PhotoCraft release checks.
+	Check for Updates…	Tarkista päivitykset…
+	PhotoCraft Updates	PhotoCraftin päivitykset
+	Checking for updates…	Tarkistetaan päivityksiä…
+	Open the release page to choose an installer for your system.	Avaa julkaisusivu ja valitse järjestelmällesi sopiva asennusohjelma.
+	Open Download Page	Avaa lataussivu
+	PhotoCraft is up to date.	PhotoCraft on ajan tasalla.
+	Could not check for updates.	Päivityksiä ei voitu tarkistaa.
+	Updates have not been checked yet.	Päivityksiä ei ole vielä tarkistettu.
+	Check Again	Tarkista uudelleen
+	Automatically Check for Updates	Tarkista päivitykset automaattisesti
+	Installed version: {version}	Asennettu versio: {version}
+	PhotoCraft {version} is available.	PhotoCraft {version} on saatavilla.
+
+# History panel › History Brush source (#2966)
+	Paints from the History panel's source state	Maalaa Historia-paneelin lähdetilasta
+	Sets the source for the history brush	Asettaa historiasiveltimen lähteen
+
+# Bevel & Emboss shading controls.
+	Highlight Mode	Korostusten tila
+	Highlight Color	Korostusten väri
+	Highlight Opacity	Korostusten peittävyys
+	Shadow Mode	Varjojen tila
+	Shadow Color	Varjojen väri
+	Shadow Opacity	Varjojen peittävyys
+
+# Bevel & Emboss Technique.
+	Do not append "copy" to filename when saving a copy	Älä lisää tiedostonimeen sanaa "kopio" kopiota tallennettaessa
+
+# View › Guides › right-click a guide
+	Bicubic Automatic	Bikubinen automaattinen
+	Bicubic Smoother	Bikubinen pehmeämpi
+	Bicubic Sharper	Bikubinen terävämpi
+	Pasting from other apps is unavailable	Liittäminen muista ohjelmista ei ole käytettävissä
+	PhotoCraft can't reach the system clipboard in this session. On Wayland, a Flatpak sandbox hides the protocol that images from other apps are read through.	PhotoCraft ei saa yhteyttä järjestelmän leikepöytään tässä istunnossa. Waylandissa Flatpak-hiekkalaatikko piilottaa protokollan, jonka kautta muiden ohjelmien kuvat luetaan.
+	To paste from other apps, start PhotoCraft under XWayland: `{command}`	Liittääksesi muista ohjelmista käynnistä PhotoCraft XWaylandissa: `{command}`
+	Nothing to paste: PhotoCraft can't read the system clipboard here	Ei mitään liitettävää: PhotoCraft ei pysty lukemaan järjestelmän leikepöytää tässä
+	Show file name in title	Näytä tiedostonimi otsikossa
+
+# Image › Mode › Bitmap (#5559)
+	50% Threshold	50 %:n kynnysarvo
+	Pattern Dither	Kuvioditteröinti
+	Diffusion Dither	Diffuusioditteröinti
+	Halftone Screen	Rasteri
+	Custom Pattern	Mukautettu kuvio
+	Frequency:	Taajuus:
+	Lines/Inch	Viivaa/tuuma
+	Lines/Centimeter	Viivaa/senttimetri
+	Ellipse	Ellipsi
+
+# Free Transform: a new layer while the box is open (#5859)
+	Reference point location	Vertailupisteen sijainti
+
+# Preferences › Performance › GPU Memory; the status bar and slow-redraw notice
+	Graphics memory: {size}	Grafiikkamuisti: {size}
+	{path}: the path is not valid Unicode; save under another name.	{path}: polku ei ole kelvollista Unicodea; tallenna toisella nimellä.
+	Demosaic	Demosaicointi
+	How the camera's colour filter mosaic is filled in. It is applied when the file opens; the preview shows the method it was opened with.	Miten kameran värisuodinmosaiikki täydennetään. Menetelmä otetaan käyttöön tiedostoa avattaessa; esikatselu näyttää menetelmän, jolla tiedosto avattiin.
+	AHD (adaptive homogeneity)	AHD (adaptiivinen homogeenisuus)
+	Malvar–He–Cutler	Malvar–He–Cutler
+	Hirakawa–Parks: the cleanest edges and the least colour fringing, the slowest.	Hirakawa–Parks: siisteimmät reunat ja vähiten värireunustumaa, hitain.
+	Gradient-corrected interpolation: sharp and fast, with some colour fringing on fine detail.	Gradienttikorjattu interpolointi: terävä ja nopea, hienoissa yksityiskohdissa jonkin verran värireunustumaa.
+	The fastest and the softest, with colour fringing on fine detail.	Nopein ja pehmein, hienoissa yksityiskohdissa värireunustumaa.
+	“{name}” already exists. Replace it?	”{name}” on jo olemassa. Korvataanko se?
+	The name in the save dialog was “{name}”.	Tallennusikkunassa nimi oli ”{name}”.
+	Move Up	Siirrä ylös
+	Move Down	Siirrä alas
+	Memory Usage	Muistin käyttö
+	Per-document RAM limit (MB)	Dokumenttikohtainen RAM-raja (Mt)
+	Installed RAM: {ram} MB; this limit: {percent}%	Asennettu RAM: {ram} Mt; tämä raja: {percent} %
+	Limits each open document's pixels plus History. Oldest undo states are discarded when the limit is exceeded.	Rajoittaa kunkin avoimen dokumentin pikseleitä ja historiaa. Vanhimmat kumoamistilat hylätään, kun raja ylittyy.
+	Applies immediately when saved. Memory is not reserved in advance.	Tulee voimaan heti tallennettaessa. Muistia ei varata etukäteen.
+	With GPU Memory set to Automatic, this also limits the GPU layer budget. That budget is capped at one quarter of installed RAM and, when known, three eighths of the graphics card's memory, with a 512 MB minimum. Raising this limit beyond those caps does not increase the GPU budget.	Kun GPU-muisti on asetettu automaattiseksi, tämä rajoittaa myös GPU:n tasobudjettia. Budjetin yläraja on neljäsosa asennetusta RAM-muistista ja, jos tiedossa, kolme kahdeksasosaa näytönohjaimen muistista, vähintään kuitenkin 512 Mt. Tämän rajan nostaminen näiden ylärajojen yli ei kasvata GPU-budjettia.
+	Use	Käytä
+	In Front	Edessä
+	Behind	Takana
+	Blend	Sekoitus
+
+# DDS Options (#1327)
+	DDS Options	DDS-asetukset
+	Compression	Pakkaus
+	Generate Mipmaps	Luo mipmap-tasot
+
+# Color Table (.act) dialog
+	There is no color table to save.	Tallennettavaa väritaulukkoa ei ole.
+@plural	Saved {n} color to {file}|Saved {n} colors to {file}	Tallennettu {n} väri tiedostoon {file}|Tallennettu {n} väriä tiedostoon {file}
+
+# Graphics Adapter preference (#1885)
+	GPU adapter	GPU-sovitin
+
+# Styles panel: Import / Export Styles (.asl)
+	Import Styles…	Tuo tyylejä…
+	Export Selected Styles…	Vie valitut tyylit…
+	Export Styles…	Vie tyylit…
+	{file} is not a style library (.asl)	{file} ei ole tyylikirjasto (.asl)
+@plural	Imported {n} style from {file}|Imported {n} styles from {file}	Tuotu {n} tyyli tiedostosta {file}|Tuotu {n} tyyliä tiedostosta {file}
+@plural	Exported {n} style to {file}|Exported {n} styles to {file}	Viety {n} tyyli tiedostoon {file}|Viety {n} tyyliä tiedostoon {file}
+
+# Actions: a step dialog holds a suspended recording (#7365)
+	Confirm or cancel the open action step dialog first	Vahvista tai peruuta ensin avoinna oleva toimintovaiheen valintaikkuna
+	Pro Medium Gray	Pro keskiharmaa
+	Solarized	Solarized
+	Breeze	Breeze
+	Pro Light Gray	Pro vaaleanharmaa
+	Pro Light	Pro vaalea
+	Resize Windows to Fit	Muuta ikkunoiden koko sopivaksi
+	EXR	EXR
+
+# Paragraph direction (TYPE-218-2)
+	Automatic paragraph direction	Automaattinen kappaleen suunta
+	Left-to-right paragraph direction	Kappaleen suunta vasemmalta oikealle
+	Right-to-left paragraph direction	Kappaleen suunta oikealta vasemmalle
+	Not rendered: this adjustment ({key}) is kept as imported.	Ei renderöity: tämä säätö ({key}) säilytetään tuodussa muodossa.
+
+# Print preview image (#8236)
+	Print preview image	Tulostuksen esikatselukuva
+
+# Color panel menu: modes, copy commands and colour ramps (#6000)
+	Hue Cube	Sävykuutio
+	Brightness Cube	Kirkkauskuutio
+	Color Wheel	Väriympyrä
+	Grayscale Slider	Harmaasävyn liukusäädin
+	RGB Sliders	RGB-liukusäätimet
+	HSB Sliders	HSB-liukusäätimet
+	CMYK Sliders	CMYK-liukusäätimet
+	Lab Sliders	Lab-liukusäätimet
+	Web Color Sliders	Verkkovärien liukusäätimet
+	Copy Color as HTML	Kopioi väri HTML-muodossa
+	Copy Color's Hex Code	Kopioi värin heksakoodi
+	RGB Spectrum	RGB-spektri
+	CMYK Spectrum	CMYK-spektri
+	Grayscale Ramp	Harmaasävyliukuma
+	Current Colors	Nykyiset värit
+	Make Ramp Web Safe	Rajoita liukuma verkkoturvallisiin väreihin
+
+# Runtime labels: Camera Raw sliders, composed menu labels
+	Brush Size	Siveltimen koko
+	Duplicate	Monista
+	Interpolation	Interpolointi
+	New document…     ⌘N	Uusi dokumentti…     ⌘N
+	Settings	Asetukset
+	Sharpness	Terävyys
+cameraRaw	Amount	Määrä
+cameraRaw	Blacks	Mustat
+cameraRaw	Blending	Sekoitus
+cameraRaw	Darks	Tummat sävyt
+cameraRaw	Lights	Vaaleat sävyt
+cameraRaw	Masking	Maskaus
