@@ -790,6 +790,26 @@ mod tests {
     }
 
     #[test]
+    fn face_job_results_populate_choices_and_show_the_selection() {
+        let mut session = photocraft_engine::Session::new();
+        session.execute("file.new", json!({"width": 64, "height": 64, "mode": "rgb", "depth": 8})).expect("new document");
+        session.execute("layer.newAdjustmentLayer.basicColor", json!({})).expect("basic color layer");
+        let id = session.active().and_then(|st| st.active_layer).expect("active layer");
+        let mut app = PhotocraftApp::new(session, crate::Services::default());
+        finish_face_result(&mut app, FaceJobKind::Scan, id, json!({"faces": 2, "boxes": [[0,0,10,10],[20,20,10,10]]}));
+        assert_eq!(app.ui.basic_color.face_choices, 2);
+        assert!(app.ui.basic_color.status.contains("2"));
+        finish_face_result(&mut app, FaceJobKind::Apply, id, json!({"faces": 2, "selected": 1}));
+        assert_eq!(app.ui.basic_color.face_choices, 2);
+        assert!(app.ui.basic_color.status.contains("2"));
+        assert_eq!(
+            photocraft_engine::mask_view_cmds::current(app.session.active().unwrap()).map(|v| v.mode),
+            Some(photocraft_engine::mask_view_cmds::MaskViewMode::Overlay),
+            "a successful apply shows the selection"
+        );
+    }
+
+    #[test]
     fn face_choice_maps_to_engine_numbers() {
         assert_eq!(engine_face_choice(0), "all");
         assert_eq!(engine_face_choice(1), "main");
