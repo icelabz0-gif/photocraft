@@ -1334,9 +1334,9 @@
 	Overlay Color	Peiteväri
 	Overlay Opacity	Peitteen peittävyys
 	Overlay: Rule of Thirds	Peite: kolmasosasääntö
-	Override Pressure	Ohita paine
-	Override Rotation	Ohita kierto
-	Override Tilt	Ohita kallistus
+	Override Pressure	Pakota paine
+	Override Rotation	Pakota kierto
+	Override Tilt	Pakota kallistus
 	PRESET DETAILS	ESIASETUKSEN TIEDOT
 	PSD	PSD
 	Paint Overlay	Maalipeite
@@ -2114,7 +2114,7 @@
 	Group Layer	Ryhmätaso
 	Fill Layer	Täyttötaso
 	Smart Object Layer	Älykäs objekti -taso
-	Create Warped Text	Luo taivutettua tekstiä
+	Create Warped Text	Luo taivutettu teksti
 	Rasterize Smart Object	Rasteroi älykäs objekti
 	Rasterize Fill Content	Rasteroi täyttösisältö
 	Rasterize Layer Style	Rasteroi tasotyyli
@@ -3236,11 +3236,11 @@ curves	Smooth	Tasoita
 
 # Layers-panel trash confirmation
 	Drag on the image to add a constraint; Shift for horizontal/vertical; right-click a constraint to change or delete it.	Vedä kuvan päällä lisätäksesi rajoitteen; Shift vaakasuoraan/pystysuoraan; oikeanapsauta rajoitetta muuttaaksesi tai poistaaksesi sen.
-	Override Tilt X	Ohita kallistus X
-	Override Tilt Y	Ohita kallistus Y
-	Create warped text	Luo taivutettua tekstiä
+	Override Tilt X	Pakota kallistus X
+	Override Tilt Y	Pakota kallistus Y
+	Create warped text	Luo taivutettu teksti
 	LUT folder	LUT-kansio
-	Current Brush Load	Siveltimen nykyinen maalimäärä
+	Current Brush Load	Siveltimessä oleva maali
 	Load Brush	Lisää maalia siveltimeen
 	Clean Brush	Puhdista sivellin
 	Load the brush after each stroke	Lisää maalia siveltimeen jokaisen vedon jälkeen
@@ -3258,8 +3258,8 @@ curves	Smooth	Tasoita
 	JPEG Options	JPEG-asetukset
 	Image Options	Kuva-asetukset
 	Format Options	Muotoasetukset
-	Baseline ("Standard")	Perus ("vakio")
-	Baseline Optimized	Perus, optimoitu
+	Baseline ("Standard")	Perusmuotoinen (”vakio”)
+	Baseline Optimized	Perusmuotoinen, optimoitu
 
 # Edit › Content-Aware Fill workspace
 	Sampling Brush Tool	Näytteistyssivellin
@@ -3267,7 +3267,7 @@ curves	Smooth	Tasoita
 	Show Sampling Area	Näytä näytteistysalue
 	Indicates	Ilmaisee
 	Sampling Area	Näytteistysalue
-	Excluded Area	Pois jätetty alue
+	Excluded Area	Poissuljettu alue
 	Sampling Area Options	Näytteistysalueen asetukset
 	Rectangular	Suorakulmainen
 	Fill Settings	Täyttöasetukset
@@ -3281,7 +3281,7 @@ curves	Smooth	Tasoita
 	Contract	Supista
 	Animation Options	Animaatioasetukset
 	Entire Document	Koko dokumentti
-	Filter Options	Suodatinasetukset
+	Filter Options	Suodatusasetukset
 	Layer Bounds	Tason rajat
 	Layers Panel Options	Tasot-paneelin asetukset
 	Lock Layers	Lukitse tasot
@@ -3295,7 +3295,7 @@ curves	Smooth	Tasoita
 	Thumbnail Size	Pikkukuvan koko
 	Use Default Masks on Fill Layers	Käytä oletusmaskeja täyttötasoissa
 	Expand New Effects	Laajenna uudet tehosteet
-	Add “copy” to Copied Layers and Groups	Lisää ”kopio” kopioitujen tasojen ja ryhmien nimiin
+	Add “copy” to Copied Layers and Groups	Lisää ”copy” kopioitujen tasojen ja ryhmien nimiin
 	Preview on canvas when reordering layers	Esikatsele kankaalla tasojen järjestystä muutettaessa
 	Show layer mask badges	Näytä tasomaskien merkit
 
@@ -3331,7 +3331,7 @@ curves	Smooth	Tasoita
 	Document Title	Dokumentin otsikko
 
 # Find and Replace, image size, Warp and Layer Style blending options
-	The active layer has no pixels here — turn on Sample All Layers or select a layer with pixels	Aktiivisella tasolla ei ole tässä pikseleitä — ota käyttöön Ota näyte kaikilta tasoilta tai valitse taso, jossa on pikseleitä
+	The active layer has no pixels here — turn on Sample All Layers or select a layer with pixels	Aktiivisella tasolla ei ole tässä pikseleitä — ota käyttöön ”Ota näyte kaikilta tasoilta” tai valitse taso, jossa on pikseleitä
 	Load Contours…	Lataa kontuureja…
 	Replace Contours…	Korvaa kontuurit…
 	Save Contours…	Tallenna kontuurit…
@@ -3363,15 +3363,15 @@ curves	Smooth	Tasoita
 	Sets the source for the history brush	Asettaa historiasiveltimen lähteen
 
 # Bevel & Emboss shading controls.
-	Highlight Mode	Korostusten tila
-	Highlight Color	Korostusten väri
-	Highlight Opacity	Korostusten peittävyys
-	Shadow Mode	Varjojen tila
-	Shadow Color	Varjojen väri
-	Shadow Opacity	Varjojen peittävyys
+	Highlight Mode	Korostuksen sekoitustila
+	Highlight Color	Korostuksen väri
+	Highlight Opacity	Korostuksen peittävyys
+	Shadow Mode	Varjon sekoitustila
+	Shadow Color	Varjon väri
+	Shadow Opacity	Varjon peittävyys
 
 # Bevel & Emboss Technique.
-	Do not append "copy" to filename when saving a copy	Älä lisää tiedostonimeen sanaa "kopio" kopiota tallennettaessa
+	Do not append "copy" to filename when saving a copy	Älä lisää tiedostonimeen sanaa "copy" kopiota tallennettaessa
 
 # View › Guides › right-click a guide
 	Bicubic Automatic	Bikubinen automaattinen
@@ -3381,7 +3381,7 @@ curves	Smooth	Tasoita
 	PhotoCraft can't reach the system clipboard in this session. On Wayland, a Flatpak sandbox hides the protocol that images from other apps are read through.	PhotoCraft ei saa yhteyttä järjestelmän leikepöytään tässä istunnossa. Waylandissa Flatpak-hiekkalaatikko piilottaa protokollan, jonka kautta muiden ohjelmien kuvat luetaan.
 	To paste from other apps, start PhotoCraft under XWayland: `{command}`	Liittääksesi muista ohjelmista käynnistä PhotoCraft XWaylandissa: `{command}`
 	Nothing to paste: PhotoCraft can't read the system clipboard here	Ei mitään liitettävää: PhotoCraft ei pysty lukemaan järjestelmän leikepöytää tässä
-	Show file name in title	Näytä tiedostonimi otsikossa
+	Show file name in title	Näytä tiedostonimi otsikkorivillä
 
 # Image › Mode › Bitmap (#5559)
 	50% Threshold	50 %:n kynnysarvo
@@ -3404,9 +3404,9 @@ curves	Smooth	Tasoita
 	How the camera's colour filter mosaic is filled in. It is applied when the file opens; the preview shows the method it was opened with.	Miten kameran värisuodinmosaiikki täydennetään. Menetelmä otetaan käyttöön tiedostoa avattaessa; esikatselu näyttää menetelmän, jolla tiedosto avattiin.
 	AHD (adaptive homogeneity)	AHD (adaptiivinen homogeenisuus)
 	Malvar–He–Cutler	Malvar–He–Cutler
-	Hirakawa–Parks: the cleanest edges and the least colour fringing, the slowest.	Hirakawa–Parks: siisteimmät reunat ja vähiten värireunustumaa, hitain.
-	Gradient-corrected interpolation: sharp and fast, with some colour fringing on fine detail.	Gradienttikorjattu interpolointi: terävä ja nopea, hienoissa yksityiskohdissa jonkin verran värireunustumaa.
-	The fastest and the softest, with colour fringing on fine detail.	Nopein ja pehmein, hienoissa yksityiskohdissa värireunustumaa.
+	Hirakawa–Parks: the cleanest edges and the least colour fringing, the slowest.	Hirakawa–Parks: siisteimmät reunat ja vähiten värireunoja, hitain.
+	Gradient-corrected interpolation: sharp and fast, with some colour fringing on fine detail.	Gradienttikorjattu interpolointi: terävä ja nopea, hienoissa yksityiskohdissa jonkin verran värireunoja.
+	The fastest and the softest, with colour fringing on fine detail.	Nopein ja pehmein, hienoissa yksityiskohdissa värireunoja.
 	“{name}” already exists. Replace it?	”{name}” on jo olemassa. Korvataanko se?
 	The name in the save dialog was “{name}”.	Tallennusikkunassa nimi oli ”{name}”.
 	Move Up	Siirrä ylös
@@ -3415,7 +3415,7 @@ curves	Smooth	Tasoita
 	Per-document RAM limit (MB)	Dokumenttikohtainen RAM-raja (Mt)
 	Installed RAM: {ram} MB; this limit: {percent}%	Asennettu RAM: {ram} Mt; tämä raja: {percent} %
 	Limits each open document's pixels plus History. Oldest undo states are discarded when the limit is exceeded.	Rajoittaa kunkin avoimen dokumentin pikseleitä ja historiaa. Vanhimmat kumoamistilat hylätään, kun raja ylittyy.
-	Applies immediately when saved. Memory is not reserved in advance.	Tulee voimaan heti tallennettaessa. Muistia ei varata etukäteen.
+	Applies immediately when saved. Memory is not reserved in advance.	Tulee voimaan heti, kun asetukset tallennetaan. Muistia ei varata etukäteen.
 	With GPU Memory set to Automatic, this also limits the GPU layer budget. That budget is capped at one quarter of installed RAM and, when known, three eighths of the graphics card's memory, with a 512 MB minimum. Raising this limit beyond those caps does not increase the GPU budget.	Kun GPU-muisti on asetettu automaattiseksi, tämä rajoittaa myös GPU:n tasobudjettia. Budjetin yläraja on neljäsosa asennetusta RAM-muistista ja, jos tiedossa, kolme kahdeksasosaa näytönohjaimen muistista, vähintään kuitenkin 512 Mt. Tämän rajan nostaminen näiden ylärajojen yli ei kasvata GPU-budjettia.
 	Use	Käytä
 	In Front	Edessä
@@ -3432,7 +3432,7 @@ curves	Smooth	Tasoita
 @plural	Saved {n} color to {file}|Saved {n} colors to {file}	Tallennettu {n} väri tiedostoon {file}|Tallennettu {n} väriä tiedostoon {file}
 
 # Graphics Adapter preference (#1885)
-	GPU adapter	GPU-sovitin
+	GPU adapter	Näytönohjain
 
 # Styles panel: Import / Export Styles (.asl)
 	Import Styles…	Tuo tyylejä…
@@ -3456,7 +3456,7 @@ curves	Smooth	Tasoita
 	Automatic paragraph direction	Automaattinen kappaleen suunta
 	Left-to-right paragraph direction	Kappaleen suunta vasemmalta oikealle
 	Right-to-left paragraph direction	Kappaleen suunta oikealta vasemmalle
-	Not rendered: this adjustment ({key}) is kept as imported.	Ei renderöity: tämä säätö ({key}) säilytetään tuodussa muodossa.
+	Not rendered: this adjustment ({key}) is kept as imported.	Ei renderöidä: tämä säätö ({key}) säilytetään tuodussa muodossa.
 
 # Print preview image (#8236)
 	Print preview image	Tulostuksen esikatselukuva
