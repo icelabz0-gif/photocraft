@@ -1686,7 +1686,9 @@ pub(crate) fn ensure_texture_in_view(
         let st = app.session.documents().get(idx)?;
         (st.revision, st.last_damage.map(|r| if r.is_empty() { r } else { r.inflate(effect_reach(&st.doc.layers)) }), st.doc.id)
     };
-    let (mut doc, mut preview_key) = display_doc(app, idx);
+    // An open filter dialog's live preview (#4750): the GPU canvas draws it from its own branch,
+    // so without it the CPU canvas (no GPU, software rendering, a flipped view) never showed it.
+    let (mut doc, mut preview_key) = filter_channel_preview(app, idx, ctx).unwrap_or_else(|| display_doc(app, idx));
     // A flipped view draws a GPU machine's canvas through here: an adjustment dialog's preview of
     // a large document (taken by the GPU path) would cost a full-size CPU composite per change.
     if crate::adjust_preview::shown_key(app) == Some(preview_key)
@@ -7394,6 +7396,33 @@ mod tests {
         ensure_texture(&mut app, &ctx, 0, Some(4));
         let rev = app.session.documents()[0].revision;
         assert_eq!((app.canvases[&(id, 1)].tex_revision, app.canvases[&(id, 4)].tex_revision), (rev, rev));
+    }
+
+    /// #4750: on the CPU canvas (no GPU, software rendering, a flipped view) an open filter
+    /// dialog's live preview reaches the canvas texture; it was only ever drawn from the GPU branch.
+    #[test]
+    fn cpu_canvas_shows_the_open_filter_dialogs_preview() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.background_jobs = false;
+        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+        app.run("select.rect", json!({"x": 0, "y": 0, "width": 8, "height": 16})).unwrap();
+        app.run("edit.fill", json!({"color": "#000000"})).unwrap();
+        app.run("select.deselect", json!({})).unwrap();
+        let ctx = egui::Context::default();
+        let seam_pixels = |app: &mut PhotocraftApp| {
+            let (tex, _) = ensure_texture(app, &ctx, 0, None).unwrap();
+            let mut delta = ctx.tex_manager().write().take_delta();
+            let image = delta.set.get(&tex).and_then(|v| v.iter().rev().find(|d| d.pos.is_none())).map(|d| d.image.clone());
+            delta.clear();
+            let egui::ImageData::Color(image) = image.expect("the texture was uploaded");
+            (image.pixels[7], image.pixels[8])
+        };
+        let (left, right) = seam_pixels(&mut app);
+        assert_eq!((left, right), (Color32::BLACK, Color32::WHITE), "the document's own seam is sharp");
+        crate::filter_dialog::open(&mut app, "filter.blur.gaussianBlur").unwrap();
+        app.ui.dialogs.last_mut().unwrap().fields.insert("radius".into(), json!(3.0));
+        let (left, right) = seam_pixels(&mut app);
+        assert!(left.r() > 0 && right.r() < 255, "the preview blurs the seam: {left:?} {right:?}");
     }
 
     #[test]
