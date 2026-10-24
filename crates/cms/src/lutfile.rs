@@ -255,8 +255,10 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
     // The shaper's own depth, from 10 bits up: a 0..1023 ramp is the even ramp with or without a header.
     let scale = three_dl_scale(shaper.iter().fold(0.0f64, |a, &b| a.max(b)), true);
     let even = |k: usize| scale * k as f64 / (m - 1) as f64;
-    // Integer shapers round their ramp: within one code is still the even ramp.
-    if shaper.iter().enumerate().all(|(k, &v)| (v - even(k)).abs() <= 1.0) {
+    // Shapers round their ramp: within one code is still the even ramp. An integer shaper's code
+    // is 1; a float shaper (0..1) is held to one 10-bit step.
+    let code = if scale > 1.0 { 1.0 } else { 1.0 / 1023.0 };
+    if shaper.iter().enumerate().all(|(k, &v)| (v - even(k)).abs() <= code) {
         return lut;
     }
     let curve = |x: f64| -> f32 {
@@ -462,6 +464,21 @@ mod tests {
         assert!((c[0] - 114.0 / 1023.0).abs() < 1e-4 && (c[2] - 455.0 / 1023.0).abs() < 1e-4, "{c:?}");
         // A shaper that isn't finite is ignored rather than trusted.
         assert!(parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4).replacen("341", "NaN", 1)).is_ok());
+    }
+
+    /// #9170 review: a float shaper (values in 0..1) is held to a float ramp, not to one integer
+    /// code, so a bent float shaper is applied.
+    #[test]
+    fn three_dl_float_shaper_is_applied() {
+        let grey = |l: &LutFile| (sample(l, [128.0 / 255.0; 3])[0] * 255.0).round();
+        let with = |shaper: &str| {
+            let table = identity_3dl(&[0, 1, 2, 3], 4);
+            parse_3dl(&format!("{shaper}\n{}", table.split_once('\n').unwrap().1)).unwrap()
+        };
+        // 0.502 lands between 0.1 and 0.3 at 0.506 of the way: 0.2012, so grey 51.
+        assert_eq!(grey(&with("0 0.1 0.3 1.0")), 51.0);
+        // An even float ramp, written to three decimals, still changes nothing.
+        assert_eq!(grey(&with("0 0.333 0.667 1.0")), 128.0);
     }
 
     #[test]
