@@ -724,6 +724,7 @@ mod tests {
         ]
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn fnv_px(px: &[[f32; 4]]) -> u64 {
         px.iter().flatten().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ v.to_bits() as u64).wrapping_mul(0x0000_0100_0000_01b3))
     }

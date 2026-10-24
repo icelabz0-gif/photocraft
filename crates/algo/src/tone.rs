@@ -339,6 +339,7 @@ mod tests {
 
     /// A display-referred image from `+ - * /` and `sqrt` only (exact on every platform), with
     /// alpha holes and fractional alpha.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn display(w: usize, h: usize) -> Vec<[f32; 4]> {
         (0..w * h)
             .map(|i| {
@@ -356,6 +357,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn toning_variants() -> Vec<HdrToning> {
         vec![
             HdrToning::default(),
