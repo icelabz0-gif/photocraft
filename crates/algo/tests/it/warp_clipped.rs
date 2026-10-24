@@ -59,7 +59,8 @@ fn source_center_does_not_add_extreme_coordinates_in_i32() {
 }
 
 /// #4864: a Bicubic Distort filters each pixel for its own reduction, so a clip, anywhere on the
-/// quad (its narrow side too, or straddling the horizon), keeps exactly the pixels the full warp has.
+/// quad (its narrow side too, or straddling the horizon), keeps exactly the pixels of a larger
+/// warp that selects the same side of the horizon.
 #[test]
 fn perspective_clip_matches_full() {
     let mut source = Surface::new(PixelFormat::RGBA8);
@@ -79,8 +80,45 @@ fn perspective_clip_matches_full() {
     let past = Homography::rect_to_quad([0.0, 0.0, 400.0, 300.0], [[0.0, 0.0], [900.0, 0.0], [180.0, 180.0], [0.0, 900.0]]).unwrap();
     let big = Rect::new(-1200, -1200, 2100, 2100);
     let whole = warp_surface_clipped(&source, r, &past, Interp::Bicubic, big).unwrap();
-    for clip in [Rect::new(-50, -40, 230, 260), Rect::new(100, 100, 400, 400), Rect::new(-1200, -1200, 0, 0)] {
+    let same_side = Rect::new(256, 256, 1024, 768);
+    let inv = past.inverse().unwrap();
+    let front = past.front_side([0.0, 0.0, 400.0, 300.0]);
+    assert!(
+        [(same_side.x0, same_side.y0), (same_side.x1, same_side.y0), (same_side.x1, same_side.y1), (same_side.x0, same_side.y1)]
+            .into_iter()
+            .all(|(x, y)| front * inv.w(x as f64, y as f64) > 0.0)
+    );
+    for clip in [Rect::new(-50, -40, 230, 260), Rect::new(100, 100, 400, 400), same_side] {
         let bounded = warp_surface_clipped(&source, r, &past, Interp::Bicubic, clip).unwrap();
         assert_eq!(whole.read_region(clip), bounded.read_region(clip), "{clip:?}");
+    }
+}
+
+/// #7557/#6376: a clip wholly on the opposite side of the horizon deliberately draws that side,
+/// not the source majority chosen by a larger horizon-crossing clip. Nested clips on that side
+/// still agree byte for byte, including the per-pixel Bicubic path.
+#[test]
+fn perspective_clips_select_their_own_side_of_the_horizon() {
+    let r = Rect::new(0, 0, 400, 300);
+    let h = Homography::rect_to_quad([0.0, 0.0, 400.0, 300.0], [[0.0, 0.0], [900.0, 0.0], [180.0, 180.0], [0.0, 900.0]]).unwrap();
+    let inv = h.inverse().unwrap();
+    let front = h.front_side([0.0, 0.0, 400.0, 300.0]);
+    let clip = Rect::new(-64, -64, 0, 0);
+    let inner = Rect::new(-48, -48, -16, -16);
+    assert!([(clip.x0, clip.y0), (clip.x1, clip.y0), (clip.x1, clip.y1), (clip.x0, clip.y1)].into_iter().all(|(x, y)| front * inv.w(x as f64, y as f64) < 0.0));
+    for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut source = Surface::new(PixelFormat::new(ColorMode::Rgb, sample, true));
+        source.fill_rect(r, &[0.25, 0.5, 0.75, 1.0]);
+        let expected = source.pixel(32, 24);
+        for interpolation in [Interp::Nearest, Interp::Bilinear, Interp::Bicubic] {
+            let whole = warp_surface_clipped(&source, r, &h, interpolation, Rect::new(-64, -64, 300, 300)).unwrap();
+            let bounded = warp_surface_clipped(&source, r, &h, interpolation, clip).unwrap();
+            let nested = warp_surface_clipped(&source, r, &h, interpolation, inner).unwrap();
+            assert_eq!(whole.pixel(-32, -32)[3], 0.0, "{sample:?} {interpolation:?}: source majority");
+            let got = bounded.pixel(-32, -32);
+            assert!(got.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-6), "{sample:?} {interpolation:?}: {got:?}");
+            assert_eq!(bounded.read_region(inner), nested.read_region(inner), "{sample:?} {interpolation:?}");
+            assert!(clip.contains_rect(&bounded.content_bounds()));
+        }
     }
 }

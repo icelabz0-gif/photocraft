@@ -887,7 +887,8 @@ impl Render<'_> {
                 for s in acc.iter_mut() {
                     *s *= l.cu * l.cv;
                 }
-                let al = acc.get(alpha).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                let raw_alpha = acc.get(alpha).copied().unwrap_or(0.0);
+                let al = raw_alpha.clamp(0.0, 1.0);
                 if al.is_nan() || al <= 0.0 {
                     continue;
                 }
@@ -895,8 +896,10 @@ impl Render<'_> {
                 let Some(dst) = buf.get_mut(o..o + n) else { continue };
                 any = true;
                 for (d, s) in dst.iter_mut().zip(&acc).take(alpha) {
-                    // Integer storage clips on write; float colours retain their signed/HDR range.
-                    *d = (s / al) as f32;
+                    // Like the affine sampler, un-premultiply before clamping ringing alpha
+                    // (#6203); dividing by the clamped value would brighten a soft edge.
+                    // Integer storage clips on write; floats retain their signed/HDR range.
+                    *d = (s / raw_alpha) as f32;
                 }
                 if let Some(d) = dst.get_mut(alpha) {
                     *d = al as f32;
@@ -2450,21 +2453,22 @@ mod tests {
         }
     }
 
-    /// Hashes of today's outputs (28d35d2c): affine Bicubic warps (8 maps, Gray/RGB/CMYK/Lab at
-    /// 8/16/32 bits with and without alpha, with and without a clip), Bilinear and Nearest
-    /// perspective warps, and today's perspective Bicubic (the valve's path).
+    /// Pre-perspective-filter outputs: 28d35d2c with only #6203's raw-alpha un-premultiplication
+    /// correction (59d42f39). Independently reproduced from that historical implementation, not
+    /// regenerated from this path. Eight affine maps, Gray/RGB/CMYK/Lab at 8/16/32 bits, with and
+    /// without alpha/clip; Bilinear/Nearest perspective; and single-factor Bicubic (the valve).
     const GOLDEN: [(&str, u64); 11] = [
         ("50%", 0x01da_1b84_9529_8f40),
         ("100x25", 0xff63_845c_b1e2_2339),
         ("87.5x25", 0x9047_1420_a2c4_0128),
-        ("rhombus", 0x26c1_dbfe_5add_e94f),
-        ("skew-flatten", 0xc1b6_bec3_d847_a18d),
-        ("translation", 0xbdae_ae89_9c65_a684),
+        ("rhombus", 0x39e2_3d11_5d41_1aaa),
+        ("skew-flatten", 0x508e_d060_c886_bca1),
+        ("translation", 0x94b5_f983_d9b9_4f18),
         ("eighth", 0x419d_7a4c_76ec_05b4),
-        ("rotate30", 0xda82_a3eb_d6eb_35ca),
+        ("rotate30", 0x6d04_793c_d200_3f4c),
         ("perspective bilinear", 0xc7c0_1c32_b56a_fbd7),
         ("perspective nearest", 0x58db_c5fd_901c_3b1a),
-        ("perspective bicubic today", 0xb1eb_cdac_c0ca_4dea),
+        ("perspective bicubic today", 0x0f3c_b435_59b7_8a32),
     ];
 
     fn golden_maps() -> Vec<(&'static str, Homography)> {
@@ -2520,7 +2524,7 @@ mod tests {
     }
 
     /// #4864: affine Bicubic warps, and Bilinear and Nearest ones of any map, are exactly what they
-    /// were before perspective maps were filtered per pixel.
+    /// were before perspective maps were filtered per pixel, retaining #6203's alpha correction.
     #[test]
     fn golden_affine_bytes() {
         let got = golden_hashes(|s, r, h, clip| match clip {
@@ -2537,7 +2541,7 @@ mod tests {
         assert!(bad.is_empty(), "{bad:#?}");
     }
 
-    /// #4864: forcing the valve on a perspective map gives exactly today's (28d35d2c) output.
+    /// #4864: forcing the valve gives the single-factor baseline with #6203's alpha correction.
     #[test]
     fn valve_reproduces_today() {
         let forced = Tuning { force_valve: true, ..Tuning::DEFAULT };
@@ -2887,6 +2891,47 @@ mod tests {
                             let hm = Homography::rect_to_quad(rect, q).unwrap();
                             let o = warp_surface(&s, r, &hm, Interp::Bicubic).unwrap();
                             assert_flat(&o, &opaque, &format!("{fmt:?} {w}x{h} at ({ox}, {oy}), ×{scale}, mirrored {mirror}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// #6203/#6376: perspective sampling must un-premultiply by the raw alpha just as
+    /// the affine sampler does, or ringing above one brightens a soft-edged sprite.
+    #[test]
+    fn perspective_keeps_the_colour_of_a_soft_edged_sprite() {
+        let r = Rect::new(0, 0, 32, 32);
+        let h = Homography([2.0, 0.0, 0.25, 0.0, 2.0, 0.25, 0.001, 0.0, 1.0]);
+        assert_eq!(prefilter_scales(&h, r, None), Prefilter::PerPixel);
+        assert!(samples_source_only(&h, r), "isolate the per-pixel sampler from reduced cells");
+        for mode in [ColorMode::Grayscale, ColorMode::Rgb, ColorMode::Cmyk, ColorMode::Lab] {
+            for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
+                let fmt = PixelFormat::new(mode, sample, true);
+                let mut col: Vec<f32> = (0..fmt.mode.color_channels()).map(|c| 0.2 + 0.15 * c as f32).chain([1.0]).collect();
+                if sample == SampleType::F32 && mode == ColorMode::Rgb {
+                    col = vec![3.5, -0.25, 12.0, 1.0];
+                }
+                let mut edge = col.clone();
+                *edge.last_mut().unwrap() = 0.5;
+                let mut src = Surface::new(fmt);
+                src.fill_rect(r, &edge);
+                src.fill_rect(Rect::new(1, 1, 31, 31), &col);
+                let expected = src.pixel(16, 16);
+                let out = warp_surface(&src, r, &h, Interp::Bicubic).unwrap();
+                assert!(!out.content_bounds().is_empty(), "{fmt:?}");
+                let tolerance = match sample {
+                    SampleType::U8 => 1.0 / 255.0,
+                    SampleType::U16 => 1.0 / 65535.0,
+                    _ => 1e-5,
+                };
+                for p in out.read_region(out.content_bounds()).chunks_exact(fmt.channels()) {
+                    let alpha = p[fmt.channels() - 1];
+                    assert!(p.iter().all(|v| v.is_finite()) && (0.0..=1.0).contains(&alpha), "{fmt:?}: {p:?}");
+                    if alpha > 0.0 {
+                        for (got, want) in p.iter().zip(&expected).take(fmt.channels() - 1) {
+                            assert!((got - want).abs() <= tolerance, "{fmt:?}: {p:?} vs {expected:?}");
                         }
                     }
                 }
