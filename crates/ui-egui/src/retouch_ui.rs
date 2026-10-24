@@ -114,7 +114,8 @@ pub(crate) fn stroke_seed(points: &[[f64; 3]]) -> u64 {
 /// Finish a stroke with a retouching tool. Returns false if `tool` isn't one.
 pub fn finish_stroke(app: &mut PhotocraftApp, tool: Tool, points: &[[f64; 3]], mods: egui::Modifiers) -> bool {
     let o = app.ui.tool_options.clone();
-    let pts = json!(points);
+    // The drag's tilt/rotation, as `paint.stroke` gets: the tool's dabs must follow the pen.
+    let pts = json!(app.stylus.stroke_points(points));
     let (cmd, mut p): (&str, Value) = match tool {
         Tool::SpotHealing => ("paint.spotHealing", json!({"type": o.spot_type, "sampleAllLayers": o.sample_all.spot_healing})),
         Tool::Remove => {
@@ -963,6 +964,63 @@ mod tests {
         assert_ne!(surface.rgba(50, 30), before[1], "the selected pixels are mixed");
         assert_eq!(surface.rgba(20, 30), before[0], "outside the selection is unchanged");
         assert_eq!(surface.rgba(80, 30), before[2], "the far side outside the selection is unchanged");
+    }
+
+    #[test]
+    fn mixer_brush_and_color_replacement_commit_the_pens_tilt() {
+        // Their commits used to drop the pen's tilt and rotation, so a Pen Tilt angle control
+        // turned only the cursor outline.
+        for (tool, cmd) in [(Tool::MixerBrush, "paint.mixerBrush"), (Tool::ColorReplacement, "paint.colorReplacement")] {
+            let mut app = app();
+            app.ui.tool = tool;
+            let m = egui::Modifiers::NONE;
+            app.stylus.feed.set(Some(crate::stylus::PenSample { pressure: 1.0, tilt_x: 40.0, tilt_y: -25.0, rotation: 30.0, eraser: false }));
+            tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 30.0, pressure: 1.0 }, m);
+            tool_event(&mut app, ToolEvent::Move { x: 60.0, y: 30.0, pressure: 1.0 }, m);
+            tool_event(&mut app, ToolEvent::Up { x: 60.0, y: 30.0 }, m);
+            app.stylus.feed.set(None);
+            assert!(!app.ui.status_error, "{tool:?}: {}", app.ui.status);
+            let (id, p) = app.session.journal.last().unwrap();
+            assert_eq!(id, cmd);
+            assert_eq!(p["points"][0], json!([20.0, 30.0, 1.0, 40.0, -25.0, 30.0]), "{tool:?}");
+            assert_eq!(p["points"][1], json!([60.0, 30.0, 1.0, 40.0, -25.0, 30.0]), "{tool:?}");
+            tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 45.0, pressure: 1.0 }, m);
+            tool_event(&mut app, ToolEvent::Up { x: 60.0, y: 45.0 }, m);
+            let (_, p) = app.session.journal.last().unwrap();
+            assert_eq!(p["points"][0], json!([20.0, 45.0, 1.0]), "{tool:?}, mouse");
+        }
+    }
+
+    #[test]
+    fn a_pen_tilt_angle_control_turns_the_mixer_brushs_dabs() {
+        // Roundness 0.25 with Angle = Pen Tilt: the tip is a 16×4 sliver that must turn with
+        // the pen, not just the cursor outline.
+        let paint = |tilt: Option<[f32; 2]>| {
+            let mut app = app();
+            app.run("tools.setColors", json!({"foreground": "#f02010"})).unwrap();
+            app.run(
+                "tools.setBrush",
+                json!({"brush": {"size": 16, "hardness": 1.0, "roundness": 0.25, "shapeDynamics": {"enabled": true, "angle": {"control": "penTilt"}}, "mixer": {"wet": 0.0, "load": 1.0, "mix": 0.0, "flow": 1.0}}}),
+            )
+            .unwrap();
+            app.ui.tool = Tool::MixerBrush;
+            if let Some([tilt_x, tilt_y]) = tilt {
+                app.stylus.feed.set(Some(crate::stylus::PenSample { pressure: 1.0, tilt_x, tilt_y, rotation: 0.0, eraser: false }));
+            }
+            let m = egui::Modifiers::NONE;
+            tool_event(&mut app, ToolEvent::Down { x: 50.0, y: 30.0, pressure: 1.0 }, m);
+            tool_event(&mut app, ToolEvent::Up { x: 50.0, y: 30.0 }, m);
+            app.stylus.feed.set(None);
+            assert!(!app.ui.status_error, "{}", app.ui.status);
+            let s = active(&app).surface().unwrap();
+            // 2 px along the tip's long axis (x at angle 0), and 2 px across it.
+            (s.rgba(52, 30), s.rgba(50, 32))
+        };
+        let painted = |c: [f32; 4]| c[0] > 0.8 && c[1] < 0.3;
+        let (along, across) = paint(None);
+        assert!(painted(along) && !painted(across), "upright pen: a horizontal tip: {along:?} {across:?}");
+        let (along, across) = paint(Some([0.0, -50.0]));
+        assert!(!painted(along) && painted(across), "pen tilted 90°: the tip turns with it: {along:?} {across:?}");
     }
 
     #[test]
