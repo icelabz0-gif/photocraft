@@ -286,7 +286,7 @@ pub(crate) fn cache_key(doc: photocraft_doc::DocId, display: Option<u32>) -> (ph
 }
 
 /// `app.canvases` output of the GPU canvas state (one texture per document for all displays).
-const GPU_OUTPUT: u32 = u32::MAX;
+pub(crate) const GPU_OUTPUT: u32 = u32::MAX;
 
 /// The document to render: the committed one, or a clone with the live adjustment preview applied.
 pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Arc<Document>, u64) {
