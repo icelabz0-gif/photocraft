@@ -393,10 +393,7 @@ fn warp_type_layer(s: &mut Session, cmd: &str, id: LayerId, w: &Warp) -> Result<
     let Some(LayerContent::Text(t)) = st.doc.layer(id).map(|l| &l.content) else { return Err(EngineError::Other("not a type layer".into())) };
     let mut next = t.clone();
     next.cache = None;
-    if !free
-        && !w.is_identity()
-        && (w.style == WarpStyle::Custom || w.style == WarpStyle::Cylinder || !next.distortions.is_empty())
-    {
+    if !free && !w.is_identity() && (w.style == WarpStyle::Custom || w.style == WarpStyle::Cylinder || !next.distortions.is_empty()) {
         return Err(bad(
             cmd,
             "as in Photoshop, type takes only a warp style (arc, flag, …); turn on Preferences › Type › Free Transforms on Type, or rasterize the type",
