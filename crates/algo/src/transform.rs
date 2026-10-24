@@ -1120,7 +1120,7 @@ fn warp_with(
         converted = src.try_convert(fmt)?;
         &converted
     };
-    let out = Surface::new(fmt);
+    let mut out = Surface::new(fmt);
     if src_rect.is_empty() || clip.is_some_and(|c| c.is_empty()) {
         return Ok(out);
     }
