@@ -254,11 +254,15 @@ fn three_dl_scale(max: f64, header: bool) -> f64 {
 /// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
 /// The table is baked on a grid holding both its own nodes and the shaper's knots (up to
 /// [`MAX_SIZE`] nodes; past that, the finer of the two): exact for an identity table, an
-/// approximation at that resolution otherwise.
+/// approximation at that resolution otherwise. A shaper with a value that isn't finite is refused.
 fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     let m = shaper.len();
-    if m < 2 || shaper.iter().any(|v| !v.is_finite()) {
+    if m < 2 {
         return Ok(lut);
+    }
+    // Apply or refuse: a shaper that can't be applied never leaves the table to render alone.
+    if shaper.iter().any(|v| !v.is_finite()) {
+        return err("the .3dl shaper holds a value that isn't finite");
     }
     // The shaper's own depth, from 10 bits up: a 0..1023 ramp is the even ramp with or without a header.
     let scale = three_dl_scale(shaper.iter().fold(0.0f64, |a, &b| a.max(b)), true);
@@ -484,8 +488,9 @@ mod tests {
         assert_eq!(sample(&bent, [0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]);
         let c = sample(&bent, [1.0 / 3.0, 0.0, 2.0 / 3.0]);
         assert!((c[0] - 114.0 / 1023.0).abs() < 1e-4 && (c[2] - 455.0 / 1023.0).abs() < 1e-4, "{c:?}");
-        // A shaper that isn't finite is ignored rather than trusted.
-        assert!(parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4).replacen("341", "NaN", 1)).is_ok());
+        // A shaper that isn't finite is refused rather than dropped (see
+        // `three_dl_non_finite_shaper_is_refused`).
+        assert!(parse_3dl(&identity_3dl(&[0, 341, 682, 1023], 4).replacen("341", "NaN", 1)).is_err());
     }
 
     /// #9170 review: a float shaper (values in 0..1) is held to a float ramp, not to one integer
@@ -563,6 +568,17 @@ mod tests {
         let even = identity_3dl(&[0, 341, 682, 1023], 4);
         assert_eq!(grey(&parse_3dl(&format!("3dmesh\nMesh 4 12\n{even}")).unwrap()), 128.0);
         assert!(parse_3dl(&format!("3DMESH\nMesh 4 12\n0 341 junk 682 1023\n{}", even.split_once('\n').unwrap().1)).is_err(), "still strict after it");
+    }
+
+    /// #9170 review: a shaper that isn't finite is refused, not dropped, so a Color Lookup never
+    /// renders the table alone for a file whose shaper it can't apply.
+    #[test]
+    fn three_dl_non_finite_shaper_is_refused() {
+        let body = identity_3dl(&[0, 1, 2, 3], 4);
+        let body = body.split_once('\n').unwrap().1;
+        for shaper in ["0 NaN 682 1023", "0 341 inf 1023", "-inf 341 682 1023"] {
+            assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
+        }
     }
 
     #[test]
