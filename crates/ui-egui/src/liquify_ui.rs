@@ -1396,7 +1396,7 @@ mod tests {
             pointer(&mut app, ev, egui::Modifiers::NONE);
         }
         let preview_changed = app.distort.liquify.as_ref().unwrap().out != preview_before;
-        commit(&mut app);
+        commit(&mut app).unwrap();
         let doc = &app.session.active().unwrap().doc;
         let after = doc.layer(layer).unwrap().surface().unwrap().read_region(doc.bounds());
         assert_eq!(before, after, "unselected stroke must not change committed pixels");
@@ -1435,7 +1435,7 @@ mod tests {
             d.update_view_preview(&ctx, area);
             d.view_out != preview_before
         };
-        commit(&mut app);
+        commit(&mut app).unwrap();
         let doc = &app.session.active().unwrap().doc;
         let after = doc.layer(layer).unwrap().surface().unwrap().read_region(doc.bounds());
         assert_eq!(before, after, "unselected stroke must not change committed pixels");
@@ -1479,7 +1479,7 @@ mod tests {
             assert_eq!(app.distort.liquify.as_ref().unwrap().out, preview_before, "undo mode {mode}");
             control(&mut app, &json!({"redo": true})).unwrap();
             assert_eq!(app.distort.liquify.as_ref().unwrap().out, preview_after, "redo mode {mode}");
-            commit(&mut app);
+            commit(&mut app).unwrap();
             let (_, after, _) = crate::distort_ui::active_pixels(&app).unwrap();
             let canvas = app.session.active().unwrap().doc.bounds();
             assert_eq!(before.read_region(canvas) != after.read_region(canvas), mode == 3, "commit mode {mode}");
@@ -1524,7 +1524,7 @@ mod tests {
             }
             let preview = app.distort.liquify.as_ref().unwrap().out.clone();
             assert_ne!(before, preview, "fractional selection must still show the warp");
-            commit(&mut app);
+            commit(&mut app).unwrap();
             let (_, committed, _) = crate::distort_ui::active_pixels(&app).unwrap();
             let expected = ProxyImage::new(&committed, Rect::new(0, 0, 120, 80), PROXY_SIDE);
             for (p, expected) in preview.iter().zip(expected.px) {
