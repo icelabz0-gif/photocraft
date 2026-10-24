@@ -410,6 +410,8 @@ fn command_list(a: &Args) -> Result<Vec<(String, Value)>, String> {
     Ok(cmds)
 }
 
+/// `run`: open a file (or make a new one), run each `--cmd` in order, print each result as a
+/// JSON line and save to `--out`. Deselect with nothing selected is skipped (#8802).
 fn run_cmds(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
     let opts = export_opts(a)?;
     let mut h = Headless::trusted_local();
@@ -439,6 +441,11 @@ fn run_cmds(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
         return Err("run needs at least one --cmd (or --out)".into());
     }
     for (id, params) in cmds {
+        // Deselect with nothing selected is a silent no-op in a script, as in action playback (#8802).
+        if photocraft_engine::actions_cmds::noop_step(&h.session, &id) {
+            print_json(out, &json!({"command": id, "result": null}), true)?;
+            continue;
+        }
         let r = h.command_run(&id, params).map_err(|e| format!("`{id}`: {e}"))?;
         if let Some(e) = photocraft_engine::actions_cmds::nested_failure(&id, &r) {
             return Err(format!("`{id}`: {e}"));
@@ -583,6 +590,8 @@ fn strip_shell_steps(action: &mut Action) {
     (action.steps, action.disabled, action.dialogs) = (steps, disabled, dialogs);
 }
 
+/// `batch`: play the steps of an actions file on every image in `--in` and save to `--out`.
+/// Deselect with nothing selected is skipped, as in playback (#8802).
 fn batch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
     let actions_path = a.get("--actions").ok_or("batch needs --actions <file>")?;
     let in_dir = PathBuf::from(a.get("--in").ok_or("batch needs --in <dir>")?);
@@ -622,7 +631,10 @@ fn batch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
             h.session.actions.list = set.clone();
             h.open(input).map_err(|e| e.to_string())?;
             for (id, p) in &actions {
-                if photocraft_engine::actions_cmds::shell_view_command(id) || photocraft_engine::actions_cmds::shell_save_command(id) {
+                if photocraft_engine::actions_cmds::shell_view_command(id)
+                    || photocraft_engine::actions_cmds::shell_save_command(id)
+                    || photocraft_engine::actions_cmds::noop_step(&h.session, id)
+                {
                     continue;
                 }
                 let r = h.command_run(id, p.clone()).map_err(|e| format!("`{id}`: {e}"))?;
@@ -922,6 +934,97 @@ mod batch_action_set_tests {
             let info: Value = serde_json::from_str(&info).unwrap();
             assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(6), Some(8)), "{action}: rotated once, the unchecked step skipped");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod deselect_noop_tests {
+    use super::*;
+
+    /// Run the CLI with `args`: (exit code, stdout, stderr).
+    fn invoke(args: &[&str]) -> (i32, String, String) {
+        let (mut output, mut errors) = (Vec::new(), Vec::new());
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let code = run(&args, &mut output, &mut errors);
+        (code, String::from_utf8(output).unwrap(), String::from_utf8(errors).unwrap())
+    }
+
+    /// #8802: Deselect with nothing selected is skipped in a `run`, as action playback does
+    /// (#6744), so a script that deselects after Reveal Selection still finishes and saves.
+    #[test]
+    fn run_skips_deselect_with_nothing_selected() {
+        let folder = std::env::temp_dir().join(format!("photocraft-cli-deselect-run-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let native = folder.join("out.pcraft").to_string_lossy().to_string();
+        let (code, stdout, stderr) = invoke(&[
+            "run",
+            "--new",
+            r#"{"width":16,"height":16}"#,
+            "--cmd",
+            "select.rect",
+            "--params",
+            r#"{"x":0,"y":0,"width":8,"height":16}"#,
+            "--cmd",
+            "layer.new.layer",
+            "--cmd",
+            "layer.layerMask.revealSelection",
+            "--cmd",
+            "select.deselect",
+            "--cmd",
+            "layer.new.layer",
+            "--params",
+            r#"{"name":"after"}"#,
+            "--out",
+            &native,
+        ]);
+        assert_eq!(code, 0, "{stderr}");
+        let results: Vec<Value> = stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(results.len(), 5, "every command reports a result: {stdout}");
+        assert_eq!(results[3], json!({"command": "select.deselect", "result": null}));
+        let (code, stdout, stderr) = invoke(&["info", &native, "--compact"]);
+        assert_eq!(code, 0, "{stderr}");
+        let info: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(info["layers"][0]["name"], "after", "the steps after Deselect ran: {info}");
+
+        // Deselect with a selection still deselects: Inverse afterwards finds nothing to invert.
+        let (code, _, stderr) = invoke(&[
+            "run",
+            "--new",
+            r#"{"width":16,"height":16}"#,
+            "--cmd",
+            "select.all",
+            "--cmd",
+            "select.deselect",
+            "--cmd",
+            "select.inverse",
+            "--out",
+            &native,
+        ]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("`select.inverse`") && stderr.contains("no selection"), "{stderr}");
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// #8802: a batched action that starts with Deselect plays on files with nothing selected,
+    /// as the same action does in the Actions panel (#6744).
+    #[test]
+    fn batch_skips_deselect_with_nothing_selected() {
+        let dir = std::env::temp_dir().join(format!("photocraft-cli-deselect-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = |name: &str| dir.join(name).to_string_lossy().to_string();
+        std::fs::create_dir_all(dir.join("in")).unwrap();
+        let (code, _, stderr) = invoke(&["run", "--new", r#"{"width":8,"height":6}"#, "--out", &path("in/a.png")]);
+        assert_eq!(code, 0, "{stderr}");
+        std::fs::write(dir.join("steps.json"), json!([["select.deselect", {}], ["image.imageRotation.90cw", {}]]).to_string()).unwrap();
+        let (code, stdout, stderr) = invoke(&["batch", "--actions", &path("steps.json"), "--in", &path("in"), "--out", &path("out")]);
+        assert_eq!(code, 0, "{stdout}{stderr}");
+        assert!(stdout.contains("1 succeeded, 0 failed"), "{stdout}");
+        let (code, stdout, stderr) = invoke(&["info", &path("out/a.png"), "--compact"]);
+        assert_eq!(code, 0, "{stderr}");
+        let info: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(6), Some(8)), "the step after Deselect ran: {info}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
