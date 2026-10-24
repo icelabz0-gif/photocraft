@@ -678,6 +678,14 @@ source-tap support; an authored faint sample remains eligible regardless of its 
 `cargo run --release -p photocraft-compose --example bench_stroke_edge -- 25` measures cold
 composition of the same artwork at 4900 × 4900 (24 MP).
 
+Axis-aligned bicubic reductions sample the original pixel grid with independently widened
+kernels per axis, including the final placement offset. This avoids an intermediate resize
+blurring an unchanged axis or making the result depend on the source's coordinate origin.
+`cargo test -p photocraft-algo --test affine_reduction` checks these invariants, coverage,
+clipping, sparse surfaces and colour depths. Reductions below 1/64 on either axis and
+non-axis-aligned warps retain the existing prefilter path. For a specific display size, direct
+placement at that size avoids an additional export reduction with a different sampling grid.
+
 `cargo xtask test-corpus -p io -- --nocapture` compares our composite of every corpus PSD with
 Photoshop's own merged image (PASS ≤ 2/255) and checks that export → re-import renders the same,
 per source with its own floors: `corpus/psd`, the psd-tools set (also a truncation/corruption sweep

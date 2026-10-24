@@ -4,8 +4,8 @@
 //! rotate, skew and flips are affine special cases; Distort and Perspective use the full
 //! homography. Warping is an inverse mapping with premultiplied-alpha sampling (nearest, bilinear
 //! or Photoshop's Keys bicubic), processed per destination tile (in parallel on native) so memory stays
-//! bounded by the tile working set. Large reductions are pre-filtered with a proper resize first,
-//! so shrinking a layer doesn't alias.
+//! bounded by the tile working set. Axis-aligned reductions sample directly with a widened
+//! bicubic kernel; other reductions are pre-filtered with a proper resize first to avoid aliasing.
 
 use photocraft_color::PixelFormat;
 use photocraft_geom::Rect;
@@ -13,6 +13,8 @@ use photocraft_raster::{Interrupt, Surface};
 use serde::{Deserialize, Serialize};
 
 use crate::resample::{Resample, resize_surface};
+
+mod axis_aligned;
 
 /// 3×3 projective matrix, row-major: `[x', y', w'] = H · [x, y, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -317,6 +319,9 @@ fn warp(
     let out = Surface::new(fmt);
     if src_rect.is_empty() || clip.is_some_and(|c| c.is_empty()) {
         return Ok(out);
+    }
+    if let Some(mapping) = axis_aligned::Mapping::reduction(h, interp) {
+        return axis_aligned::warp(src, src_rect, h, mapping, interp, clip, ctl);
     }
     let mut h = *h;
     let mut src_rect = src_rect;
