@@ -285,6 +285,9 @@ struct Host {
     closed: Option<(Id, u64)>,
     /// The item chosen in a native menu, its owner, and the frame it came back in.
     pick: Option<(Id, Pick, u64)>,
+    /// The menu buttons ([`show_button`]) drawn since the frame began: a press on one opens its
+    /// menu ([`MenuPress`]).
+    buttons: Vec<Id>,
 }
 
 fn with<R>(ctx: &Context, f: impl FnOnce(&mut Host) -> R) -> R {
@@ -333,6 +336,7 @@ pub(crate) fn expire(ctx: &Context) {
         if h.closed.is_some_and(|c| c.1 < frame) {
             h.closed = None;
         }
+        h.buttons.clear();
     });
 }
 
@@ -410,6 +414,27 @@ fn show_popup(resp: &Response, close: Option<egui::PopupCloseBehavior>, mut add:
     popup.show(|ui| add(&mut MenuUi::egui(ui)));
 }
 
+/// `button`'s menu (`egui::Popup::menu`): a native menu dropping down from the button where the
+/// app has them, opening on the press ([`MenuPress`]).
+pub fn show_button(button: &Response, mut add: impl FnMut(&mut MenuUi)) {
+    let ctx = &button.ctx;
+    if native(ctx) {
+        with(ctx, |h| {
+            if !h.buttons.contains(&button.id) {
+                h.buttons.push(button.id);
+            }
+        });
+        if let Some(pick) = take_pick(ctx, button.id) {
+            replay(pick, &mut add);
+            return;
+        }
+        if button.clicked() && request(ctx, button.id, button.rect.left_bottom(), &mut add) {
+            return;
+        }
+    }
+    egui::Popup::menu(button).show(|ui| add(&mut MenuUi::egui(ui)));
+}
+
 /// A menu the app opened itself at `pos` and keeps in its own state (the canvas menus), as a
 /// native menu: `None` when native menus are off or it has egui-only content (draw it with egui),
 /// else whether it is still open. `Some(false)` comes once, when the native menu closed (after
@@ -439,37 +464,50 @@ pub fn show_native(ctx: &Context, owner: Id, pos: Pos2, mut add: impl FnMut(&mut
     request(ctx, owner, pos, &mut add).then_some(true)
 }
 
-/// Native menus open on the right button's press, as every Mac app's do, rather than on its
-/// release as egui's click would. Wherever the app reads a right-click (`secondary_clicked`: the
-/// panels, the canvas menus), so with native menus on, the press is completed into a click in the
-/// same frame and the real release, if AppKit's menu doesn't take it, is dropped. A press that may
-/// start a right-button drag (`drags`: brush resize, right-click erase) is left alone. Off when
-/// menus are egui's: their right-click stays the release.
+/// Native menus open on the press, as every Mac app's do, rather than on the release as egui's
+/// click would: a right press, and a left press on a menu button ([`show_button`]). The app reads
+/// clicks (`secondary_clicked`, `clicked`: the panels, the canvas menus), so with native menus on,
+/// such a press is completed into a click in the same frame and the real release, if AppKit's menu
+/// doesn't take it, is dropped. A right press that may start a right-button drag (`drags`: brush
+/// resize, right-click erase) is left alone. Off when menus are egui's: they keep the release.
 #[derive(Default)]
-pub(crate) struct RightPress {
-    /// A press was completed: drop the next right release.
-    swallow: bool,
+pub(crate) struct MenuPress {
+    /// A press of that button was completed: drop its next release.
+    swallow_right: bool,
+    swallow_left: bool,
 }
 
-impl RightPress {
+impl MenuPress {
     pub(crate) fn complete(&mut self, ctx: &Context, events: &mut Vec<egui::Event>, drags: impl Fn(egui::Modifiers) -> bool) {
         use egui::{Event, PointerButton};
         if !native(ctx) {
-            self.swallow = false;
+            (self.swallow_right, self.swallow_left) = (false, false);
             return;
         }
+        let buttons = with(ctx, |h| h.buttons.clone());
+        let on_menu_button = |pos: Pos2| {
+            buttons.iter().any(|id| ctx.read_response(*id).is_some_and(|r| r.enabled() && r.rect.contains(pos) && ctx.layer_id_at(pos) == Some(r.layer_id)))
+        };
         let mut out = Vec::with_capacity(events.len() + 1);
         for e in events.drain(..) {
             match e {
+                // A new press: a release AppKit's menu took is not coming.
                 Event::PointerButton { pos, button: PointerButton::Secondary, pressed: true, modifiers } => {
-                    // A new press: a release AppKit's menu took is not coming.
-                    self.swallow = !drags(modifiers);
+                    self.swallow_right = !drags(modifiers);
                     out.push(e);
-                    if self.swallow {
+                    if self.swallow_right {
                         out.push(Event::PointerButton { pos, button: PointerButton::Secondary, pressed: false, modifiers });
                     }
                 }
-                Event::PointerButton { button: PointerButton::Secondary, pressed: false, .. } if self.swallow => self.swallow = false,
+                Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers } => {
+                    self.swallow_left = on_menu_button(pos);
+                    out.push(e);
+                    if self.swallow_left {
+                        out.push(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers });
+                    }
+                }
+                Event::PointerButton { button: PointerButton::Secondary, pressed: false, .. } if self.swallow_right => self.swallow_right = false,
+                Event::PointerButton { button: PointerButton::Primary, pressed: false, .. } if self.swallow_left => self.swallow_left = false,
                 e => out.push(e),
             }
         }
@@ -701,7 +739,7 @@ mod tests {
         let none = egui::Modifiers::NONE;
         let drags = |m: egui::Modifiers| m.alt;
         let ctx = Context::default();
-        let mut press = RightPress::default();
+        let mut press = MenuPress::default();
         let mut events = vec![right(true, none)];
         press.complete(&ctx, &mut events, drags);
         assert_eq!(events, [right(true, none)], "egui menus: untouched");
@@ -728,5 +766,41 @@ mod tests {
         let mut events = vec![right(false, alt)];
         press.complete(&ctx, &mut events, drags);
         assert_eq!(events, [right(false, alt)], "and its release");
+    }
+
+    /// A left press on a menu button ([`show_button`]) is a click at once with native menus, so
+    /// its menu drops down on the press; a left press anywhere else is untouched.
+    #[test]
+    fn menu_buttons_open_on_the_left_press() {
+        let ctx = Context::default();
+        set_native(&ctx, true);
+        let button_rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(20.0, 20.0));
+        let mut out = Vec::new();
+        let frame = |input: egui::RawInput, out: &mut Vec<&'static str>| {
+            ctx.run_ui(input, |ui| {
+                expire(ui.ctx());
+                let b = ui.interact(button_rect, Id::new("menu button"), egui::Sense::click());
+                show_button(&b, |m| menu(m, out));
+            })
+            .drop_without_applying_deltas();
+        };
+        frame(egui::RawInput::default(), &mut out);
+        let left = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let mut press = MenuPress::default();
+        let on = egui::pos2(15.0, 15.0);
+        let mut events = vec![egui::Event::PointerMoved(on), left(on, true)];
+        press.complete(&ctx, &mut events, |_| false);
+        assert_eq!(events.last(), Some(&left(on, false)), "completed on the press");
+        frame(egui::RawInput { events, ..Default::default() }, &mut out);
+        let req = take_request(&ctx).expect("its native menu");
+        assert_eq!(req.pos, button_rect.left_bottom(), "drops down from the button");
+        assert!(!egui::Popup::is_any_open(&ctx));
+        let mut events = vec![left(on, false)];
+        press.complete(&ctx, &mut events, |_| false);
+        assert!(events.is_empty(), "the real release is dropped");
+        let off = egui::pos2(100.0, 100.0);
+        let mut events = vec![left(off, true)];
+        press.complete(&ctx, &mut events, |_| false);
+        assert_eq!(events, [left(off, true)], "an ordinary left press is untouched");
     }
 }

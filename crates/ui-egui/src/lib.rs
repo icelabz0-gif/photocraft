@@ -1003,8 +1003,8 @@ pub struct PhotocraftApp {
     /// Pen pressure/tilt from the platform (see `stylus`).
     pub stylus: stylus::Stylus,
     control_click: control_click::ControlClick,
-    /// Native right-click menus open on the press (macOS).
-    right_press: context_menu::RightPress,
+    /// Native menus open on the press (macOS).
+    menu_press: context_menu::MenuPress,
     /// Run long commands and file opens as background jobs with progress and Cancel (#210; see
     /// `jobs_ui`). The desktop app turns it on; off (the default), everything runs inline as
     /// before, which tests and scripts rely on.
@@ -1171,7 +1171,7 @@ impl PhotocraftApp {
             allow_close: false,
             stylus: Default::default(),
             control_click: Default::default(),
-            right_press: Default::default(),
+            menu_press: Default::default(),
             background_jobs: false,
             min_frame_ms: None,
             last_frame_start_ms: 0.0,
@@ -2389,10 +2389,10 @@ impl eframe::App for PhotocraftApp {
         // After the control channel's own events (`ui.type`) join the OS's, before any widget.
         widgets::cap_text_events(&mut raw_input.events);
         self.control_click.normalize(&mut raw_input.events, cfg!(target_os = "macos"));
-        // Native menus open on the right button's press; right-drag gestures keep their release.
+        // Native menus open on the press; right-drag gestures keep their release.
         let right_erases = paint_mouse::right_erases(self, self.ui.tool);
         let latched = workspace_ui::sticky_mods(self, egui::Modifiers::NONE);
-        self.right_press.complete(ctx, &mut raw_input.events, |m| right_erases || brush_resize::is_right_gesture(m | latched));
+        self.menu_press.complete(ctx, &mut raw_input.events, |m| right_erases || brush_resize::is_right_gesture(m | latched));
         // A panel title's right-click is the native menu's, not craft-ui's egui one.
         panel_docking::take_tab_right_click(self, ctx, &mut raw_input.events);
         // A pen held still is no touch screen's press-and-hold right click (stylus.rs).

@@ -803,10 +803,12 @@ fn float_window(
                     }
                     if key == "styles" {
                         let resp = crate::icons::button(ui, "ellipsis", 20.0, false, tl!("Panel menu"));
-                        egui::Popup::menu(&resp).show(|ui| {
-                            crate::widgets::style_spectrum_popup_menu(ui);
-                            ui.set_min_width(180.0);
-                            styles_menu(app, ui);
+                        crate::context_menu::show_button(&resp, |m| {
+                            if let Some(ui) = m.ui() {
+                                crate::widgets::style_spectrum_popup_menu(ui);
+                            }
+                            m.min_width(180.0);
+                            styles_menu(app, m);
                         });
                     }
                 });
@@ -885,21 +887,20 @@ pub fn styles_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 /// The Styles panel menu ("…"): Import Styles… / Export Selected Styles… / Export Styles…
 /// (Photoshop layer style libraries, `.asl`).
-fn styles_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+fn styles_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
     let any = app.session.presets.styles.iter().any(|g| !g.items.is_empty());
     let selected = app.ui.presets_ui.selected.get("styles").cloned();
     let mut act: Option<&str> = None;
-    if ui.button(tl!("Import Styles…")).clicked() {
+    if m.item(tl!("Import Styles…")) {
         act = Some("import");
     }
-    if ui.add_enabled(selected.is_some(), egui::Button::new(tl!("Export Selected Styles…"))).clicked() {
+    if m.item_enabled(selected.is_some(), tl!("Export Selected Styles…")) {
         act = Some("selected");
     }
-    if ui.add_enabled(any, egui::Button::new(tl!("Export Styles…"))).clicked() {
+    if m.item_enabled(any, tl!("Export Styles…")) {
         act = Some("all");
     }
     let Some(a) = act else { return };
-    ui.close();
     let r = match a {
         "import" => app.pick_file_bytes_filtered(&["asl"], |app, name, bytes| match crate::preset_files_ui::open(app, &name, &bytes) {
             Some(r) => r.map(|()| Value::Null),

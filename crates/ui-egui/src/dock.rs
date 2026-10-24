@@ -619,59 +619,37 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
         if dragging == Some(g) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
-        egui::Popup::menu(&resp.menu).show(|ui| {
-            crate::widgets::style_spectrum_popup_menu(ui);
-            ui.set_min_width(170.0);
-            if tabs.get(sel) == Some(&"Layers") {
-                crate::layer_row_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
+        let ctx = ui.ctx().clone();
+        crate::context_menu::show_button(&resp.menu, |m| {
+            if let Some(ui) = m.ui() {
+                crate::widgets::style_spectrum_popup_menu(ui);
             }
-            if tabs.get(sel) == Some(&"Color") {
-                crate::color_panel_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Swatches") {
-                crate::swatches_ui::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"History") {
-                crate::history_menu_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Brush Settings") {
-                crate::brush_panel::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Actions") {
-                crate::actions::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
-                ui.separator();
-            }
+            m.min_width(170.0);
             if let Some(label) = tabs.get(sel) {
-                crate::panel_docking::legacy_menu(app, ui, label);
+                // Brush Settings is a legacy dock tab, not a docking panel.
+                if let Some(panel) = crate::panel_docking::normalize(label).or((*label == "Brush Settings").then_some("brushSettings")) {
+                    crate::panel_docking::panel_menu_rows(app, &ctx, m, panel);
+                }
+                crate::panel_docking::legacy_menu(app, m, label);
             }
-            if ui.button(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") }).clicked() {
+            if m.item(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") }) {
                 actions.push(Action::ToggleCollapse(g));
-                ui.close();
             }
             let pos = order.iter().position(|x| *x == g).unwrap_or(0);
-            if ui.add_enabled(!locked && pos > 0, egui::Button::new(tl!("Move Group Up"))).clicked() {
+            if m.item_enabled(!locked && pos > 0, tl!("Move Group Up")) {
                 actions.push(Action::Move(g, order.get(pos.saturating_sub(1)).copied()));
-                ui.close();
             }
-            if ui.add_enabled(!locked && pos + 1 < order.len(), egui::Button::new(tl!("Move Group Down"))).clicked() {
+            if m.item_enabled(!locked && pos + 1 < order.len(), tl!("Move Group Down")) {
                 actions.push(Action::Move(g, order.get(pos + 2).copied()));
-                ui.close();
             }
-            ui.separator();
-            if ui.button(tl!("Close")).clicked() {
-                if let Some(&tab) = indices.get(sel) {
-                    actions.push(Action::CloseTab(g, tab));
-                }
-                ui.close();
+            m.separator();
+            if m.item(tl!("Close"))
+                && let Some(&tab) = indices.get(sel)
+            {
+                actions.push(Action::CloseTab(g, tab));
             }
-            if ui.button(tl!("Close Tab Group")).clicked() {
+            if m.item(tl!("Close Tab Group")) {
                 actions.push(Action::Close(g));
-                ui.close();
             }
         });
         // Splitter in the gap below this group: resizes it, pushing the neighbouring groups.

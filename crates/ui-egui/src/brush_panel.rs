@@ -527,18 +527,18 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         open = false;
                     }
                     let menu_btn = widgets::panel_menu_button(ui);
-                    egui::Popup::menu(&menu_btn).show(|ui| {
-                        widgets::style_spectrum_popup_menu(ui);
-                        ui.set_min_width(180.0);
-                        panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
-                        ui.separator();
-                        if ui.button(tl!("Close")).clicked() {
-                            open = false;
-                            ui.close();
+                    crate::context_menu::show_button(&menu_btn, |m| {
+                        if let Some(ui) = m.ui() {
+                            widgets::style_spectrum_popup_menu(ui);
                         }
-                        if ui.button(tl!("Close Tab Group")).clicked() {
+                        m.min_width(180.0);
+                        panel_menu(app, m);
+                        m.separator();
+                        if m.item(tl!("Close")) {
                             open = false;
-                            ui.close();
+                        }
+                        if m.item(tl!("Close Tab Group")) {
+                            open = false;
                         }
                     });
                 });

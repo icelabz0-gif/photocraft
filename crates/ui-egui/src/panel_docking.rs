@@ -867,7 +867,7 @@ fn tab_menu_id() -> egui::Id {
 
 /// With native menus, a right press on a panel's title opens a native menu instead of craft-ui's
 /// egui one, which has no way to be replaced: the press (and the release completing it,
-/// `context_menu::RightPress`) leaves the input before craft-ui sees it, and [`native_tab_menu`]
+/// `context_menu::MenuPress`) leaves the input before craft-ui sees it, and [`native_tab_menu`]
 /// shows the same rows. The titles are last frame's widgets.
 pub(crate) fn take_tab_right_click(app: &PhotocraftApp, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
     let Some(layout) = app.ui.docking.as_ref().filter(|_| crate::context_menu::native(ctx)) else { return };
@@ -959,7 +959,7 @@ fn float_rect(ctx: &egui::Context, panel: &String) -> [f32; 4] {
 }
 
 /// `panel`'s own menu rows (the Layers panel's, the Color panel's, …), then a separator.
-fn panel_menu_rows(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut MenuUi, panel: &str) {
+pub(crate) fn panel_menu_rows(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut MenuUi, panel: &str) {
     match panel {
         "layers" => crate::layer_row_ui::panel_menu(app, ctx, m),
         "swatches" => crate::swatches_ui::panel_menu(app, m),
@@ -1015,16 +1015,15 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
         let collapsed = panels.iter().all(|id| self.collapsed.contains(id));
         let locked = self.app.session.prefs().workspace_locked;
         let resp = crate::icons::button(ui, "ellipsis", ui.available_height().min(28.0), false, tl!("Panel menu"));
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(180.0);
-            panel_menu(self.app, ui, active);
-            if ui.add_enabled(!locked, egui::Button::new(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") })).clicked() {
+        let ctx = ui.ctx().clone();
+        crate::context_menu::show_button(&resp, |m| {
+            m.min_width(180.0);
+            panel_menu_rows(self.app, &ctx, m, active);
+            if m.item_enabled(!locked, if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") }) {
                 self.commands.push(("window.panel.group", json!({"panel":active,"operation":if collapsed {"expand"} else {"collapse"}})));
-                ui.close();
             }
-            if ui.add_enabled(!locked, egui::Button::new(if floating { tl!("Dock Panel") } else { tl!("Float Panel") })).clicked() {
+            if m.item_enabled(!locked, if floating { tl!("Dock Panel") } else { tl!("Float Panel") }) {
                 self.commands.push((if floating { "window.panel.dock" } else { "window.panel.float" }, json!({"panel":active})));
-                ui.close();
             }
             if !floating {
                 let groups = self.app.ui.docking.as_ref().map(root_groups).unwrap_or_default();
@@ -1032,16 +1031,14 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
                 for (operation, label, enabled) in
                     [("up", tl!("Move Group Up"), index.is_some_and(|i| i > 0)), ("down", tl!("Move Group Down"), index.is_some_and(|i| i + 1 < groups.len()))]
                 {
-                    if ui.add_enabled(!locked && enabled, egui::Button::new(label)).clicked() {
+                    if m.item_enabled(!locked && enabled, label) {
                         self.commands.push(("window.panel.group", json!({"panel":active,"operation":operation})));
-                        ui.close();
                     }
                 }
             }
-            ui.separator();
-            if ui.add_enabled(!locked, egui::Button::new(tl!("Close Tab Group"))).clicked() {
+            m.separator();
+            if m.item_enabled(!locked, tl!("Close Tab Group")) {
                 self.commands.push(("window.panel.group", json!({"panel":active,"operation":"close"})));
-                ui.close();
             }
         });
     }
@@ -1088,29 +1085,25 @@ fn panel_active(layout: &Layout<String>, panel: &str) -> bool {
 }
 
 /// Extra legacy menu choices use the same commands as the customized renderer.
-pub(crate) fn legacy_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, label: &str) {
+pub(crate) fn legacy_menu(app: &mut PhotocraftApp, m: &mut MenuUi, label: &str) {
     let Some(panel) = normalize(label) else { return };
     let locked = app.session.prefs().workspace_locked;
-    ui.add_enabled_ui(!locked, |ui| {
-        if ui.button(tl!("Float Panel")).clicked() {
-            if let Err(error) = app.run("window.panel.float", json!({"panel":panel})) {
-                app.ui.status = error;
-            }
-            ui.close();
-        }
-        ui.menu_button(tl!("Group with"), |ui| {
-            for &(anchor, label, _) in PANELS {
-                if anchor != panel && ui.button(tl!(label)).clicked() {
-                    let result = app
-                        .run("window.panel.activate", json!({"panel":anchor}))
-                        .and_then(|_| app.run("window.panel.move", json!({"panel":panel,"anchor":anchor})));
-                    if let Err(error) = result {
-                        app.ui.status = error;
-                    }
-                    ui.close();
+    if m.item_enabled(!locked, tl!("Float Panel"))
+        && let Err(error) = app.run("window.panel.float", json!({"panel":panel}))
+    {
+        app.ui.status = error;
+    }
+    m.submenu_enabled(!locked, tl!("Group with"), |m| {
+        for &(anchor, label, _) in PANELS {
+            if anchor != panel && m.item(tl!(label)) {
+                let result = app
+                    .run("window.panel.activate", json!({"panel":anchor}))
+                    .and_then(|_| app.run("window.panel.move", json!({"panel":panel,"anchor":anchor})));
+                if let Err(error) = result {
+                    app.ui.status = error;
                 }
             }
-        });
+        }
     });
 }
 

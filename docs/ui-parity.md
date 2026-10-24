@@ -228,7 +228,7 @@ Paragraph; the rest open as in-app floating windows.
 | Window size and dock width remembered | done | UI-217-2 |
 | Command palette with recents | done | UI-217-7 |
 | Menu bar from the keyboard: Alt / F10 focus the bar, ← → ↓ ↩ drive it, Alt+letter opens a menu, underlined mnemonics run items | done | `menu_keys.rs`, #4988; macOS uses the native bar |
-| Native right-click menus on macOS (canvas tool, layer list, Layers, Channels, Paths, History, presets, tabs, panel titles, text fields, dialogs): `NSMenu`s with check marks, submenus and shortcuts; egui popups elsewhere and under a control channel | done (2026-10-24) | `context_menu.rs`, `mac_menu.rs`, `tests/mac_menu_appkit.rs` |
+| Native right-click menus on macOS (canvas tool, layer list, Layers, Channels, Paths, History, presets, tabs, panel titles and ≡ menu buttons, text fields, dialogs): `NSMenu`s with check marks, submenus and shortcuts; egui popups elsewhere and under a control channel | done (2026-10-24) | `context_menu.rs`, `mac_menu.rs`, `tests/mac_menu_appkit.rs` |
 | Every preference takes effect | partial | 46 of 149 do nothing (scorecard) |
 | UI scale presets | missing | UI-217-9, #2492 |
 | History snapshots: camera button, snapshot rows (click returns and selects, rename, delete; the trash deletes the selected snapshot, and a snapshot or state dragged onto it, #5324), `history.*Snapshot` commands | partial | `history_cmds.rs`, `snapshot_rows` in `panels.rs`; New Snapshot dialog, first snapshot and History Options to come (#2966) |
