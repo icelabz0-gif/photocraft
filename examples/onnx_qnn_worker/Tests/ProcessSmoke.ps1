@@ -71,3 +71,4 @@ finally {
         [IO.Path]::GetFileName($resolved) -notmatch '^photocraft-qnn-smoke-[0-9a-f]{32}$') { throw 'Refusing unexpected smoke cleanup path.' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+Write-Output "PASS ProcessSmoke: $($results.Count) checks passed; results written to '$path' (scope: real ARM64 apphost startup/exit without model; 无 NPU 推理 / no NPU inference)."
