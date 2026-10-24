@@ -229,7 +229,7 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
     }
     let lut = LutFile { title: String::new(), size: n, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()?;
     Ok(match shaper {
-        Some(shaper) => apply_shaper(lut, &shaper),
+        Some(shaper) => apply_shaper(lut, &shaper)?,
         None => lut,
     })
 }
@@ -247,10 +247,10 @@ fn three_dl_scale(max: f64, header: bool) -> f64 {
 /// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
 /// The table is baked with at least as many nodes as the shaper has points (up to [`MAX_SIZE`]):
 /// exact for an identity table, an approximation at that resolution otherwise.
-fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
+fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     let m = shaper.len();
     if m < 2 || shaper.iter().any(|v| !v.is_finite()) {
-        return lut;
+        return Ok(lut);
     }
     // The shaper's own depth, from 10 bits up: a 0..1023 ramp is the even ramp with or without a header.
     let scale = three_dl_scale(shaper.iter().fold(0.0f64, |a, &b| a.max(b)), true);
@@ -259,14 +259,16 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
     // is 1; a float shaper (0..1) is held to one 10-bit step.
     let code = if scale > 1.0 { 1.0 } else { 1.0 / 1023.0 };
     if shaper.iter().enumerate().all(|(k, &v)| (v - even(k)).abs() <= code) {
-        return lut;
+        return Ok(lut);
     }
+    // Scaled to 0..1 first, so interpolating between two extreme values can't overflow.
+    let shaped: Vec<f64> = shaper.iter().map(|v| v / scale).collect();
     let curve = |x: f64| -> f32 {
         let p = x.clamp(0.0, 1.0) * (m - 1) as f64;
         let i = (p.floor() as usize).min(m - 2);
         let f = p - i as f64;
-        let (a, b) = (shaper.get(i).copied().unwrap_or(0.0), shaper.get(i + 1).copied().unwrap_or(0.0));
-        ((a + (b - a) * f) / scale).clamp(0.0, 1.0) as f32
+        let (a, b) = (shaped.get(i).copied().unwrap_or(0.0), shaped.get(i + 1).copied().unwrap_or(0.0));
+        (a + (b - a) * f).clamp(0.0, 1.0) as f32
     };
     // A shaper finer than the table is baked at the shaper's resolution (up to MAX_SIZE), so its
     // curve survives a small table: a 2-node table would otherwise read it only at its two ends.
@@ -284,7 +286,7 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> LutFile {
             }
         }
     }
-    out
+    out.check()
 }
 
 /// Trilinear lookup of `rgb` (0..1) in a [`LutFile`] (red fastest).
@@ -492,6 +494,17 @@ mod tests {
         // 0.502 lands between 0 and 512 at 0.506 of the way: 259 / 1023, so grey 65.
         assert_eq!(grey(&small), 65.0);
         assert_eq!(sample(&small, [1.0, 0.0, 1.0]), [1.0, 0.0, 1.0], "the ends stay put");
+    }
+
+    /// #9170 review: a finite but extreme shaper can't overflow into NaN when it is baked.
+    #[test]
+    fn three_dl_extreme_shaper_bakes_only_finite_values() {
+        let table = identity_3dl(&[0, 1, 2, 3], 2);
+        let text = format!("0 1e308 -1e308 0\n{}", table.split_once('\n').unwrap().1);
+        // Refused or baked, but never a table holding NaN.
+        if let Ok(l) = parse_3dl(&text) {
+            assert!(l.data.iter().all(|v| v.is_finite()), "baked a non-finite value");
+        }
     }
 
     #[test]
