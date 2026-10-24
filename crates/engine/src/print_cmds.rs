@@ -1154,7 +1154,14 @@ fn package(s: &mut Session, p: &Value) -> Result<Value> {
                 // Links (an earlier package into the same folder) is never overwritten.
                 let base = file_name(path);
                 let taken = |n: &str| {
-                    copied.iter().any(|(_, t)| file_name(t).to_lowercase() == n.to_lowercase()) || std::path::Path::new(&join(&links_dir, n)).exists()
+                    copied.iter().any(|(_, t)| file_name(t).to_lowercase() == n.to_lowercase())
+                        || std::path::Path::new(&join(&links_dir, n)).exists()
+                        || std::fs::read_dir(&links_dir)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .any(|entry| entry.file_name().to_string_lossy().to_lowercase() == n.to_lowercase())
                 };
                 let mut fname = base.clone();
                 let mut k = copied.len();
