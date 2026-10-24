@@ -169,13 +169,15 @@ impl GpuCanvas {
         let info = rs.adapter.get_info();
         res.separate_mip_targets = separate_mip_targets(info.backend, info.vendor, std::env::var("PHOTOCRAFT_SEPARATE_MIPS").ok().as_deref());
         let vram = video_memory(&info);
+        let shared = shares_system_memory(&info, vram);
+        res.shared_memory = shared;
         res.canvas_budget.store(canvas_budget(physical_memory(), vram), Ordering::Relaxed);
         let budget = res.canvas_budget.clone();
         rs.renderer.write().callback_resources.insert(res);
         log::info!(
             "gpu canvas: target {:?}, max texture {max}, tile {tile}, 16F canvas {high:?}, video memory {}",
             rs.target_format,
-            vram.map_or_else(|| "unknown".to_owned(), |b| format!("{} MB", b >> 20))
+            if shared { "shared with the system".to_owned() } else { vram.map_or_else(|| "unknown".to_owned(), |b| format!("{} MB", b >> 20)) }
         );
         Self { rs: rs.clone(), tile, high, health, vram, canvas_budget: budget }
     }
@@ -213,6 +215,59 @@ impl GpuCanvas {
     /// [`video_memory`]); it caps [`memory_budget`] and [`canvas_budget`].
     pub fn video_memory(&self) -> Option<u64> {
         self.vram
+    }
+
+    /// Whether the adapter's memory is the system's (see [`shares_system_memory`]).
+    pub fn shares_system_memory(&self) -> bool {
+        let r = self.rs.renderer.read();
+        r.callback_resources.get::<Resources>().is_some_and(|res| res.shared_memory)
+    }
+
+    /// Treat the adapter as sharing system memory or not, whatever [`shares_system_memory`]
+    /// detected: tests and benchmarks exercise both kinds of adapter on one machine.
+    pub fn set_shares_system_memory(&self, shared: bool) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            res.shared_memory = shared;
+        }
+    }
+
+    /// GPU bytes of `doc`'s display texture set (every tile and mip level, in the format it
+    /// would get), whether or not it exists yet.
+    pub fn display_bytes(&self, doc: &photocraft_doc::Document) -> u64 {
+        let size = [doc.size.width, doc.size.height];
+        canvas_texture_bytes(size, self.tile, texel_bytes(self.format_for(doc.depth, size)))
+    }
+
+    /// Bytes of the layer pages a full refresh of `doc` needs resident on this device
+    /// ([`photocraft_gpu::layer_working_set`]), priced without the compositor, which the first
+    /// refresh creates.
+    pub fn layer_working_set(&self, doc: &photocraft_doc::Document) -> u64 {
+        photocraft_gpu::layer_working_set(doc, doc.bounds(), self.page_side())
+    }
+
+    /// At most the bytes of layer pages one page cell of `doc` needs on this device
+    /// ([`photocraft_gpu::cell_working_set`]).
+    pub fn cell_working_set(&self, doc: &photocraft_doc::Document) -> u64 {
+        photocraft_gpu::cell_working_set(doc, self.page_side())
+    }
+
+    /// The side of the compositor's layer pages on this device.
+    fn page_side(&self) -> u32 {
+        photocraft_gpu::page_side(self.rs.device.limits().max_texture_dimension_2d)
+    }
+
+    /// The compositor budget the app gives `doc`: [`memory_budget`] of Memory Usage
+    /// (`allowance`), the document's pixels and History (`pixels`) and GPU Memory (`fixed`, 0 =
+    /// Automatic), and where the adapter shares system memory and GPU Memory is Automatic,
+    /// [`shared_memory_budget`] of that (#9007). The app and the benchmarks size it here, so they
+    /// count memory the same way.
+    pub fn budget_for(&self, doc: &photocraft_doc::Document, allowance: u64, pixels: u64, fixed: u64) -> u64 {
+        compositor_budget(self.shares_system_memory(), allowance, pixels, physical_memory(), self.vram, fixed, || DocGpuBytes {
+            display: self.display_bytes(doc),
+            layers: self.layer_working_set(doc),
+            cell: self.cell_working_set(doc),
+        })
     }
 
     /// The canvas texture format for a document of `depth` and `size`: `Rgba16Float` for 16/32-bit
@@ -273,8 +328,7 @@ impl GpuCanvas {
     /// Whether `doc`'s display textures fit [`canvas_budget`]; when they don't, nothing is
     /// created for it and it is drawn on the CPU canvas.
     pub fn fits_canvas(&self, doc: &photocraft_doc::Document) -> bool {
-        let size = [doc.size.width, doc.size.height];
-        let bytes = canvas_texture_bytes(size, self.tile, texel_bytes(self.format_for(doc.depth, size)));
+        let bytes = self.display_bytes(doc);
         let r = self.rs.renderer.read();
         r.callback_resources.get::<Resources>().is_some_and(|res| bytes <= res.canvas_budget.load(Ordering::Relaxed))
     }
@@ -322,9 +376,10 @@ impl GpuCanvas {
         let mut r = self.rs.renderer.write();
         let res = r.callback_resources.get_mut::<Resources>()?;
         let budget = res.compositor_budget;
+        let shared = res.shared_memory;
         let comp = res.compositor.as_mut()?;
         if let Some(b) = budget {
-            comp.set_memory_budget(b);
+            apply_budget(comp, b, shared);
         }
         let needed = comp.working_set(doc, doc.bounds());
         let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, true) };
@@ -489,7 +544,7 @@ impl GpuCanvas {
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
         if let Some(b) = res.compositor_budget {
-            comp.set_memory_budget(b);
+            apply_budget(&mut comp, b, res.shared_memory);
         }
         if let Some(b) = res.compositor_cache_budget {
             comp.set_composite_cache_budget(b);
@@ -1075,6 +1130,9 @@ pub struct GpuInfo {
     /// The adapter's own memory in MB ([`video_memory`]): discrete GPUs where the platform
     /// reports it. It caps the GPU memory budgets.
     pub video_memory_mb: Option<u64>,
+    /// The adapter shares system memory ([`shares_system_memory`]): an integrated GPU, Apple
+    /// silicon among them. Large documents then redraw whole on the CPU by design (#9007).
+    pub shared_memory: bool,
     /// `performance.gpuBackend` at launch.
     pub preference: String,
     /// Every graphics adapter the window could have used, by name (Preferences › Performance ›
@@ -1119,7 +1177,9 @@ impl GpuInfo {
         }
         .to_string();
         self.driver = [info.driver.as_str(), info.driver_info.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
-        self.video_memory_mb = video_memory(info).map(|b| b >> 20);
+        let vram = video_memory(info);
+        self.video_memory_mb = vram.map(|b| b >> 20);
+        self.shared_memory = shares_system_memory(info, vram);
     }
 
     /// Human-readable lines for Help › System Info.
@@ -1420,6 +1480,95 @@ pub fn vram_share(vram: u64) -> u64 {
     vram / 8 * 3
 }
 
+/// Whether `adapter`'s memory is the system's: an integrated GPU whose own memory nobody reported
+/// (`vram`, from [`video_memory`]). wgpu reports a Metal device with `hasUnifiedMemory` (Apple
+/// silicon, and Intel graphics in older Macs) as integrated, as it does Intel and AMD integrated
+/// graphics elsewhere. Everything the GPU allocates there, layer pages and upload staging
+/// included, is system memory on top of the document's own pixels (#9007). `PHOTOCRAFT_VRAM_MB`
+/// simulates a card, so it turns this off too.
+pub fn shares_system_memory(adapter: &wgpu::AdapterInfo, vram: Option<u64>) -> bool {
+    adapter.device_type == wgpu::DeviceType::IntegratedGpu && vram.is_none()
+}
+
+/// The least compositor budget for a large document where the GPU shares system memory
+/// ([`shared_memory_budget`]).
+pub const SHARED_EDIT_BUDGET: u64 = 256 << 20;
+
+/// Page cells whose layer pages the edit budget of a large document holds where the GPU shares
+/// system memory ([`shared_memory_budget`]): a refresh keeps only the cell it draws resident, so
+/// with less, a dab across a cell border or corner uploads every layer's pages of the cells it
+/// touches on every frame.
+pub const SHARED_EDIT_CELLS: u64 = 4;
+
+/// Upload bytes the compositor stages per batch where the GPU shares system memory: two batches
+/// can be in flight, and their staging buffers are system memory too (#9007).
+pub const SHARED_STAGING_LIMIT: u64 = 64 << 20;
+
+/// What a document needs on the GPU (bytes), for [`shared_memory_budget`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocGpuBytes {
+    /// Its display texture set ([`GpuCanvas::display_bytes`]).
+    pub display: u64,
+    /// Its layer pages, all of them ([`GpuCanvas::layer_working_set`]).
+    pub layers: u64,
+    /// At most the layer pages of one page cell ([`GpuCanvas::cell_working_set`]).
+    pub cell: u64,
+}
+
+/// The Automatic compositor budget where the GPU shares system memory (#9007). There, resident
+/// layer pages are a second copy of the layers in the same memory the document already holds,
+/// so `budget` ([`memory_budget`]) stands only while the document's pixels and History
+/// (`pixels`), its display textures and its layer pages (`gpu`) together fit a sixth of physical
+/// memory (`ram`; 16 GB assumed when unknown): then the copy is affordable and whole-document
+/// edits draw on the GPU. Beyond that the budget holds the pages of [`SHARED_EDIT_CELLS`] page
+/// cells (at least [`SHARED_EDIT_BUDGET`]): edits in the view stay on the GPU, and refreshes of
+/// the whole document go to the background CPU compositor ([`OVER_BUDGET`]), which reads the
+/// document's own pixels instead of a copy. Never more than `budget`.
+pub fn shared_memory_budget(budget: u64, pixels: u64, gpu: DocGpuBytes, ram: Option<u64>) -> u64 {
+    let ram = ram.unwrap_or(16 << 30);
+    if pixels.saturating_add(gpu.display).saturating_add(gpu.layers) <= ram / 6 {
+        return budget;
+    }
+    let edit = photocraft_gpu::budget_for_pages(gpu.cell.saturating_mul(SHARED_EDIT_CELLS)).max(SHARED_EDIT_BUDGET);
+    budget.min(edit)
+}
+
+/// [`GpuCanvas::budget_for`] on an adapter that does or doesn't share system memory (`shared`):
+/// [`memory_budget`], and where `shared` and GPU Memory is Automatic (`fixed` 0),
+/// [`shared_memory_budget`] of it, with `gpu_bytes` pricing the document on the GPU (only then).
+pub fn compositor_budget(
+    shared: bool,
+    allowance: u64,
+    pixels: u64,
+    ram: Option<u64>,
+    vram: Option<u64>,
+    fixed: u64,
+    gpu_bytes: impl FnOnce() -> DocGpuBytes,
+) -> u64 {
+    let budget = memory_budget(allowance, pixels, ram, vram, fixed);
+    if fixed > 0 || !shared {
+        return budget;
+    }
+    shared_memory_budget(budget, pixels, gpu_bytes(), ram)
+}
+
+/// Give `comp` the memory budget `bytes`. Where the GPU shares system memory (`shared`) its
+/// uploads also stage in batches of at most [`SHARED_STAGING_LIMIT`], and a lowered budget frees
+/// at once the pages and effect maps it no longer covers: the refresh it lowers may go to the CPU
+/// compositor, which renders nothing on the GPU that would evict them (switching from a small
+/// document to a large one). A graphics card's own memory keeps its pages until a render needs
+/// the room.
+fn apply_budget(comp: &mut photocraft_gpu::Compositor, bytes: u64, shared: bool) {
+    let before = comp.memory_budget();
+    comp.set_memory_budget(bytes);
+    if shared {
+        comp.set_staging_limit(Some(SHARED_STAGING_LIMIT));
+        if bytes < before {
+            comp.trim();
+        }
+    }
+}
+
 /// Why a document whose display textures don't fit [`canvas_budget`] is drawn on the CPU canvas.
 pub const OVER_CANVAS_BUDGET: &str = "the canvas exceeds the GPU texture budget; drawing it on the CPU canvas";
 
@@ -1592,6 +1741,8 @@ struct Resources {
     compositor_failed: Option<photocraft_gpu::Unsupported>,
     /// The device's health: the paint callback issues no GPU work once it's lost.
     health: photocraft_gpu::DeviceHealth,
+    /// The adapter shares system memory ([`shares_system_memory`]): see [`apply_budget`].
+    shared_memory: bool,
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
     /// view shows; applied before every composite.
     compositor_budget: Option<u64>,
@@ -1923,6 +2074,7 @@ impl Resources {
             compositor: None,
             compositor_failed: None,
             health: photocraft_gpu::DeviceHealth::new(),
+            shared_memory: false,
             compositor_budget: None,
             layer_fit: None,
             compositor_cache_budget: None,
@@ -2770,6 +2922,86 @@ mod tests {
         assert_eq!(memory_budget(8 * G, 10 * G, Some(16 * G), Some(16 * G), 12 * G), 6 * G);
         assert_eq!(memory_budget(8 * G, 0, None, Some(32 * G), 1 << 20), MIN_GPU_BUDGET);
         assert!(physical_memory().is_none_or(|b| b >= 256 << 20));
+    }
+
+    /// #9007: wgpu reports a Metal device with `hasUnifiedMemory` (Apple silicon) as integrated,
+    /// as it does Intel and AMD integrated graphics; with no memory of its own reported, what it
+    /// allocates is system memory.
+    #[test]
+    fn integrated_gpus_share_system_memory() {
+        let info = |t| wgpu::AdapterInfo::new(t, wgpu::Backend::Metal);
+        assert!(shares_system_memory(&info(wgpu::DeviceType::IntegratedGpu), None));
+        // A card's own memory, known (or simulated with PHOTOCRAFT_VRAM_MB), is not the system's.
+        assert!(!shares_system_memory(&info(wgpu::DeviceType::IntegratedGpu), Some(8 << 30)));
+        for t in [wgpu::DeviceType::DiscreteGpu, wgpu::DeviceType::VirtualGpu, wgpu::DeviceType::Cpu, wgpu::DeviceType::Other] {
+            assert!(!shares_system_memory(&info(t), None), "{t:?}");
+        }
+        if std::env::var_os("PHOTOCRAFT_VRAM_MB").is_none() {
+            let mut gi = GpuInfo::default();
+            gi.set_adapter(&wgpu::AdapterInfo { name: "Apple M2 Max".into(), ..info(wgpu::DeviceType::IntegratedGpu) });
+            assert!(gi.shared_memory && gi.video_memory_mb.is_none());
+            gi.set_adapter(&info(wgpu::DeviceType::Cpu));
+            assert!(!gi.shared_memory);
+        }
+    }
+
+    /// #9007's numbers: a 9190 × 11811 PSD (1.3 GB of layer pages, 0.58 GB of display textures)
+    /// on a 16 GB machine would keep a second copy of its layers resident; a sixth of RAM is the
+    /// line, so a small document, or the same one on a machine four times the size, keeps its
+    /// pages. Beyond it the budget holds four page cells' pages, so edits in the view stay on the
+    /// GPU, and never less than the edit floor or more than the Automatic budget.
+    #[test]
+    fn shared_memory_budget_keeps_layers_resident_only_for_small_documents() {
+        const G: u64 = 1 << 30;
+        const M: u64 = 1 << 20;
+        let ram = Some(16 * G);
+        let budget = memory_budget(8 * G, 1300 * M, ram, None, 0);
+        assert_eq!(budget, 4 * G);
+        let gpu = |display, layers, cell| DocGpuBytes { display, layers, cell };
+        // Ten 16 MB pages a cell: four cells' worth, with the caches' quarter on top.
+        let psd = gpu(580 * M, 1300 * M, 160 * M);
+        let four_cells = photocraft_gpu::budget_for_pages(640 * M);
+        assert!((640 * M..=860 * M).contains(&four_cells), "{four_cells}");
+        assert_eq!(shared_memory_budget(budget, 1300 * M, psd, ram), four_cells);
+        assert_eq!(shared_memory_budget(budget, 1300 * M, psd, Some(64 * G)), budget);
+        assert_eq!(shared_memory_budget(budget, 600 * M, gpu(100 * M, 600 * M, 60 * M), ram), budget);
+        // A document of few layers gets the floor; one of many cells' worth never more than
+        // the Automatic budget.
+        assert_eq!(shared_memory_budget(budget, 1300 * M, gpu(580 * M, 1300 * M, 16 * M), ram), SHARED_EDIT_BUDGET);
+        assert_eq!(shared_memory_budget(budget, 3 * G, gpu(0, 3 * G, 2 * G), ram), budget);
+        // At a sixth exactly the copy stays; a byte more and it doesn't.
+        let sixth = 16 * G / 6;
+        assert_eq!(shared_memory_budget(budget, sixth - 2, gpu(1, 1, 0), ram), budget);
+        assert_eq!(shared_memory_budget(budget, sixth - 1, gpu(1, 1, 0), ram), SHARED_EDIT_BUDGET);
+        // Never raises a smaller budget; 16 GB assumed when RAM is unknown; sums saturate.
+        assert_eq!(shared_memory_budget(128 * M, 3 * G, gpu(0, 3 * G, 0), ram), 128 * M);
+        assert_eq!(shared_memory_budget(budget, 2 * G, gpu(0, 2 * G, 0), None), SHARED_EDIT_BUDGET);
+        assert_eq!(shared_memory_budget(budget, u64::MAX, gpu(u64::MAX, u64::MAX, u64::MAX), ram), budget);
+    }
+
+    /// Both kinds of adapter through the app's budget (the detection mocked by `shared`): a card
+    /// with its own memory keeps today's budget and never prices the document's GPU bytes; shared
+    /// memory caps a large document only, and GPU Memory set by hand wins on both.
+    #[test]
+    fn compositor_budget_caps_a_large_document_only_where_the_gpu_shares_memory() {
+        const G: u64 = 1 << 30;
+        let ram = Some(16 * G);
+        let priced = std::cell::Cell::new(0);
+        let large = || {
+            priced.set(priced.get() + 1);
+            DocGpuBytes { display: G / 4, layers: 3 * G, cell: 0 }
+        };
+        for vram in [Some(8 * G), None] {
+            assert_eq!(compositor_budget(false, 8 * G, 3 * G, ram, vram, 0, large), memory_budget(8 * G, 3 * G, ram, vram, 0));
+        }
+        assert_eq!(priced.get(), 0, "nothing is priced off shared memory");
+        assert_eq!(compositor_budget(true, 8 * G, 3 * G, ram, None, 0, large), SHARED_EDIT_BUDGET);
+        assert_eq!(priced.get(), 1);
+        let small = || DocGpuBytes { display: G / 8, layers: G / 4, cell: G / 16 };
+        assert_eq!(compositor_budget(true, 8 * G, G / 4, ram, None, 0, small), memory_budget(8 * G, G / 4, ram, None, 0));
+        assert_eq!(compositor_budget(true, 8 * G, 3 * G, ram, None, 6 * G, large), 6 * G);
+        assert_eq!(compositor_budget(false, 8 * G, 3 * G, ram, None, 6 * G, large), 6 * G);
+        assert_eq!(priced.get(), 1, "a set GPU Memory prices nothing");
     }
 
     /// An 8 GB card in a 64 GB machine: both budgets used to plan for 16 GB, twice the card (#4536).
