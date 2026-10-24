@@ -6,6 +6,7 @@ use craft_ui::layout::{SplitAxis, SplitSize};
 use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
+use crate::context_menu::MenuUi;
 
 const PANELS: &[(&str, &str, Group)] = &[
     ("color", "Color", Group::Color),
@@ -398,6 +399,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     let reveal = app.ui.docking_reveal.take();
     let t = crate::theme::Tokens::get(ui.ctx());
     let locked = app.session.prefs().workspace_locked;
+    native_tab_menu(app, ui.ctx(), &layout, locked);
     let collapsed = collapsed_members(app, &layout);
     let requested_width = ui.ctx().data_mut(|data| data.remove_temp::<f32>(crate::panels::dock_width_id()));
     let mut commands = Vec::new();
@@ -846,33 +848,128 @@ struct PanelContent<'a> {
 }
 
 fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, panel: &str) {
-    match panel {
-        "layers" => {
-            crate::layer_row_ui::panel_menu(app, ui);
-            ui.separator();
-        }
-        "swatches" => {
-            crate::swatches_ui::panel_menu(app, ui);
-            ui.separator();
-        }
-        "color" => {
-            crate::color_panel_ui::panel_menu(app, ui);
-            ui.separator();
-        }
-        "history" => {
-            crate::history_menu_ui::panel_menu(app, ui);
-            ui.separator();
-        }
-        "brushSettings" | "brush_settings" => {
-            crate::brush_panel::panel_menu(app, ui);
-            ui.separator();
-        }
-        "actions" | "Actions" => {
-            crate::actions::panel_menu(app, ui);
-            ui.separator();
-        }
-        _ => {}
+    let ctx = ui.ctx().clone();
+    panel_menu_rows(app, &ctx, &mut MenuUi::egui(ui), panel);
+}
+
+// ----------------------------------------------------------------------------- native tab menu
+
+/// A docked panel's title (its tab): craft-ui's widget, which opens an egui menu on a right-click.
+pub(crate) fn tab_id(panel: &String) -> egui::Id {
+    egui::Id::new("photocraft-panel-docking").with(("tab", panel))
+}
+
+/// The native menu of a panel's title (macOS `NSMenu`s, `context_menu`): the panel whose title was
+/// right-clicked, where, and the frame it was.
+fn tab_menu_id() -> egui::Id {
+    egui::Id::new("photocraft-panel-docking").with("native-tab-menu")
+}
+
+/// With native menus, a right press on a panel's title opens a native menu instead of craft-ui's
+/// egui one, which has no way to be replaced: the press (and the release completing it,
+/// `context_menu::RightPress`) leaves the input before craft-ui sees it, and [`native_tab_menu`]
+/// shows the same rows. The titles are last frame's widgets.
+pub(crate) fn take_tab_right_click(app: &PhotocraftApp, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+    let Some(layout) = app.ui.docking.as_ref().filter(|_| crate::context_menu::native(ctx)) else { return };
+    let tab_at = |pos: egui::Pos2| {
+        layout.panels().into_iter().find(|panel| {
+            ctx.read_response(tab_id(panel)).is_some_and(|r| r.rect.contains(pos) && ctx.layer_id_at(pos) == Some(r.layer_id))
+        })
+    };
+    let mut taken = None;
+    events.retain(|e| match e {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: true, .. } => match tab_at(*pos) {
+            Some(panel) => {
+                taken = Some((panel.clone(), *pos));
+                false
+            }
+            None => true,
+        },
+        egui::Event::PointerButton { button: egui::PointerButton::Secondary, pressed: false, .. } => taken.is_none(),
+        _ => true,
+    });
+    if let Some((panel, pos)) = taken {
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| d.insert_temp(tab_menu_id(), (panel, pos, frame)));
     }
+}
+
+/// The right-clicked title's menu, as craft-ui's: the panel's own rows, Float Panel, Group with ›
+/// the other panels, Close Panel (the last three only while the workspace isn't locked). A choice
+/// is applied as craft-ui's would be.
+fn native_tab_menu(app: &mut PhotocraftApp, ctx: &egui::Context, layout: &Layout<String>, locked: bool) {
+    let Some((panel, pos, frame)) = ctx.data(|d| d.get_temp::<(String, egui::Pos2, u64)>(tab_menu_id())) else { return };
+    let owner = tab_id(&panel);
+    // Asked for on the right press's frame; afterwards only while it is still showing.
+    if frame != ctx.cumulative_frame_nr() && !crate::context_menu::pending(ctx, owner) {
+        ctx.data_mut(|d| d.remove::<(String, egui::Pos2, u64)>(tab_menu_id()));
+        return;
+    }
+    let others: Vec<String> = layout.panels().into_iter().filter(|p| **p != panel).cloned().collect();
+    let name = |id: &String| PANELS.iter().find(|p| p.0 == id).map(|p| tl!(p.1).to_string()).unwrap_or_else(|| id.clone());
+    let mut action = None;
+    let shown = crate::context_menu::show_native(ctx, owner, pos, |m| {
+        panel_menu_rows(app, ctx, m, &panel);
+        if locked {
+            return;
+        }
+        if m.item(tl!("Float Panel")) {
+            action = Some(Action::Float { panel: panel.clone(), rect: float_rect(ctx, &panel) });
+        }
+        m.submenu(tl!("Group with"), |m| {
+            for target in &others {
+                if m.item(&name(target)) {
+                    action = Some(Action::Move { panel: panel.clone(), anchor: target.clone(), placement: Placement::Tab { before: None } });
+                }
+            }
+        });
+        if m.item(tl!("Close Panel")) {
+            action = Some(Action::Close { panel: panel.clone() });
+        }
+    });
+    if shown != Some(true) {
+        ctx.data_mut(|d| d.remove::<(String, egui::Pos2, u64)>(tab_menu_id()));
+    }
+    if let Some(action) = action
+        && let Err(error) = app.run("window.panel.layout", json!({"action": action}))
+    {
+        app.ui.status = error;
+    }
+}
+
+/// Where Float Panel puts `panel`'s group, as craft-ui's own menu does: 24 points down and right of
+/// where it is, kept on screen.
+fn float_rect(ctx: &egui::Context, panel: &String) -> [f32; 4] {
+    let tab = ctx.read_response(tab_id(panel)).map(|r| r.rect);
+    let body = ctx.data(|d| d.get_temp::<egui::Rect>(tab_menu_id().with(("body", panel))));
+    let group = match (tab, body) {
+        (Some(tab), Some(body)) => egui::Rect::from_min_max(egui::pos2(body.left(), tab.top()), body.max),
+        (Some(tab), None) => tab,
+        (None, body) => body.unwrap_or(egui::Rect::from_min_size(egui::pos2(400.0, 140.0), egui::vec2(300.0, 400.0))),
+    };
+    let rect = group.translate(egui::vec2(24.0, 24.0));
+    let screen = ctx.content_rect();
+    let rect = if screen.is_finite() && screen.is_positive() {
+        let size = rect.size().max(egui::vec2(1.0, 1.0)).min(screen.size());
+        egui::Rect::from_min_size(rect.min.max(screen.min).min(screen.max - size), size)
+    } else {
+        rect
+    };
+    [rect.left(), rect.top(), rect.width(), rect.height()]
+}
+
+/// `panel`'s own menu rows (the Layers panel's, the Color panel's, …), then a separator.
+fn panel_menu_rows(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut MenuUi, panel: &str) {
+    match panel {
+        "layers" => crate::layer_row_ui::panel_menu(app, ctx, m),
+        "swatches" => crate::swatches_ui::panel_menu(app, m),
+        "color" => crate::color_panel_ui::panel_menu(app, ctx, m),
+        "history" => crate::history_menu_ui::panel_menu(app, ctx, m),
+        "brushSettings" | "brush_settings" => crate::brush_panel::panel_menu(app, m),
+        "actions" | "Actions" => crate::actions::panel_menu(app, m),
+        _ => return,
+    }
+    m.separator();
 }
 
 impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
@@ -891,6 +988,8 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
                 })
                 .collect();
         }
+        // Where the group is, for the native tab menu's Float Panel.
+        ui.ctx().data_mut(|d| d.insert_temp(tab_menu_id().with(("body", id)), ui.max_rect()));
         if !self.collapsed.contains(id) {
             egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| body(self.app, ui, id));
         }

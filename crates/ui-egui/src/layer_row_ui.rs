@@ -256,74 +256,69 @@ pub fn label(painter: &Painter, x: f32, cy: f32, right: f32, text: &str, font: F
 }
 
 /// Photoshop-style Layers flyout commands. The dock owns tab-group controls, not this menu.
-pub fn panel_menu(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui) {
+pub fn panel_menu(app: &mut crate::PhotocraftApp, ctx: &egui::Context, m: &mut crate::context_menu::MenuUi) {
+    use crate::context_menu::Row;
     use crate::layers_panel_ui::run_menu_command;
     use crate::state::LayersPanelDialog;
 
     let has_doc = app.session.active().is_some();
-    if ui.add_enabled(has_doc, egui::Button::new(tl!("New Layer…"))).clicked() {
+    if m.item_enabled(has_doc, tl!("New Layer…")) {
         app.ui.layers_panel_dialog = Some(LayersPanelDialog::NewLayer(String::new()));
-        ui.close();
     }
-    if ui.add_enabled(has_doc, egui::Button::new(tl!("New Group…"))).clicked() {
+    if m.item_enabled(has_doc, tl!("New Group…")) {
         app.ui.layers_panel_dialog = Some(LayersPanelDialog::NewGroup(String::new()));
-        ui.close();
     }
-    ui.separator();
-    run_menu_command(app, ui, tl!("Flatten Image"), "layer.flattenImage");
-    ui.separator();
-    if ui.add_enabled(app.session.is_enabled("layer.lockLayers"), egui::Button::new(tl!("Lock Layers…"))).clicked() {
+    m.separator();
+    run_menu_command(app, ctx, m, tl!("Flatten Image"), "layer.flattenImage");
+    m.separator();
+    if m.item_enabled(app.session.is_enabled("layer.lockLayers"), tl!("Lock Layers…")) {
         app.ui.layers_panel_dialog = Some(LayersPanelDialog::LockLayers { transparency: false, pixels: false, position: false, artboard: false, all: true });
-        ui.close();
     }
-    run_menu_command(app, ui, tl!("Rename Layer…"), "layer.renameLayer");
+    run_menu_command(app, ctx, m, tl!("Rename Layer…"), "layer.renameLayer");
     let any_hidden = app.session.active().is_some_and(|st| st.selected_layers().iter().any(|id| st.doc.layer(*id).is_some_and(|l| !l.visible)));
     if any_hidden {
-        run_menu_command(app, ui, tl!("Show Layers"), "layer.showLayers");
+        run_menu_command(app, ctx, m, tl!("Show Layers"), "layer.showLayers");
     } else {
-        run_menu_command(app, ui, tl!("Hide Layers"), "layer.hideLayers");
+        run_menu_command(app, ctx, m, tl!("Hide Layers"), "layer.hideLayers");
     }
-    ui.separator();
-    run_menu_command(app, ui, tl!("New Artboard…"), "layer.new.artboard");
-    ui.separator();
-    ui.menu_button(tl!("Filter Options"), |ui| {
+    m.separator();
+    run_menu_command(app, ctx, m, tl!("New Artboard…"), "layer.new.artboard");
+    m.separator();
+    m.submenu(tl!("Filter Options"), |m| {
         let mut show = app.ui.layers_panel_options.show_filters;
-        if ui.checkbox(&mut show, tl!("Show")).changed() {
+        if m.toggle(&mut show, Row::new(tl!("Show")), |ui, v| ui.checkbox(v, tl!("Show"))) {
             app.ui.layers_panel_options.show_filters = show;
             crate::layers_panel_ui::persist_options(app);
-            ui.close();
+            m.close();
         }
     });
     // Animation Options control Photoshop's frame-unification buttons. PhotoCraft's Layers
     // panel does not expose those buttons; do not offer nonfunctional toggles.
-    ui.add_enabled_ui(false, |ui| {
-        ui.menu_button(tl!("Animation Options"), |_ui| {});
-    });
-    if ui.button(tl!("Panel Options…")).clicked() {
+    m.submenu_enabled(false, tl!("Animation Options"), |_| {});
+    if m.item(tl!("Panel Options…")) {
         let mut options = app.ui.layers_panel_options.clone();
         options.thumbnail_contents = crate::layers_panel_ui::thumbnail_contents(app);
         app.ui.layers_panel_dialog = Some(LayersPanelDialog::PanelOptions(options));
-        ui.close();
     }
-    ui.separator();
+    m.separator();
     // Preserve PhotoCraft's existing group disclosure action when expanding the flyout.
     let can_collapse = app.session.is_enabled("layer.setExpanded");
-    if ui.add_enabled(can_collapse, egui::Button::new(tl!("Collapse All Groups"))).clicked() {
-        if let Err(e) = app.run("layer.setExpanded", json!({"all": true, "expanded": false})) {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
-        ui.close();
+    if m.item_enabled(can_collapse, tl!("Collapse All Groups"))
+        && let Err(e) = app.run("layer.setExpanded", json!({"all": true, "expanded": false}))
+    {
+        app.ui.status = e;
+        app.ui.status_error = true;
     }
-    ui.separator();
+    m.separator();
     // Photoshop's Clip Thumbnails to Layer Bounds: frame each layer's pixels, not the canvas (#4281).
     let mut clip = app.session.prefs().interface.clip_thumbnails_to_layer_bounds;
-    if crate::widgets::checkbox(ui, &mut clip, tl!("Clip Thumbnails to Layer Bounds")).changed() {
+    let label = tl!("Clip Thumbnails to Layer Bounds");
+    if m.toggle(&mut clip, Row::new(label), |ui, v| crate::widgets::checkbox(ui, v, label)) {
         if let Err(e) = app.run("prefs.set", json!({"path": "interface.clipThumbnailsToLayerBounds", "value": clip})) {
             app.ui.status = e;
             app.ui.status_error = true;
         }
-        ui.close();
+        m.close();
     }
 }
 

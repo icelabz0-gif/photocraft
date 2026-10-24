@@ -47,21 +47,20 @@ fn enabled(app: &PhotocraftApp, cmd: &str) -> bool {
 }
 
 /// Draw the History items of the panel menu and run the one clicked.
-pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let snapshot = app.session.active().and_then(|st| crate::panels::selected_snapshot(ui.ctx(), st));
+pub fn panel_menu(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut crate::context_menu::MenuUi) {
+    let snapshot = app.session.active().and_then(|st| crate::panels::selected_snapshot(ctx, st));
     let mut clicked: Option<&str> = None;
     for &(label, cmd) in ITEMS {
         if label == "---" {
-            ui.separator();
+            m.separator();
             continue;
         }
         let on = cmd.is_some_and(|c| enabled(app, resolve(c, snapshot).0));
-        if ui.add_enabled(on, egui::Button::new(crate::i18n::t(label))).clicked() {
+        if m.item_enabled(on, crate::i18n::t(label)) {
             clicked = cmd;
         }
     }
     let Some(cmd) = clicked else { return };
-    ui.close();
     let (cmd, params) = resolve(cmd, snapshot);
     if let Err(e) = app.run(cmd, params) {
         app.ui.status = e;
@@ -85,7 +84,7 @@ mod tests {
     }
 
     fn harness(app: PhotocraftApp) -> Harness<'static, PhotocraftApp> {
-        let mut h = Harness::builder().with_size(egui::vec2(260.0, 420.0)).build_ui_state(|ui, app: &mut PhotocraftApp| panel_menu(app, ui), app);
+        let mut h = Harness::builder().with_size(egui::vec2(260.0, 420.0)).build_ui_state(|ui, app: &mut PhotocraftApp| panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui)), app);
         h.run_steps(2);
         h
     }

@@ -28,14 +28,12 @@ pub fn restore_options(app: &mut PhotocraftApp) {
 }
 
 /// The real menu command dispatcher handles rename's in-place editor and other shell routing.
-pub fn run_menu_command(app: &mut PhotocraftApp, ui: &mut Ui, label: &str, id: &str) {
-    if ui.add_enabled(app.session.is_enabled(id), egui::Button::new(label)).clicked() {
-        let ctx = ui.ctx().clone();
-        if let Err(e) = crate::menus::invoke(app, &ctx, id, json!({})) {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
-        ui.close();
+pub fn run_menu_command(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut crate::context_menu::MenuUi, label: &str, id: &str) {
+    if m.item_enabled(app.session.is_enabled(id), label)
+        && let Err(e) = crate::menus::invoke(app, ctx, id, json!({}))
+    {
+        app.ui.status = e;
+        app.ui.status_error = true;
     }
 }
 

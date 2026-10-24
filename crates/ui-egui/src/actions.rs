@@ -620,41 +620,40 @@ pub fn stopped(app: &mut PhotocraftApp, fields: &serde_json::Map<String, Value>)
 }
 
 /// The Actions entries of the panel group's menu ("…").
-pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+pub fn panel_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
     let mut act: Option<&str> = None;
     let recording = app.session.actions.recording.is_some();
     let any = !app.session.actions.list.is_empty();
     let selected = app.ui.actions.selected.is_some_and(|i| i < app.session.actions.list.len());
     let can_delete = selected && (!recording || app.ui.actions.selected_step.is_some());
-    if ui.add_enabled(!recording, egui::Button::new(tl!("New Action…"))).clicked() {
+    if m.item_enabled(!recording, tl!("New Action…")) {
         act = Some("new");
     }
-    if ui.add_enabled(any, egui::Button::new(tl!("Play"))).clicked() {
+    if m.item_enabled(any, tl!("Play")) {
         act = Some("play");
     }
     if recording {
-        if ui.button(tl!("Stop Recording")).clicked() {
+        if m.item(tl!("Stop Recording")) {
             act = Some("stopRec");
         }
-    } else if ui.button(tl!("Start Recording")).clicked() {
+    } else if m.item(tl!("Start Recording")) {
         act = Some("record");
     }
-    if ui.add_enabled(can_delete, egui::Button::new(tl!("Delete"))).clicked() {
+    if m.item_enabled(can_delete, tl!("Delete")) {
         act = Some("delete");
     }
-    ui.separator();
-    if ui.add_enabled(selected, egui::Button::new(tl!("Insert Stop…"))).clicked() {
+    m.separator();
+    if m.item_enabled(selected, tl!("Insert Stop…")) {
         act = Some("stop");
     }
-    ui.separator();
-    if ui.button(tl!("Load Actions…")).clicked() {
+    m.separator();
+    if m.item(tl!("Load Actions…")) {
         act = Some("load");
     }
-    if ui.add_enabled(any, egui::Button::new(tl!("Save Actions…"))).clicked() {
+    if m.item_enabled(any, tl!("Save Actions…")) {
         act = Some("save");
     }
     let Some(a) = act else { return };
-    ui.close();
     let r = match a {
         "new" => {
             begin_recording(app, false);
@@ -1196,7 +1195,7 @@ mod tests {
         use egui_kittest::{Harness, kittest::Queryable};
         let mut empty_app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         empty_app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
-        let mut empty = Harness::builder().with_size(vec2(240.0, 280.0)).build_ui_state(|ui, app| panel_menu(app, ui), empty_app);
+        let mut empty = Harness::builder().with_size(vec2(240.0, 280.0)).build_ui_state(|ui, app| panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui)), empty_app);
         empty.run_steps(2);
         assert!(empty.query_all_by_label("Load Actions…").count() > 0);
         assert!(empty.query_all_by_label("New Action…").count() > 0);
@@ -1209,7 +1208,7 @@ mod tests {
         app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
         app.session.actions.list.push(Action::new("Make Layer", vec![("layer.new.layer".into(), json!({}))]));
         app.ui.actions.selected = Some(0);
-        let mut h = Harness::builder().with_size(vec2(240.0, 320.0)).build_ui_state(|ui, app| panel_menu(app, ui), app);
+        let mut h = Harness::builder().with_size(vec2(240.0, 320.0)).build_ui_state(|ui, app| panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui)), app);
         h.run_steps(2);
         for label in ["Load Actions…", "Save Actions…", "Insert Stop…", "Play", "Delete", "Start Recording"] {
             assert!(h.query_all_by_label(label).count() > 0, "{label}");

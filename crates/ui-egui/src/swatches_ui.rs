@@ -204,34 +204,33 @@ fn export_dialog(app: &mut PhotocraftApp, format: &str) -> Result<Value, String>
 }
 
 /// The Swatches entries of the panel group's menu ("…").
-pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+pub fn panel_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
     let empty = app.session.presets.swatches.iter().all(|g| g.items.is_empty());
     let mut act: Option<&str> = None;
-    if ui.button(tl!("New Swatch…")).clicked() {
+    if m.item(tl!("New Swatch…")) {
         act = Some("new");
     }
-    if ui.button(tl!("New Swatch Group…")).clicked() {
+    if m.item(tl!("New Swatch Group…")) {
         act = Some("group");
     }
-    ui.separator();
-    if ui.button(tl!("Import Swatches…")).clicked() {
+    m.separator();
+    if m.item(tl!("Import Swatches…")) {
         act = Some("import");
     }
-    if ui.button(tl!("Replace Swatches…")).clicked() {
+    if m.item(tl!("Replace Swatches…")) {
         act = Some("replace");
     }
-    if ui.add_enabled(!empty, egui::Button::new(tl!("Export Swatches…"))).clicked() {
+    if m.item_enabled(!empty, tl!("Export Swatches…")) {
         act = Some("aco");
     }
-    if ui.add_enabled(!empty, egui::Button::new(tl!("Export Swatches for Exchange…"))).clicked() {
+    if m.item_enabled(!empty, tl!("Export Swatches for Exchange…")) {
         act = Some("ase");
     }
-    ui.separator();
-    if ui.button(tl!("Reset Swatches")).clicked() {
+    m.separator();
+    if m.item(tl!("Reset Swatches")) {
         act = Some("reset");
     }
     let Some(a) = act else { return };
-    ui.close();
     let r = match a {
         "new" => {
             new_swatch(app);

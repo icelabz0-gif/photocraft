@@ -2393,6 +2393,8 @@ impl eframe::App for PhotocraftApp {
         let right_erases = paint_mouse::right_erases(self, self.ui.tool);
         let latched = workspace_ui::sticky_mods(self, egui::Modifiers::NONE);
         self.right_press.complete(ctx, &mut raw_input.events, |m| right_erases || brush_resize::is_right_gesture(m | latched));
+        // A panel title's right-click is the native menu's, not craft-ui's egui one.
+        panel_docking::take_tab_right_click(self, ctx, &mut raw_input.events);
         // A pen held still is no touch screen's press-and-hold right click (stylus.rs).
         let pen_down = self.stylus.pen_contacts.observe(&raw_input.events);
         stylus::pen_hold_is_no_right_click(ctx, pen_down);

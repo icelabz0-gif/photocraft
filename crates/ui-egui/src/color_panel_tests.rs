@@ -315,7 +315,7 @@ fn panel_menu_picks_the_mode_and_ramp() {
     let mut h = Harness::builder().with_size(vec2(260.0, 700.0)).build_ui_state(
         |ui, app: &mut PhotocraftApp| {
             if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
-                crate::color_panel_ui::panel_menu(app, ui);
+                crate::color_panel_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
             }
         },
         app,

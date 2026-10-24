@@ -1499,4 +1499,64 @@ mod tests {
         assert_eq!(popped(&popups), 2);
         assert!(h.query_by_label("Blending Options…").is_none(), "nor on the release");
     }
+
+    /// A docked panel's title (craft-ui's tab) opens a native menu on the right press, with the
+    /// rows of craft-ui's egui menu: the panel's own menu, Float Panel, Group with, Close Panel.
+    /// Choosing Close Panel closes it, as craft-ui's would.
+    #[test]
+    fn panel_title_menu_is_native() {
+        use egui::{Event as E, Modifiers, PointerButton};
+        use egui_kittest::{Harness, kittest::Queryable};
+        let popups = Popups::default();
+        let mut app = app(true);
+        // The shared docking surface (craft-ui), as after any panel is floated.
+        app.run("window.panel.float", json!({"panel": "swatches", "x": 20, "y": 40})).unwrap();
+        app.services.native_menu = Some(NativeMenu::new(Box::new(popups.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        let ctx = h.ctx.clone();
+        let layers = "layers".to_string();
+        let at = ctx.read_response(crate::panel_docking::tab_id(&layers)).expect("the Layers title").rect.center();
+        // What the app's input hook does with the OS's events.
+        let button = |h: &mut Harness<'_, PhotocraftApp>, pressed: bool| {
+            let mut events = vec![E::PointerMoved(at), E::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE }];
+            h.state_mut().right_press.complete(&ctx, &mut events, |_| false);
+            crate::panel_docking::take_tab_right_click(h.state(), &ctx, &mut events);
+            for e in events {
+                h.event(e);
+            }
+            h.step();
+        };
+        h.hover_at(at);
+        h.step();
+        button(&mut h, true);
+        h.step();
+        let (serial, nodes, _) = popups.0.borrow().0.last().cloned().expect("a native menu on the press");
+        assert!(h.query_by_label("Close Panel").is_none(), "no egui menu");
+        let labels: Vec<String> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Item(it) => Some(it.label.clone()),
+                Node::Submenu { label, .. } => Some(format!("[{label}]")),
+                _ => None,
+            })
+            .collect();
+        for want in ["New Layer…", "Flatten Image", "Float Panel", "[Group with]", "Close Panel"] {
+            assert!(labels.iter().any(|l| l == want), "{want} in {labels:?}");
+        }
+        let close = nodes.iter().find_map(|n| if let Node::Item(it) = n { (it.label == "Close Panel").then(|| it.id.clone()) } else { None }).unwrap();
+        popups.0.borrow_mut().1.extend([Event::ContextChosen { serial, id: close }, Event::ContextClosed(serial)]);
+        let mut raw = egui::RawInput::default();
+        h.state_mut().services.native_menu.as_mut().unwrap().raw_input(&mut raw);
+        h.run_steps(2);
+        assert!(!h.state().ui.docking.as_ref().unwrap().contains(&layers), "Close Panel closed Layers");
+        // The release that follows opens nothing.
+        button(&mut h, false);
+        h.run_steps(2);
+        assert_eq!(popups.0.borrow().0.len(), 1);
+        assert!(h.query_by_label("Float Panel").is_none());
+    }
 }

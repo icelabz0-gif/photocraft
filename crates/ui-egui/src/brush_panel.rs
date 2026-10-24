@@ -465,35 +465,31 @@ pub fn copy_texture_to_other_tools(app: &mut PhotocraftApp) {
 }
 
 /// The Brush Settings panel menu actions (hamburger menu).
-pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    if ui.button(tl!("New Brush Preset…")).clicked() {
+pub fn panel_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
+    if m.item(tl!("New Brush Preset…")) {
         let name = new_preset_name(&app.session.tools.presets);
         run_or_status(app, "brush.presets.save", json!({ "name": name }));
         if app.session.tools.presets.iter().any(|p| p.name == name) {
             app.ui.brushes_panel.renaming = Some(Renaming { group: false, name: name.clone(), folder: Vec::new(), text: String::new() });
             app.ui.brush_picker_list.renaming = Some(Renaming { group: false, name, folder: Vec::new(), text: String::new() });
         }
-        ui.close();
     }
-    ui.separator();
-    if ui.button(tl!("Clear Brush Controls")).clicked() {
+    m.separator();
+    if m.item(tl!("Clear Brush Controls")) {
         let before = app.session.tools.brush.clone();
         let cleared = clear_brush_controls(&before);
         commit(app, &before, &cleared);
-        ui.close();
     }
     let has_locks = app.session.tools.brush.locks != photocraft_paint::brush::SectionLocks::default();
-    if ui.add_enabled(has_locks, egui::Button::new(tl!("Reset All Locked Settings"))).clicked() {
+    if m.item_enabled(has_locks, tl!("Reset All Locked Settings")) {
         let before = app.session.tools.brush.clone();
         let mut after = before.clone();
         after.locks = photocraft_paint::brush::SectionLocks::default();
         commit(app, &before, &after);
-        ui.close();
     }
     let has_texture = app.session.tools.brush.texture.enabled;
-    if ui.add_enabled(has_texture, egui::Button::new(tl!("Copy Texture to Other Tools"))).clicked() {
+    if m.item_enabled(has_texture, tl!("Copy Texture to Other Tools")) {
         copy_texture_to_other_tools(app);
-        ui.close();
     }
 }
 
@@ -534,7 +530,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     egui::Popup::menu(&menu_btn).show(|ui| {
                         widgets::style_spectrum_popup_menu(ui);
                         ui.set_min_width(180.0);
-                        panel_menu(app, ui);
+                        panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
                         ui.separator();
                         if ui.button(tl!("Close")).clicked() {
                             open = false;

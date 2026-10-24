@@ -724,10 +724,6 @@ pub(crate) fn hex_code(rgb: [f32; 3]) -> String {
 }
 
 /// A panel menu row with Photoshop's check mark column.
-fn check_item(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
-    check_row(&mut crate::context_menu::MenuUi::egui(ui), on, label)
-}
-
 /// A check row: a ✔ before the label in egui, a native check mark otherwise. Closes the menu
 /// when chosen.
 fn check_row(m: &mut crate::context_menu::MenuUi, on: bool, label: &str) -> bool {
@@ -752,24 +748,22 @@ fn ramp_menu(app: &mut PhotocraftApp, m: &mut crate::context_menu::MenuUi) {
 }
 
 /// The Color panel's panel menu, Photoshop's: the modes, the copy commands, the ramps.
-pub(crate) fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+pub(crate) fn panel_menu(app: &mut PhotocraftApp, ctx: &egui::Context, m: &mut crate::context_menu::MenuUi) {
     // One section, as Photoshop's: no separator between Color Wheel and Grayscale Slider.
     for mode in ColorPanelMode::ALL {
-        if check_item(ui, app.ui.color_panel.mode == mode, mode.label()) {
+        if check_row(m, app.ui.color_panel.mode == mode, mode.label()) {
             app.ui.color_panel.mode = mode;
-            ui.close();
+            m.close();
         }
     }
-    ui.separator();
+    m.separator();
     let rgb = active(app);
-    if ui.button(tl!("Copy Color as HTML")).clicked() {
-        ui.ctx().copy_text(html_color(rgb));
-        ui.close();
+    if m.item(tl!("Copy Color as HTML")) {
+        ctx.copy_text(html_color(rgb));
     }
-    if ui.button(tl!("Copy Color's Hex Code")).clicked() {
-        ui.ctx().copy_text(hex_code(rgb));
-        ui.close();
+    if m.item(tl!("Copy Color's Hex Code")) {
+        ctx.copy_text(hex_code(rgb));
     }
-    ui.separator();
-    ramp_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
+    m.separator();
+    ramp_menu(app, m);
 }

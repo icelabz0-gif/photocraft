@@ -623,27 +623,27 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
             crate::widgets::style_spectrum_popup_menu(ui);
             ui.set_min_width(170.0);
             if tabs.get(sel) == Some(&"Layers") {
-                crate::layer_row_ui::panel_menu(app, ui);
+                crate::layer_row_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if tabs.get(sel) == Some(&"Color") {
-                crate::color_panel_ui::panel_menu(app, ui);
+                crate::color_panel_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if tabs.get(sel) == Some(&"Swatches") {
-                crate::swatches_ui::panel_menu(app, ui);
+                crate::swatches_ui::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if tabs.get(sel) == Some(&"History") {
-                crate::history_menu_ui::panel_menu(app, ui);
+                crate::history_menu_ui::panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if tabs.get(sel) == Some(&"Brush Settings") {
-                crate::brush_panel::panel_menu(app, ui);
+                crate::brush_panel::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if tabs.get(sel) == Some(&"Actions") {
-                crate::actions::panel_menu(app, ui);
+                crate::actions::panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui));
                 ui.separator();
             }
             if let Some(label) = tabs.get(sel) {

@@ -216,6 +216,18 @@ impl<'a> MenuUi<'a> {
         }
     }
 
+    /// [`MenuUi::submenu`], greyed (and empty) when not `enabled`.
+    pub fn submenu_enabled(&mut self, enabled: bool, label: &str, add: impl FnOnce(&mut MenuUi)) {
+        match &mut self.mode {
+            Mode::Egui(ui) => {
+                ui.add_enabled_ui(enabled, |ui| ui.menu_button(label, |ui| add(&mut MenuUi::egui(ui))));
+            }
+            Mode::Native(r) if enabled => r.submenu(label, add),
+            // A native submenu with no rows is greyed.
+            Mode::Native(r) => r.push(Node::Submenu { label: label.to_string(), children: Vec::new(), role: None }),
+        }
+    }
+
     /// `add`'s rows, scrolling in an egui popup that would run off the window
     /// (`widgets::menu_scroll`); a native menu scrolls by itself.
     pub fn scroll<R>(&mut self, add: impl FnOnce(&mut MenuUi) -> R) -> R {
@@ -322,6 +334,17 @@ pub(crate) fn expire(ctx: &Context) {
             h.closed = None;
         }
     });
+}
+
+/// Has `owner`'s native menu been asked for and not yet finished with: showing, or closed or
+/// chosen from with [`show_native`] still to see it?
+pub(crate) fn pending(ctx: &Context, owner: Id) -> bool {
+    with(ctx, |h| {
+        h.open == Some(owner)
+            || h.request.as_ref().is_some_and(|r| r.owner == owner)
+            || h.closed.is_some_and(|c| c.0 == owner)
+            || h.pick.as_ref().is_some_and(|p| p.0 == owner)
+    })
 }
 
 fn take_pick(ctx: &Context, owner: Id) -> Option<Pick> {
