@@ -379,6 +379,28 @@ fn run_errors() {
     assert!(e.contains("layer.new.layer") && e.contains("must be a JSON object"), "{e}");
 }
 
+/// Parameters written inside `--cmd` point to `--params` instead of reporting an unknown command,
+/// and nothing runs or is exported.
+#[test]
+fn run_points_inline_params_to_the_params_flag() {
+    let d = tmp("inline-params");
+    let out = d.join("result.png");
+    for cmd in [r#"layer.new.layer {"name":"x"}"#, r#"layer.new.layer{"name":"x"}"#, "  layer.new.layer   {}  "] {
+        let o = bin().args(["run", "--new", "{}", "--cmd", cmd, "--out"]).arg(&out).output().unwrap();
+        assert_eq!(o.status.code(), Some(1), "{cmd}");
+        assert!(o.stdout.is_empty(), "{cmd}");
+        let e = String::from_utf8_lossy(&o.stderr);
+        assert!(!e.contains("unknown command"), "{e}");
+        assert!(e.contains("--params") && e.contains("--cmd layer.new.layer --params '{"), "{e}");
+        assert!(!out.exists());
+    }
+    // A plain id with surrounding text that is not JSON stays an unknown command.
+    let o = bin().args(["run", "--new", "{}", "--cmd", "layer.new.layer extra"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown command"));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 #[test]
 fn run_rejects_invalid_filter_parameters_without_exporting() {
     let d = tmp("invalid-filter-params");
