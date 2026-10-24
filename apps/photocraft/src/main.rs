@@ -718,6 +718,10 @@ fn main() -> eframe::Result {
     let app_created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_callback = app_created.clone();
     let started_sentinel = sentinel.clone();
+    if retry_cpu {
+        // A panic while the window opens aborts inside winit (#5999): relaunch from the hook.
+        crash_guard::arm_startup_relaunch(std::env::args_os().skip(1).collect());
+    }
     let result = eframe::run_native(
         "PhotoCraft",
         options,
@@ -830,6 +834,7 @@ fn main() -> eframe::Result {
             // recovery-dialog choice may persist it (#3483).
             let remember = gpu_startup::backend_to_remember(&plan);
             app.on_started(move |app| {
+                crash_guard::disarm_startup_relaunch();
                 if let Some(s) = started_sentinel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
                     s.finish();
                 }
@@ -930,6 +935,7 @@ fn main() -> eframe::Result {
             s.finish();
         }
     }
+    crash_guard::disarm_startup_relaunch();
     // Retry in a fresh process: winit event loops cannot be recreated reliably in-process.
     // Only renderer initialization failures qualify; never restart after editing has begun.
     if retry_cpu && !app_created.load(std::sync::atomic::Ordering::Relaxed) && matches!(&result, Err(eframe::Error::Wgpu(_))) {
@@ -939,8 +945,7 @@ fn main() -> eframe::Result {
         }
         if let Ok(exe) = std::env::current_exe() {
             let launched = std::process::Command::new(exe)
-                .args(std::env::args_os().skip(1))
-                .arg("--safe-gpu")
+                .args(crash_guard::with_safe_gpu(&std::env::args_os().skip(1).collect::<Vec<_>>()))
                 .env_remove("WGPU_BACKEND")
                 .env("PHOTOCRAFT_GPU_STARTUP_FAILURE", &reason)
                 .spawn();
