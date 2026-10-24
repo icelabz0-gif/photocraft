@@ -252,9 +252,9 @@ fn three_dl_scale(max: f64, header: bool) -> f64 {
 /// input channel ahead of the 3-D table (input `x` reads the shaper, sampled evenly over 0..1,
 /// at `x`, interpolated linearly), so each node of the table becomes the table's own trilinear
 /// value at the shaped input. An even ramp (the usual shaper) changes nothing and is skipped.
-/// The table is baked on a grid holding both its own nodes and the shaper's knots (up to
-/// [`MAX_SIZE`] nodes; past that, the finer of the two): exact for an identity table, an
-/// approximation at that resolution otherwise. A shaper with a value that isn't finite is refused.
+/// The table is baked on a grid holding both its own nodes and the shaper's knots: exact for an
+/// identity table, an approximation at that resolution otherwise. A shaper that would need more
+/// than [`MAX_SIZE`] nodes for that, or that holds a value that isn't finite, is refused.
 fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     let m = shaper.len();
     if m < 2 {
@@ -284,8 +284,8 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     };
     // The bake grid holds both the table's nodes and the shaper's knots (lcm of their intervals),
     // so the curve keeps its breakpoints whatever the table's size: exact on an identity table. A
-    // grid that would pass MAX_SIZE falls back to the finer of the two, an approximation between
-    // the knots.
+    // grid that would pass MAX_SIZE is refused: sampled more coarsely, a bent shaper could read as
+    // even and be lost without a word.
     let gcd = |mut a: usize, mut b: usize| {
         while b != 0 {
             (a, b) = (b, a % b);
@@ -294,7 +294,9 @@ fn apply_shaper(lut: LutFile, shaper: &[f64]) -> Result<LutFile, LutError> {
     };
     let (a, k) = (lut.size - 1, m - 1);
     let aligned = (a / gcd(a, k)).checked_mul(k).map(|l| l + 1).filter(|&l| l <= MAX_SIZE);
-    let n = aligned.unwrap_or_else(|| lut.size.max(m.min(MAX_SIZE)));
+    let Some(n) = aligned else {
+        return err(format!("the .3dl shaper's {m} points can't be kept on a table of at most {MAX_SIZE} nodes"));
+    };
     let step = (n - 1) as f64;
     let mut out = LutFile { size: n, data: vec![0.0; n * n * n * 3], ..lut.clone() };
     for b in 0..n {
@@ -590,6 +592,18 @@ mod tests {
         for shaper in ["NaN 341 682 1023", "inf 341 682 1023", "-inf 341 682 1023"] {
             assert!(parse_3dl(&format!("{shaper}\n{body}")).is_err(), "{shaper}");
         }
+    }
+
+    /// #9170 review: a bent shaper whose knots can't all be kept within MAX_SIZE is refused rather
+    /// than sampled where it may look even (here a 257-point shaper bent only at odd knots, whose
+    /// 129-node fallback would read the identity).
+    #[test]
+    fn three_dl_shaper_too_fine_to_keep_is_refused() {
+        let shaper: Vec<u32> = (0..257u32).map(|i| (i * 1023 / 256 + if i % 2 == 1 { 40 } else { 0 }).min(1023)).collect();
+        assert!(parse_3dl(&identity_3dl(&shaper, 2)).is_err());
+        // As many knots as nodes stays within reach.
+        let same: Vec<u32> = (0..17u32).map(|i| (1023.0 * (f64::from(i) / 16.0).powi(2)).round() as u32).collect();
+        assert!(parse_3dl(&identity_3dl(&same, 17)).is_ok());
     }
 
     #[test]
