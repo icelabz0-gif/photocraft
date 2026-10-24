@@ -110,8 +110,8 @@ pub fn bindings(app: &PhotocraftApp) -> Vec<(String, KeyboardShortcut)> {
             all.push((id.to_string(), sc));
         }
     }
-    // Custom tool groups cycle just like the default letter groups. Explicit Shift bindings
-    // keep their keys; these derived bindings disappear as soon as their tool key is removed.
+    // Custom tool groups cycle just like the default letter groups. Explicit Shift and symbol
+    // bindings keep their keys; these derived bindings disappear as soon as their tool key is removed.
     if prefs.tools.use_shift_key_for_tool_switch {
         let cycles: Vec<_> = all
             .iter()
@@ -123,7 +123,14 @@ pub fn bindings(app: &PhotocraftApp) -> Vec<(String, KeyboardShortcut)> {
             })
             .collect();
         for (id, sc) in cycles {
-            if !all.iter().any(|(_, bound)| *bound == sc) {
+            // Shift+= can arrive as +. The tool's own plain symbol still needs its Shift cycle.
+            if !all.iter().any(|(_, bound)| {
+                *bound == sc
+                    || (bound.logical_key != sc.logical_key
+                        && [bound.logical_key, sc.logical_key]
+                            .into_iter()
+                            .any(|key| key_matches(&sc, key, sc.modifiers) && key_matches(bound, key, sc.modifiers)))
+            }) {
                 all.push((id, sc));
             }
         }

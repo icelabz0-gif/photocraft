@@ -181,6 +181,45 @@ fn toolbar_shortcut_overrides_remove_old_keys_and_skip_removed_group_members() {
     assert_eq!(app.ui.tool, Tool::Pencil, "an explicit default key still shares the unchanged tools' group");
     press(&mut app, Key::B, Modifiers::SHIFT);
     assert_eq!(app.ui.tool, Tool::MixerBrush);
+
+    // Shift may arrive as a different logical symbol. An explicit symbol command owns that
+    // press ahead of derived tool cycling; removing it makes cycling available again.
+    // Free the default Shift+[ / Shift+] commands to isolate the derived bracket bindings.
+    app.run("edit.keyboardShortcuts", json!({"set": {"tools.decreaseBrushHardness": "", "tools.increaseBrushHardness": ""}})).unwrap();
+    for (tool_key, command_key, event_key) in [
+        (Key::Equals, Key::Plus, Key::Plus),
+        (Key::Semicolon, Key::Colon, Key::Colon),
+        (Key::OpenBracket, Key::OpenCurlyBracket, Key::OpenCurlyBracket),
+        (Key::CloseBracket, Key::CloseCurlyBracket, Key::CloseCurlyBracket),
+        (Key::Slash, Key::Questionmark, Key::Questionmark),
+        (Key::Backslash, Key::Pipe, Key::Pipe),
+        (Key::Num1, Key::Exclamationmark, Key::Exclamationmark),
+        (Key::Plus, Key::Equals, Key::Plus),
+    ] {
+        app.run(
+            "edit.keyboardShortcuts",
+            json!({"set": {
+                "tools.select.brush": tool_key.name(), "tools.select.pencil": tool_key.name(), "edit.search": command_key.name()
+            }}),
+        )
+        .unwrap();
+        app.ui.tool = Tool::Pencil;
+        crate::shortcut_dispatch::take_log(&ctx);
+        crate::shortcut_dispatch::set_dry_run(&ctx, true);
+        press(&mut app, event_key, Modifiers::SHIFT);
+        assert_eq!(crate::shortcut_dispatch::take_log(&ctx).last().map(|(id, _)| id.as_str()), Some("edit.search"), "{event_key:?} keeps its explicit command");
+        assert_eq!(app.ui.tool, Tool::Pencil);
+        crate::shortcut_dispatch::set_dry_run(&ctx, false);
+
+        app.run("edit.keyboardShortcuts", json!({"set": {"edit.search": ""}})).unwrap();
+        press(&mut app, event_key, Modifiers::SHIFT);
+        assert_eq!(app.ui.tool, Tool::Brush, "{event_key:?} cycles when its explicit command is removed");
+
+        app.run("edit.keyboardShortcuts", json!({"set": {"tools.select.brush": event_key.name(), "tools.select.pencil": event_key.name()}})).unwrap();
+        app.ui.tool = Tool::Pencil;
+        press(&mut app, event_key, Modifiers::SHIFT);
+        assert_eq!(app.ui.tool, Tool::Brush, "a group bound directly to {event_key:?} still cycles");
+    }
 }
 
 #[test]
