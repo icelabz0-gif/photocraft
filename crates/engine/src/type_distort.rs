@@ -105,7 +105,8 @@ pub fn set_warp(t: &mut TextLayer, w: &Warp) -> Result<bool> {
     let free = |t: &TextLayer, w: &Warp| TypeDistortion { frame: t.transform, kind: TypeDistortionKind::Warp(w.clone()) };
     match warp_target(t) {
         WarpTarget::Style => {
-            if w.style == WarpStyle::Custom && !w.is_identity() {
+            // A custom mesh or a cylinder (a mesh rebuilt from its values) is a free warp, not a Warp Text.
+            if (w.style == WarpStyle::Custom || w.style == WarpStyle::Cylinder) && !w.is_identity() {
                 let d = free(t, w);
                 if !d.is_valid() {
                     return Err(EngineError::Other("the warp box is empty".into()));
