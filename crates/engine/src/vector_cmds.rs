@@ -443,8 +443,33 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
 
 /// The path `shape.create` draws for live-shape params `p` (the Shape tools preview it while dragging).
 pub fn shape_path(p: &Value) -> Result<Path> {
+
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rect");
-    Ok(vector::shapes::live_path(&live_from_params("shape.create", kind, p, None)?))
+    let live = live_from_params("shape.create", kind, p, None)?;
+    if let LiveShape::Line { from, to, weight } = &live {
+        let start = p.get("arrowStart").and_then(Value::as_bool).unwrap_or(false);
+        let end = p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(false);
+        if start || end {
+            let dimension = |key: &str, fallback: f64, low: f64, high: f64| -> Result<f64> {
+                let v = match p.get(key) {
+                    Some(x) => x.as_f64().ok_or_else(|| bad("shape.create", format!("`{key}` must be numeric")))?,
+                    None => fallback,
+                };
+                if !v.is_finite() || !(low..=high).contains(&v) {
+                    return Err(bad("shape.create", format!("`{key}` must be finite and within {low}..={high}")));
+                }
+                Ok(v)
+            };
+            let width = dimension("arrowWidth", 52.0, 1.0, 4096.0)?;
+            let length = dimension("arrowLength", 50.0, 1.0, 4096.0)?;
+            let concavity = dimension("arrowConcavity", 0.0, 0.0, 100.0)?;
+            return Ok(vector::shapes::arrow_line(
+                (from[0], from[1]), (to[0], to[1]), *weight,
+                start, end, width, length, concavity,
+            ));
+        }
+    }
+    Ok(vector::shapes::live_path(&live))
 }
 
 fn live_kind(l: &LiveShape) -> &'static str {
@@ -681,7 +706,16 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
         (parse_path(v).map_err(|e| bad(CMD, e))?, None)
     } else {
         let l = live_from_params(CMD, kind, p, None)?;
-        (vector::shapes::live_path(&l), Some(l))
+        // Arrowheads form a normal editable vector path rather than a plain live line.
+        // Preserve the complete outline in the document, including when saved to PSD/.pcraft.
+        let arrowed = kind == "line" &&
+            (p.get("arrowStart").and_then(Value::as_bool).unwrap_or(false)
+            || p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(false));
+        if arrowed {
+            (shape_path(p)?, None)
+        } else {
+            (vector::shapes::live_path(&l), Some(l))
+        }
     };
     let fg = s.tools.foreground;
     let fgc = Color::rgba(fg[0], fg[1], fg[2], fg[3]);
