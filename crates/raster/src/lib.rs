@@ -21,7 +21,14 @@ use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocationError {
     SizeOverflow,
-    NotEnoughMemory { bytes: usize },
+    NotEnoughMemory {
+        bytes: usize,
+    },
+    /// The pixels given don't fill the region they are written to.
+    LengthMismatch {
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl fmt::Display for AllocationError {
@@ -29,6 +36,7 @@ impl fmt::Display for AllocationError {
         match self {
             Self::SizeOverflow => f.write_str("requested surface allocation is too large"),
             Self::NotEnoughMemory { bytes } => write!(f, "not enough memory to allocate {} bytes", bytes),
+            Self::LengthMismatch { expected, got } => write!(f, "{got} bytes of pixels given for a region that takes {expected}"),
         }
     }
 }
@@ -243,6 +251,37 @@ fn convert_tiles(tiles: &mut [(TileCoord, Arc<Tile>)], r: Rect, data: &[f32], w:
     for (tc, t) in tiles.iter_mut() {
         write_tile(Arc::make_mut(t), *tc, r, data, w, n, sample);
     }
+}
+
+/// Copies the rows of `r` (interleaved `bytes`, `w` px wide, `bpp` bytes per pixel) into one
+/// tile, first copying it fallibly when an undo snapshot still shares it.
+fn copy_tile(tc: TileCoord, t: &mut Arc<Tile>, r: Rect, bytes: &[u8], w: usize, bpp: usize) -> Result<(), AllocationError> {
+    if Arc::get_mut(t).is_none() {
+        *t = Arc::new(t.try_clone()?);
+    }
+    let t = Arc::get_mut(t).ok_or(AllocationError::SizeOverflow)?;
+    let tr = tc.rect().intersect(&r);
+    let span = tr.width() as usize * bpp;
+    for y in tr.y0..tr.y1 {
+        let src = (((y - r.y0) as usize) * w + (tr.x0 - r.x0) as usize) * bpp;
+        let dst = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * bpp;
+        let (Some(d), Some(s)) = (t.data.get_mut(dst..dst + span), bytes.get(src..src + span)) else { return Err(AllocationError::SizeOverflow) };
+        d.copy_from_slice(s);
+    }
+    Ok(())
+}
+
+/// The tiles of an interleaved write, on all cores: each writes only its own bytes.
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_tiles(tiles: &mut [(TileCoord, Arc<Tile>)], r: Rect, bytes: &[u8], w: usize, bpp: usize) -> Result<(), AllocationError> {
+    use rayon::prelude::*;
+    tiles.par_iter_mut().try_for_each(|(tc, t)| copy_tile(*tc, t, r, bytes, w, bpp))
+}
+
+/// Serial counterpart, for the web build.
+#[cfg(target_arch = "wasm32")]
+fn copy_tiles(tiles: &mut [(TileCoord, Arc<Tile>)], r: Rect, bytes: &[u8], w: usize, bpp: usize) -> Result<(), AllocationError> {
+    tiles.iter_mut().try_for_each(|(tc, t)| copy_tile(*tc, t, r, bytes, w, bpp))
 }
 
 impl Surface {
@@ -826,6 +865,25 @@ impl Surface {
                 t.data[dst..dst + span].copy_from_slice(&bytes[src..src + span]);
             }
         }
+    }
+
+    /// Fallible counterpart to [`Surface::write_interleaved`], writing the tiles on all cores
+    /// (native targets): a length that doesn't match `r` is [`AllocationError::LengthMismatch`],
+    /// not a panic, and a tile that can't be allocated stops the write with
+    /// [`AllocationError::NotEnoughMemory`] (the tiles written so far keep their new pixels).
+    ///
+    /// This enters Rayon, as [`Surface::write_region_par`] does.
+    pub fn try_write_interleaved(&mut self, r: Rect, bytes: &[u8]) -> Result<(), AllocationError> {
+        let bpp = self.format.bytes_per_pixel();
+        let w = r.width() as usize;
+        let expected = w.checked_mul(r.height() as usize).and_then(|v| v.checked_mul(bpp)).ok_or(AllocationError::SizeOverflow)?;
+        if bytes.len() != expected {
+            return Err(AllocationError::LengthMismatch { expected, got: bytes.len() });
+        }
+        let mut tiles = self.try_take_tiles(r)?;
+        let written = copy_tiles(&mut tiles, r, bytes, w, bpp);
+        self.put_tiles(tiles);
+        written
     }
 
     /// Read `r` as interleaved encoded bytes in the surface's format.
@@ -1541,6 +1599,30 @@ mod tests {
         let before = surface.clone();
         assert_eq!(surface.try_write_region(Rect::new(0, 0, 2, 2), &[1.0]), Err(AllocationError::SizeOverflow));
         assert_eq!(surface, before);
+    }
+
+    #[test]
+    fn fallible_interleaved_write_matches_the_infallible_one_and_rejects_bad_lengths() {
+        for fmt in [PixelFormat::RGBA8, PixelFormat::RGBA16, PixelFormat::RGBA32F] {
+            // Across tile edges, at a negative origin.
+            let r = Rect::new(-3, 250, 300, 517);
+            let bytes: Vec<u8> = (0..r.width() as usize * r.height() as usize * fmt.bytes_per_pixel()).map(|i| (i * 31 % 251) as u8).collect();
+            let mut a = Surface::new(fmt);
+            a.write_interleaved(r, &bytes);
+            let mut b = Surface::new(fmt);
+            b.try_write_interleaved(r, &bytes).unwrap();
+            assert_eq!(a, b);
+            let before = b.clone();
+            let got = bytes.len() - 1;
+            assert_eq!(b.try_write_interleaved(r, &bytes[1..]), Err(AllocationError::LengthMismatch { expected: bytes.len(), got }));
+            assert_eq!(b, before);
+            // Tiles an undo snapshot shares are copied, not written through.
+            let again: Vec<u8> = bytes.iter().map(|v| v ^ 0x5a).collect();
+            b.try_write_interleaved(r, &again).unwrap();
+            a.write_interleaved(r, &again);
+            assert_eq!(a, b);
+            assert_eq!(before.to_interleaved(r), bytes);
+        }
     }
 
     #[test]
