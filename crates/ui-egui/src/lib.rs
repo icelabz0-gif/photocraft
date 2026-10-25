@@ -268,6 +268,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use photocraft_doc::{DocId, Document};
 use photocraft_engine::Session;
+use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 pub use control::{ControlRequest, ControlResponse};
@@ -689,6 +690,19 @@ pub(crate) type HistJob = (DocId, u64, std::sync::mpsc::Receiver<(DocId, f64, st
 /// The Info panel's cached sample: pixel x, y, document revision and Eyedropper Sample Size.
 type InfoSampleKey = (i32, i32, u64, u32);
 
+/// Last Magic Wand click and the selection it was combined with.
+#[derive(Clone, Debug)]
+pub(crate) struct LastMagicWand {
+    pub(crate) doc_id: DocId,
+    pub(crate) revision: u64,
+    pub(crate) view_revision: u64,
+    pub(crate) active_layer: Option<photocraft_doc::LayerId>,
+    pub(crate) point: [f64; 2],
+    pub(crate) mode: String,
+    pub(crate) tolerance: f32,
+    pub(crate) selection_baseline: Option<Surface>,
+}
+
 pub struct PhotocraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -718,6 +732,8 @@ pub struct PhotocraftApp {
     /// The tool pointer events go to this frame when it isn't the selected one: the Move tool
     /// while ⌘ is held (`hold_keys::cmd_moves`). Set by the canvas for its gestures, never saved.
     pub(crate) tool_override: Option<state::Tool>,
+    /// Baseline used only for the next Magic Wand command while the tolerance is being adjusted.
+    pending_magic_wand_baseline: Option<Option<Surface>>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
@@ -726,6 +742,8 @@ pub struct PhotocraftApp {
     /// Whether the last retouching stroke's commit took the pixels its live stroke drew
     /// (`"fromLive"`) instead of rendering the stroke again (`retouch_ui::finish_stroke`).
     pub(crate) retouch_from_live: bool,
+    /// Last successful Magic Wand click, so its options-bar tolerance can be adjusted in place.
+    pub(crate) last_magic_wand: Option<LastMagicWand>,
     /// Footprint trail of a retouching drag (see `stroke_trail`).
     trail: Option<stroke_trail::Trail>,
     /// Remove tool strokes waiting to be applied together (Remove after each stroke off), the
@@ -1036,9 +1054,11 @@ impl PhotocraftApp {
             drag: None,
             move_blocked: false,
             tool_override: None,
+            pending_magic_wand_baseline: None,
             live_stroke: None,
             committed_stroke: None,
             retouch_from_live: false,
+            last_magic_wand: None,
             trail: None,
             remove_pending: Vec::new(),
             remove_pending_target: None,
@@ -1278,6 +1298,8 @@ impl PhotocraftApp {
         if gate.is_some() {
             self.session.authorize = gate;
         }
+        let magic_wand_refresh = id == "select.magicWand" && self.pending_magic_wand_baseline.is_some();
+        let context_before = self.session.active().map(|doc| (doc.doc.id, doc.revision, doc.view_revision, doc.active_layer));
         let result = self.run_command(id, params);
         if gate.is_some() {
             self.session.authorize = None;
@@ -1292,6 +1314,20 @@ impl PhotocraftApp {
             }
             self.sync_mask_targets();
         }
+        // A remembered sample belongs to the document state that existed at the wand click. Clear
+        // it when that state changes, but keep it through view-only commands such as zoom/pan.
+        let context_after = self.session.active().map(|doc| (doc.doc.id, doc.revision, doc.view_revision, doc.active_layer));
+        if result.is_ok() && !magic_wand_refresh && context_before != context_after {
+            self.last_magic_wand = None;
+        }
+        result
+    }
+
+    /// Run a tolerance refresh with the selection that existed before the original wand click.
+    pub(crate) fn run_magic_wand_with_baseline(&mut self, params: Value, baseline: Option<Surface>) -> Result<Value, String> {
+        let previous = self.pending_magic_wand_baseline.replace(baseline);
+        let result = self.run("select.magicWand", params);
+        self.pending_magic_wand_baseline = previous;
         result
     }
 
@@ -1375,6 +1411,12 @@ impl PhotocraftApp {
             actions::play(self, &params)
         } else if photocraft_engine::actions_cmds::shell_view_command(id) {
             actions::run_view(self, id, params)
+        } else if id == "select.magicWand"
+            && let Some(baseline) = self.pending_magic_wand_baseline.take()
+        {
+            // Tolerance refreshes are synchronous; the engine still runs the normal command
+            // dispatch and records the edit as one undoable Magic Wand step.
+            self.session.execute_magic_wand_with_selection_baseline(params, baseline).map_err(|e| e.to_string())
         } else {
             jobs_ui::run(self, id, params)
         };
