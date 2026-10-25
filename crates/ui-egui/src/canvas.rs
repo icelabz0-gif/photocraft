@@ -277,6 +277,8 @@ pub struct Drag {
     /// keeps the locked direction stable between events. The Move tool's own drags use `move_mods`.
     pub sel_axis: Option<[f64; 2]>,
     pub lasso: Option<crate::lasso_ui::Lasso>,
+    /// A Magic Wand press whose drag widens or narrows the selection (`wand_drag`).
+    pub wand: Option<crate::wand_drag::WandDrag>,
 }
 
 impl Drag {
@@ -295,6 +297,7 @@ impl Drag {
             sel_move: None,
             sel_axis: None,
             lasso: None,
+            wand: None,
         }
     }
 
@@ -4409,6 +4412,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             feed_live_stroke(app);
             crate::magnetic_lasso_ui::flush(app);
         }
+        // Every frame, not only those with a pointer move: a held Magic Wand drag catches up with
+        // the pointer once its last re-run's wait is over, also when automation drives it.
+        crate::wand_drag::flush(app, &ctx);
         if buttons.stopped {
             // The live painting press already created the stroke and this release commits it.
             // egui may also report clicked on the same release; replaying that click paints a
@@ -6211,9 +6217,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     return;
                 }
                 Tool::MagicWand => {
-                    let o = app.ui.tool_options.clone();
-                    let mode = selection_mode(app, mods);
-                    let _ = app.run("select.magicWand", json!({"x": x.floor(), "y": y.floor(), "tolerance": o.tolerance, "contiguous": o.contiguous, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all.magic_wand, "mode": mode}));
+                    crate::wand_drag::press(app, x, y, pressure, mods);
                     return;
                 }
                 Tool::MagicEraser => {
@@ -6695,6 +6699,7 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
             let (dx, dy) = ((end[0] - d.start[0]).round(), (end[1] - d.start[1]).round());
             crate::move_ui::finish(app, dx, dy);
         }
+        Tool::MagicWand => crate::wand_drag::finish(app, &d),
         _ => {}
     }
 }

@@ -140,6 +140,14 @@ impl History {
         }
         self.can_undo().then_some(self.current_label.as_str())
     }
+    /// The document from before the current step: what Undo goes back to. `None` with nothing to
+    /// undo, and after Clear History (whose undo restores the list, not a document).
+    pub fn previous(&self) -> Option<&Arc<Document>> {
+        if self.cleared.is_some() {
+            return None;
+        }
+        self.undo.back().map(|s| &s.doc)
+    }
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|s| s.label.as_str())
     }
@@ -498,6 +506,20 @@ mod tests {
         f(&mut d);
         *cur = Arc::new(d);
         h.record(label, before, LayerTarget::default());
+    }
+
+    #[test]
+    fn previous_is_the_document_undo_goes_back_to() {
+        let mut h = History::default();
+        let mut cur = Arc::new(base());
+        assert!(h.previous().is_none());
+        let open = cur.clone();
+        edit(&mut h, &mut cur, "New Layer", |d| {
+            d.insert_above(None, Layer::raster("L", d.pixel_format()));
+        });
+        assert!(h.previous().is_some_and(|d| Arc::ptr_eq(d, &open)));
+        assert!(h.clear_states());
+        assert!(h.previous().is_none(), "Clear History's undo restores the list, not a document");
     }
 
     #[test]

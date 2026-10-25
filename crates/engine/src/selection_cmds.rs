@@ -128,11 +128,27 @@ fn magic_wand(s: &mut Session, p: &Value) -> Result<Value> {
     let region = sel::wand_region(&img, area, (x, y), f(p, "tolerance", 32.0), b(p, "contiguous", true), b(p, "antiAlias", true));
     drop(img);
     let m = mode(p);
+    let base = redrag_base(s);
     let selected = s.edit("Magic Wand", |doc, _| {
-        doc.selection = sel::combine_region(doc.selection.as_ref(), region.as_ref(), m);
+        let old = base.as_ref().map_or(doc.selection.as_ref(), Option::as_ref);
+        let new = sel::combine_region(old, region.as_ref(), m);
+        doc.selection = new;
         Ok(doc.selection.is_some())
     })?;
     Ok(json!({ "selected": selected }))
+}
+
+/// A Magic Wand drag re-runs the wand at a new tolerance with the `coalesce` key of the step its
+/// press made. Such a call combines with the selection from before that step, so dragging back
+/// narrows the selection again. `None` when the call makes a step of its own; `Some(None)` when
+/// nothing was selected before the press.
+fn redrag_base(s: &Session) -> Option<Option<Surface>> {
+    let st = s.active()?;
+    let extends = s.coalesce_request.is_some() && st.coalesce == s.coalesce_request && st.history.undo_label() == Some("Magic Wand");
+    if !extends {
+        return None;
+    }
+    st.history.previous().map(|d| d.selection.clone())
 }
 
 fn parse_color(p: &Value) -> [f32; 3] {
@@ -919,6 +935,69 @@ mod tests {
         s.execute("select.magicWand", json!({"x": 7, "y": 7, "tolerance": 0, "antiAlias": false})).unwrap();
         assert_eq!(coverage(&s, 2, 2), 1.0, "a layer mask shown alone is what the wand reads");
         assert_eq!(coverage(&s, 30, 10), 0.0);
+    }
+
+    /// A grey ramp across rows 20–29, from level 200 down 10 levels a column (55 levels from the
+    /// white above it), and a red square in the top-left corner.
+    fn ramp_session() -> Session {
+        let mut s = session();
+        s.edit("paint", |doc, _| {
+            let bg = doc.layers[0].surface_mut().unwrap();
+            for x in 0..40 {
+                let v = (200.0 - x as f32 * 10.0).max(0.0) / 255.0;
+                bg.fill_rect(Rect::new(x, 20, x + 1, 30), &[v, v, v, 1.0]);
+            }
+            bg.fill_rect(Rect::new(0, 0, 4, 4), &[1.0, 0.0, 0.0, 1.0]);
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn wand(s: &mut Session, x: i32, y: i32, tolerance: f32, mode: &str, coalesce: Option<&str>) {
+        let mut p = json!({"x": x, "y": y, "tolerance": tolerance, "mode": mode, "antiAlias": false});
+        if let Some(key) = coalesce {
+            p["coalesce"] = json!(key);
+        }
+        s.execute("select.magicWand", p).unwrap();
+    }
+
+    #[test]
+    fn a_wand_drag_widens_and_narrows_from_the_selection_before_its_press() {
+        let mut s = ramp_session();
+        // The red square is selected first; the drag then adds parts of the ramp.
+        wand(&mut s, 1, 1, 0.0, "replace", None);
+        let steps = s.active().unwrap().history.entries().len();
+        wand(&mut s, 0, 25, 0.0, "add", Some("drag-1"));
+        assert_eq!(coverage(&s, 1, 25), 0.0, "tolerance 0 takes the seed column only");
+        wand(&mut s, 0, 25, 45.0, "add", Some("drag-1"));
+        assert_eq!(coverage(&s, 4, 25), 1.0, "a higher tolerance takes more of the ramp");
+        assert_eq!(coverage(&s, 6, 25), 0.0);
+        wand(&mut s, 0, 25, 15.0, "add", Some("drag-1"));
+        assert_eq!(coverage(&s, 1, 25), 1.0);
+        assert_eq!(coverage(&s, 4, 25), 0.0, "dragging back narrows the selection again");
+        assert_eq!(coverage(&s, 1, 1), 1.0, "the selection from before the press is kept");
+        // The whole drag is one history step, and undo goes back to before the press.
+        assert_eq!(s.active().unwrap().history.entries().len(), steps + 1);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(coverage(&s, 0, 25), 0.0);
+        assert_eq!(coverage(&s, 1, 1), 1.0);
+    }
+
+    #[test]
+    fn wand_clicks_without_a_shared_key_still_build_on_each_other() {
+        let mut s = ramp_session();
+        wand(&mut s, 0, 25, 45.0, "add", Some("drag-1"));
+        assert_eq!(coverage(&s, 4, 25), 1.0);
+        // A new press (a new key) adds to the current selection, as a ⇧-click does.
+        wand(&mut s, 1, 1, 0.0, "add", Some("drag-2"));
+        assert_eq!(coverage(&s, 4, 25), 1.0);
+        assert_eq!(coverage(&s, 1, 1), 1.0);
+        // Any edit in between ends the drag: the same key no longer reaches back past it.
+        s.execute("select.inverse", json!({})).unwrap();
+        wand(&mut s, 0, 25, 0.0, "add", Some("drag-2"));
+        assert_eq!(coverage(&s, 4, 25), 0.0, "Inverse took the ramp out; the late call only adds column 0");
+        assert_eq!(coverage(&s, 0, 25), 1.0);
     }
 
     #[test]

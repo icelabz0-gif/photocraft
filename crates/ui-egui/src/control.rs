@@ -1182,6 +1182,7 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 tool_event(app, ev, mods);
             }
             app.stylus.feed.set(None);
+            crate::wand_drag::settle(app);
             ok(json!({"status": app.ui.status}))
         }
         "ui.click" | "ui.move" => {
