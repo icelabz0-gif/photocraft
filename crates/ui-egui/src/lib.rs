@@ -3268,6 +3268,9 @@ mod transform_undo_tests;
 mod transform_type_tests;
 
 #[cfg(test)]
+mod transform_several_tests;
+
+#[cfg(test)]
 mod psd_open_tests;
 #[cfg(test)]
 mod save_identity_tests;
