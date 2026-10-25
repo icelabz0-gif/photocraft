@@ -94,6 +94,8 @@ pub mod perspective_crop_cmds;
 pub mod photo_cmds;
 pub mod pick_cmds;
 mod pixels;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plugin_8bf_cmds;
 pub mod plugin_cmds;
 pub mod prefs;
 pub mod preset_import_cmds;
@@ -550,6 +552,8 @@ pub struct Session {
     /// document, source read-only)`. The shell takes them with [`Session::take_held_open`].
     held_opens: Vec<(u64, Document, bool)>,
     next_held_open: u64,
+    /// Plug-ins registered from the Plug-ins preference folders (see `plugin_cmds`).
+    pub(crate) plugin_folders: plugin_cmds::FolderPlugins,
 }
 
 /// Move item `i` of `v` to position `to`, clamped to the end. Returns where it went; `None` when
