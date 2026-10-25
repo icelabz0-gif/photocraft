@@ -2580,6 +2580,13 @@ pub(crate) fn adjustment_layer_active(st: &photocraft_engine::DocState) -> bool 
     st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| matches!(l.content, photocraft_doc::LayerContent::Adjustment(_)))
 }
 
+/// Whether PhotoCraft is the app in front: one of its windows (the main window, a document
+/// window, Camera Raw) has the keyboard focus. Coming to the front and going to the back each
+/// send a window a focus event, which draws a frame.
+pub(crate) fn in_front(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.focused || i.raw.viewports.values().any(|v| v.focused == Some(true)))
+}
+
 /// On the web, dropped-file bytes arrive asynchronously; the web shell handles drops itself.
 #[cfg(target_arch = "wasm32")]
 fn read_dropped(_f: &dyn egui::DroppedFile) -> Result<Vec<u8>, String> {

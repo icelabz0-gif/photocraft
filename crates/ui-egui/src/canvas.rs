@@ -3902,7 +3902,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 if !(carried && crate::transform_tool::draw_selection(app, &painter, &xf, doc.id, segs, time)) {
                     marching_ants_segments(&painter, &shown, segs, time);
                 }
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                crate::ants::keep_marching(&ctx);
             }
         }
 
@@ -8914,6 +8914,47 @@ mod tests {
             let segs = app.outline_cache.as_ref().map_or(0, |(_, _, s)| s.len());
             assert_eq!(segs > 0, traced, "{centre:?} at zoom {zoom}");
         }
+    }
+
+    /// The marching ants march (a frame every 100 ms) while PhotoCraft is in front, through the
+    /// main window or another of its windows, and stand still behind another app: no frame is
+    /// asked for, so an idle selection doesn't redraw the interface ten times a second there. The
+    /// outline is still drawn.
+    #[test]
+    fn the_ants_march_only_while_photocraft_is_in_front() {
+        let ctx = egui::Context::default();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
+        app.run("select.rect", json!({"x": 40, "y": 30, "width": 200, "height": 120})).unwrap();
+        app.sync_views();
+        let view = app.ui.views[0].clone();
+        let other = egui::ViewportId::from_hash_of(("docwin", 1u64));
+        // A frame at `t` (s) with the main window and a document window focused or not; returns
+        // when the next frame is asked for.
+        let frame = |app: &mut PhotocraftApp, t: f64, main: bool, window: bool| {
+            let mut input = egui::RawInput { time: Some(t), focused: main, ..Default::default() };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(main);
+            input.viewports.entry(other).or_default().focused = Some(window);
+            let mut out = ctx.run_ui(input, |ui| {
+                canvas_view(app, ui, 0, Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), view.clone(), true);
+            });
+            out.textures_delta.clear();
+            out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay)
+        };
+        let march = std::time::Duration::from_millis(100);
+        for t in 0..3 {
+            frame(&mut app, f64::from(t), true, false);
+        }
+        assert!(frame(&mut app, 3.0, true, false) <= march, "in front: the ants march");
+        assert!(app.outline_cache.as_ref().is_some_and(|(_, _, s)| !s.is_empty()), "the selection is outlined");
+        app.outline_cache = None;
+        for t in 4..7 {
+            frame(&mut app, f64::from(t), false, false);
+        }
+        assert_eq!(frame(&mut app, 7.0, false, false), std::time::Duration::MAX, "behind another app: no frame for the ants");
+        assert!(app.outline_cache.as_ref().is_some_and(|(_, _, s)| !s.is_empty()), "the ants are still drawn, standing still");
+        assert!(frame(&mut app, 8.0, false, true) <= march, "a document window in front: the ants march");
+        assert!(frame(&mut app, 9.0, true, false) <= march, "back in front: they march again");
     }
 
     #[test]
