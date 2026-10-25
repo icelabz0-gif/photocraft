@@ -428,13 +428,41 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
         }
         "line" => {
             let (pf, pto, pw) = match prev {
-                Some(LiveShape::Line { from, to, weight }) => (Some(*from), Some(*to), *weight),
+                Some(LiveShape::Line { from, to, weight }) | Some(LiveShape::ArrowLine { from, to, weight, .. }) => (Some(*from), Some(*to), *weight),
                 _ => (None, None, 1.0),
             };
-            LiveShape::Line {
-                from: nums::<2>(p, "from").or(pf).ok_or_else(|| bad(cmd, "`from`: [x, y] is required"))?,
-                to: nums::<2>(p, "to").or(pto).ok_or_else(|| bad(cmd, "`to`: [x, y] is required"))?,
-                weight: f64p(p, "weight").unwrap_or(pw).max(0.0),
+            let from = nums::<2>(p, "from").or(pf).ok_or_else(|| bad(cmd, "`from`: [x, y] is required"))?;
+            let to = nums::<2>(p, "to").or(pto).ok_or_else(|| bad(cmd, "`to`: [x, y] is required"))?;
+            let weight = f64p(p, "weight").unwrap_or(pw).max(0.0);
+            let arrow_fields = ["arrowStart", "arrowEnd", "arrowWidth", "arrowLength", "arrowConcavity"];
+            let is_arrow = matches!(prev, Some(LiveShape::ArrowLine { .. })) || arrow_fields.iter().any(|k| p.get(*k).is_some());
+            if is_arrow {
+                let (ps, pe, pwidth, plen, pc) = match prev {
+                    Some(LiveShape::ArrowLine { start, end, width, length, concavity, .. }) => (*start, *end, *width, *length, *concavity),
+                    _ => (false, false, 52.0, 50.0, 0.0),
+                };
+                let dim = |key: &str, fallback: f64, min: f64, max: f64| -> Result<f64> {
+                    let value = match p.get(key) {
+                        Some(v) => v.as_f64().ok_or_else(|| bad(cmd, format!("`{key}` must be numeric")))?,
+                        None => fallback,
+                    };
+                    if !value.is_finite() || !(min..=max).contains(&value) {
+                        return Err(bad(cmd, format!("`{key}` must be within {min}..={max}")));
+                    }
+                    Ok(value)
+                };
+                LiveShape::ArrowLine {
+                    from,
+                    to,
+                    weight,
+                    start: p.get("arrowStart").and_then(Value::as_bool).unwrap_or(ps),
+                    end: p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(pe),
+                    width: dim("arrowWidth", pwidth, 1.0, 4096.0)?,
+                    length: dim("arrowLength", plen, 1.0, 4096.0)?,
+                    concavity: dim("arrowConcavity", pc, 0.0, 100.0)?,
+                }
+            } else {
+                LiveShape::Line { from, to, weight }
             }
         }
         o => return Err(bad(cmd, format!("unknown kind `{o}`"))),
@@ -443,35 +471,10 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
 
 /// The path `shape.create` draws for live-shape params `p` (the Shape tools preview it while dragging).
 pub fn shape_path(p: &Value) -> Result<Path> {
-
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rect");
     let live = live_from_params("shape.create", kind, p, None)?;
-    if let LiveShape::Line { from, to, weight } = &live {
-        let start = p.get("arrowStart").and_then(Value::as_bool).unwrap_or(false);
-        let end = p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(false);
-        if start || end {
-            let dimension = |key: &str, fallback: f64, low: f64, high: f64| -> Result<f64> {
-                let v = match p.get(key) {
-                    Some(x) => x.as_f64().ok_or_else(|| bad("shape.create", format!("`{key}` must be numeric")))?,
-                    None => fallback,
-                };
-                if !v.is_finite() || !(low..=high).contains(&v) {
-                    return Err(bad("shape.create", format!("`{key}` must be finite and within {low}..={high}")));
-                }
-                Ok(v)
-            };
-            let width = dimension("arrowWidth", 52.0, 1.0, 4096.0)?;
-            let length = dimension("arrowLength", 50.0, 1.0, 4096.0)?;
-            let concavity = dimension("arrowConcavity", 0.0, 0.0, 100.0)?;
-            return Ok(vector::shapes::arrow_line(
-                (from[0], from[1]), (to[0], to[1]), *weight,
-                start, end, width, length, concavity,
-            ));
-        }
-    }
     Ok(vector::shapes::live_path(&live))
 }
-
 fn live_kind(l: &LiveShape) -> &'static str {
     match l {
         LiveShape::Rect { radii, .. } if radii.iter().any(|r| *r > 0.0) => "roundedRect",
@@ -479,7 +482,7 @@ fn live_kind(l: &LiveShape) -> &'static str {
         LiveShape::Ellipse { .. } => "ellipse",
         LiveShape::Polygon { star_ratio, .. } if *star_ratio < 1.0 => "star",
         LiveShape::Polygon { .. } => "polygon",
-        LiveShape::Line { .. } => "line",
+        LiveShape::Line { .. } | LiveShape::ArrowLine { .. } => "line",
     }
 }
 
@@ -566,6 +569,22 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 LiveShape::Polygon { rect, sides, star_ratio, corner_radius } => {
                     LiveShape::Polygon { rect: r(rect), sides, star_ratio, corner_radius: corner_radius * m0.min(m3) }
                 }
+                LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let old_len = dx.hypot(dy);
+                    let new_len = (dx * m0).hypot(dy * m3);
+                    let perpendicular_scale = if old_len > 0.0 && new_len > 0.0 { m0 * m3 * old_len / new_len } else { m0.min(m3) };
+                    LiveShape::ArrowLine {
+                        from: pt(from),
+                        to: pt(to),
+                        weight: weight * perpendicular_scale,
+                        start,
+                        end,
+                        width: width * perpendicular_scale,
+                        length: length * if old_len > 0.0 { new_len / old_len } else { m0.min(m3) },
+                        concavity,
+                    }
+                }
                 LiveShape::Line { from, to, weight } => {
                     // Live-shape edits regenerate the line's filled bar from its parameters.
                     // Keep the weight in sync with a positive scale of the path, or an
@@ -594,6 +613,9 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 }
                 LiveShape::Ellipse { rect } => Some(LiveShape::Ellipse { rect: r(rect) }),
                 LiveShape::Line { from, to, weight } => Some(LiveShape::Line { from: pt(from), to: pt(to), weight: weight * k }),
+                LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
+                    Some(LiveShape::ArrowLine { from: pt(from), to: pt(to), weight: weight * k, start, end, width: width * k, length: length * k, concavity })
+                }
                 _ => None,
             }
         }
@@ -706,16 +728,7 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
         (parse_path(v).map_err(|e| bad(CMD, e))?, None)
     } else {
         let l = live_from_params(CMD, kind, p, None)?;
-        // Arrowheads form a normal editable vector path rather than a plain live line.
-        // Preserve the complete outline in the document, including when saved to PSD/.pcraft.
-        let arrowed = kind == "line" &&
-            (p.get("arrowStart").and_then(Value::as_bool).unwrap_or(false)
-            || p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(false));
-        if arrowed {
-            (shape_path(p)?, None)
-        } else {
-            (vector::shapes::live_path(&l), Some(l))
-        }
+        (vector::shapes::live_path(&l), Some(l))
     };
     let fg = s.tools.foreground;
     let fgc = Color::rgba(fg[0], fg[1], fg[2], fg[3]);
@@ -768,7 +781,23 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
             sh.live = None;
             sh.psd_raw = None;
         }
-        let geom_keys = ["kind", "rect", "radii", "radius", "sides", "starRatio", "cornerRadius", "from", "to", "weight"];
+        let geom_keys = [
+            "kind",
+            "rect",
+            "radii",
+            "radius",
+            "sides",
+            "starRatio",
+            "cornerRadius",
+            "from",
+            "to",
+            "weight",
+            "arrowStart",
+            "arrowEnd",
+            "arrowWidth",
+            "arrowLength",
+            "arrowConcavity",
+        ];
         if geom_keys.iter().any(|k| p.get(*k).is_some()) {
             let kind = p.get("kind").and_then(Value::as_str).map(str::to_string).or_else(|| sh.live.as_ref().map(|l| live_kind(l).to_string()));
             let kind = kind.ok_or_else(|| bad(CMD, "this shape has no live-shape parameters; pass `kind` or `path`"))?;

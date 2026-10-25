@@ -1216,7 +1216,12 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(l) = st.and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))
             && let LayerContent::Shape(sh) = &l.content
         {
-            draw_path(&sh.path, anchors);
+            // arrow_v3_3_fix2_hide_stale_shape_path: show the new transform, not the old path.
+            let transforming_this_shape =
+                app.ui.transform.as_ref().is_some_and(|t| t.layer == l.id.0 && !t.selection && t.target.is_none() && t.path.is_none());
+            if !transforming_this_shape {
+                draw_path(&sh.path, anchors);
+            }
         }
         // A targeted vector mask shows its path with any tool (#196).
         if let Some((_, p)) = targeted_vector_mask(app) {
@@ -1528,7 +1533,7 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
                     }
                 });
             }
-            photocraft_doc::vector::LiveShape::Line { .. } => {}
+            photocraft_doc::vector::LiveShape::Line { .. } | photocraft_doc::vector::LiveShape::ArrowLine { .. } => {}
         }
         ui.vertical(|ui| match live {
             photocraft_doc::vector::LiveShape::Rect { radii, .. } => {
@@ -1571,6 +1576,43 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
                     }
                 })
                 .inner
+            }
+            photocraft_doc::vector::LiveShape::ArrowLine { weight, start, end, width, length, concavity, .. } => {
+                // This is a selected, saved Arrow; unlike the tool's defaults, edits update its geometry.
+                ui.horizontal(|ui| {
+                    let mut value = *start;
+                    if ui.checkbox(&mut value, "Start").changed() {
+                        edit = Some(json!({"arrowStart": value, "coalesce": key("arrow-start")}));
+                    }
+                    let mut value = *end;
+                    if ui.checkbox(&mut value, "End").changed() {
+                        edit = Some(json!({"arrowEnd": value, "coalesce": key("arrow-end")}));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut v = *width as f32;
+                    if num(ui, "Width", &mut v, 1.0..=4096.0, "px") {
+                        edit = Some(json!({"arrowWidth": v, "coalesce": key("arrow-width")}));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut v = *length as f32;
+                    if num(ui, "Length", &mut v, 1.0..=4096.0, "px") {
+                        edit = Some(json!({"arrowLength": v, "coalesce": key("arrow-length")}));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut v = *concavity as f32;
+                    if num(ui, "Concavity", &mut v, 0.0..=100.0, "%") {
+                        edit = Some(json!({"arrowConcavity": v, "coalesce": key("arrow-concavity")}));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut v = *weight as f32;
+                    if num(ui, "Weight", &mut v, 1.0..=10000.0, "px") {
+                        edit = Some(json!({"weight": v, "coalesce": key("arrow-weight")}));
+                    }
+                });
             }
             photocraft_doc::vector::LiveShape::Line { weight, .. } => {
                 ui.horizontal(|ui| {

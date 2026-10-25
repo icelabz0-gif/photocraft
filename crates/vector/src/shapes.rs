@@ -215,21 +215,11 @@ pub fn line(a: (f64, f64), b: (f64, f64), weight: f64) -> Path {
     Path::new(vec![Subpath::polygon(&[(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)])])
 }
 
-
 /// A filled vector line with optional arrowheads at its endpoints (#6408).
 /// `width` and `length` measure the head in document pixels, independently of the shaft weight.
 /// `concavity` is 0..100 percent: 0 has a flat rear edge, 100 a deep V-shaped notch.
 /// The shaft stops at the notch, so a concave head remains concave after filling.
-pub fn arrow_line(
-    a: (f64, f64),
-    b: (f64, f64),
-    weight: f64,
-    start: bool,
-    end: bool,
-    width: f64,
-    length: f64,
-    concavity: f64,
-) -> Path {
+pub fn arrow_line(a: (f64, f64), b: (f64, f64), weight: f64, start: bool, end: bool, width: f64, length: f64, concavity: f64) -> Path {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let distance = dx.hypot(dy);
     if !distance.is_finite() || distance < 1.0 || !weight.is_finite() {
@@ -239,7 +229,10 @@ pub fn arrow_line(
     let (vx, vy) = (-uy, ux);
     let size = length.clamp(1.0, 4096.0).min(distance * if start && end { 0.49 } else { 0.9 });
     let half = width.clamp(1.0, 4096.0) / 2.0;
-    let notch = concavity.clamp(0.0, 100.0) / 100.0;
+    let requested_notch = concavity.clamp(0.0, 100.0) / 100.0;
+    // Preserve 0..50%. Beyond that compress the usable range so the head never collapses.
+    let max_notch = 0.75;
+    let notch = if requested_notch <= 0.5 { requested_notch } else { 0.5 + (requested_notch - 0.5) * (max_notch - 0.5) / 0.5 };
     // Put the shaft up to the notch, leaving the head's concave edges visible.
     let inner = size * (1.0 - notch);
     let shaft_a = if start { (a.0 + ux * inner, a.1 + uy * inner) } else { a };
@@ -255,16 +248,8 @@ pub fn arrow_line(
     // Positive `sign` points towards the tail of the head (away from its tip).
     let mut head = |tip: (f64, f64), sign: f64| {
         let base = (tip.0 + ux * sign * size, tip.1 + uy * sign * size);
-        let rear_middle = (
-            base.0 - ux * sign * size * notch,
-            base.1 - uy * sign * size * notch,
-        );
-        pieces.push(Subpath::polygon(&[
-            tip,
-            (base.0 + vx * half, base.1 + vy * half),
-            rear_middle,
-            (base.0 - vx * half, base.1 - vy * half),
-        ]));
+        let rear_middle = (base.0 - ux * sign * size * notch, base.1 - uy * sign * size * notch);
+        pieces.push(Subpath::polygon(&[tip, (base.0 + vx * half, base.1 + vy * half), rear_middle, (base.0 - vx * half, base.1 - vy * half)]));
     };
     if start {
         head(a, 1.0);
@@ -284,6 +269,9 @@ pub fn live_path(s: &LiveShape) -> Path {
             round_corners(polygon(*x, *y, *w, *h, *sides, *star_ratio), *corner_radius)
         }
         LiveShape::Line { from, to, weight } => line((from[0], from[1]), (to[0], to[1]), *weight),
+        LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
+            arrow_line((from[0], from[1]), (to[0], to[1]), *weight, *start, *end, *width, *length, *concavity)
+        }
     }
 }
 
@@ -291,6 +279,20 @@ pub fn live_path(s: &LiveShape) -> Path {
 mod tests {
     use super::*;
 
+    #[test]
+    fn live_arrow_can_be_regenerated_after_edit() {
+        let shape =
+            LiveShape::ArrowLine { from: [10.0, 10.0], to: [200.0, 10.0], weight: 4.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 50.0 };
+        let before = live_path(&shape);
+        assert_eq!(before.subpaths.len(), 2);
+        let edited = if let LiveShape::ArrowLine { from, to, weight, start, end, length, concavity, .. } = shape {
+            LiveShape::ArrowLine { from, to, weight, start, end, width: 60.0, length, concavity }
+        } else {
+            unreachable!()
+        };
+        let after = live_path(&edited);
+        assert_ne!(before, after);
+    }
     /// The point at `t` of the cubic leaving `a` towards `b`.
     fn at(a: &Knot, b: &Knot, t: f64) -> [f64; 2] {
         let u = 1.0 - t;
@@ -378,7 +380,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod line_arrow_6408_tests {
     use super::*;
@@ -401,4 +402,3 @@ mod line_arrow_6408_tests {
         assert!(p.subpaths.is_empty());
     }
 }
-
