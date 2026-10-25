@@ -417,6 +417,10 @@ pub fn live_from_vogk(data: &[u8]) -> Option<LiveShape> {
             let length = num(o.get("keyOriginLineArrLngth")).unwrap_or(0.0);
             let concavity = num(o.get("keyOriginLineArrConc")).unwrap_or(0.0);
             if start || end || width > 0.0 || length > 0.0 {
+                // Missing or invalid PSD arrow sizes must not prevent later edits.
+                let width = if width.is_finite() && width >= 1.0 { width } else { 52.0 };
+                let length = if length.is_finite() && length >= 1.0 { length } else { 50.0 };
+                let concavity = if concavity.is_finite() { concavity.clamp(0.0, 100.0) } else { 0.0 };
                 Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity })
             } else {
                 Some(LiveShape::Line { from, to, weight })

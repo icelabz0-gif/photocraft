@@ -446,7 +446,9 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
                         Some(v) => v.as_f64().ok_or_else(|| bad(cmd, format!("`{key}` must be numeric")))?,
                         None => fallback,
                     };
-                    if !value.is_finite() || !(min..=max).contains(&value) {
+                    // Preserve scaled arrowhead dimensions when editing other properties.
+                    let preserved_scaled_size = p.get(key).is_none() && matches!(key, "arrowWidth" | "arrowLength") && value >= min;
+                    if !value.is_finite() || (!(min..=max).contains(&value) && !preserved_scaled_size) {
                         return Err(bad(cmd, format!("`{key}` must be within {min}..={max}")));
                     }
                     Ok(value)
@@ -475,6 +477,7 @@ pub fn shape_path(p: &Value) -> Result<Path> {
     let live = live_from_params("shape.create", kind, p, None)?;
     Ok(vector::shapes::live_path(&live))
 }
+/// Returns the public shape kind used by shape commands and inspection.
 fn live_kind(l: &LiveShape) -> &'static str {
     match l {
         LiveShape::Rect { radii, .. } if radii.iter().any(|r| *r > 0.0) => "roundedRect",
@@ -720,6 +723,7 @@ fn default_name(kind: &str) -> &'static str {
     }
 }
 
+/// Creates a shape layer from validated parameters, retaining live arrow settings.
 fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "shape.create";
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rect");
@@ -769,6 +773,7 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
     shape_info(s, id)
 }
 
+/// Edits a vector layer, preserving unchanged live arrowhead parameters.
 fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "shape.edit";
     let id = layer_id(s, p)?;
@@ -1826,7 +1831,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Shape Layer",
             ["Layer", "New"],
             leak(format!(
-                r##"{{"kind":"rect|roundedRect|ellipse|polygon|star|line|path"="rect","rect":[x,y,w,h] (rect/roundedRect/ellipse/polygon/star),"radii":[tl,tr,br,bl]|r (roundedRect=10),"sides":3..100=5,"starRatio":0..1 (star=0.5),"cornerRadius":px=0 (polygon/star: rounds every vertex; the Triangle tool is a 3-sided polygon),"from":[x,y],"to":[x,y],"weight":px=1 (line),"path":{{…}} (kind path),{fill}=foreground,{stroke}=none,"name":str?,"addTo":layerId? + "op":"combine|subtract|intersect|exclude" (append to an existing shape layer)}} → shape.info. {PATH_FORM}"##
+                r##"{{"kind":"rect|roundedRect|ellipse|polygon|star|line|path"="rect","rect":[x,y,w,h] (rect/roundedRect/ellipse/polygon/star),"radii":[tl,tr,br,bl]|r (roundedRect=10),"sides":3..100=5,"starRatio":0..1 (star=0.5),"cornerRadius":px=0 (polygon/star: rounds every vertex; the Triangle tool is a 3-sided polygon),"from":[x,y],"to":[x,y],"weight":px=1 (line),"arrowStart":bool=false,"arrowEnd":bool=false,"arrowWidth":px=52,"arrowLength":px=50,"arrowConcavity":0..100=0 (line),"path":{{…}} (kind path),{fill}=foreground,{stroke}=none,"name":str?,"addTo":layerId? + "op":"combine|subtract|intersect|exclude" (append to an existing shape layer)}} → shape.info. {PATH_FORM}"##
             )),
             has_doc,
             shape_create
@@ -1836,7 +1841,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Shape",
             [],
             leak(format!(
-                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"cornerRadius":px?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
+                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"cornerRadius":px?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"arrowStart":bool?,"arrowEnd":bool?,"arrowWidth":px?,"arrowLength":px?,"arrowConcavity":0..100? (line arrows),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
             )),
             has_layer,
             shape_edit
