@@ -17,6 +17,7 @@ macro_rules! tl {
 pub mod actions;
 pub mod adjust_dialog;
 pub mod adjust_editors;
+pub(crate) mod adjust_presets;
 pub mod adjust_preview;
 pub mod adjust_ui;
 mod align_bar;

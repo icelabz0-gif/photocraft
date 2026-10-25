@@ -900,3 +900,34 @@ fn row_values_round_to_their_own_decimals() {
     assert!((row_value(1.234, 0.01, 9.99, None) - 1.23).abs() < 1e-6, "small ranges keep two decimals");
     assert!(row_value(f32::NAN, -20.0, 20.0, Some(u32::MAX)).is_nan(), "no panic on odd input");
 }
+
+/// CodeRabbit on #9282: the Properties panel's Preset menu loads every setting of each preset
+/// into the adjustment layer, in one history step.
+#[test]
+fn properties_preset_menus_load_every_setting_in_one_step() {
+    use egui_kittest::kittest::NodeT;
+    for (kind, label) in
+        [("levels", "Increase Contrast 2"), ("exposure", "Plus 1.0"), ("blackWhite", "Red Filter"), ("channelMixer", "Black & White with Red Filter (RGB)")]
+    {
+        let mut h = app_harness(kind, "rgb", 8);
+        let steps = h.state().session.active().unwrap().history.past_len();
+        let menu = h
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .find(|n| n.accesskit_node().value().as_deref() == Some("Default"))
+            .unwrap_or_else(|| panic!("{kind}: the Preset menu, at Default"));
+        menu.click();
+        h.run_steps(2);
+        h.get_by_label(label).click();
+        h.run_steps(4);
+        let want = crate::adjust_presets::presets(kind, false)
+            .iter()
+            .find(|p| p.label == label)
+            .and_then(|p| crate::adjust_presets::settings(kind, p, false))
+            .unwrap();
+        let got = photocraft_engine::adjust_params::to_params(&layer(&h).1);
+        for (k, v) in want.as_object().expect("preset settings") {
+            assert_eq!(got[k], *v, "{kind}: the layer's `{k}`");
+        }
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1, "{kind}: one step");
+    }
+}
