@@ -2816,6 +2816,71 @@ fn justify_buttons_are_greyed_on_point_text() {
     assert!(h.get_by_label("Justify all").accesskit_node().is_disabled(), "one of the formatted layers is point text");
 }
 
+/// A box that can't hold its text shows the overflow port (a red “+” at the bottom edge's right
+/// end): `ui.type_box_overflow` is the automation-visible flag. A fitting box (trailing breaks
+/// included) and point text — which has no box — never set it.
+#[test]
+fn the_overflow_port_flags_a_box_that_cannot_hold_its_text() {
+    let build = |mut app: PhotocraftApp, p: serde_json::Value, caret: usize| {
+        let id = app.run("type.create", p).unwrap()["layer"].as_u64().unwrap();
+        app.session.select_layer(LayerId(id)).unwrap();
+        app.ui.text_edit = Some(crate::state::TextEdit {
+            layer: id,
+            document: None,
+            caret,
+            anchor: caret,
+            session: "s".into(),
+            created: false,
+            mask: false,
+            dragging: false,
+            resize: None,
+            preedit: None,
+        });
+        let mut h = harness(1.0, app);
+        h.run_steps(4);
+        h
+    };
+    // In the harness's window a 40 pt box holds 1.5 lines, so the second line is dropped.
+    let mut h = build(new_app(), json!({"text": "ab\ncd\nef", "size": 24, "box": [200, 150, 260, 40]}), 0);
+    assert!(h.state().ui.type_box_overflow, "a box shorter than the text");
+    // The same text in a tall box fits: nothing overflows.
+    h = build(new_app(), json!({"text": "ab cdef gh", "size": 24, "box": [200, 150, 260, 600]}), 0);
+    assert!(!h.state().ui.type_box_overflow, "a fitting box");
+    // Point text has no box: much text is fine.
+    h = build(new_app(), json!({"text": "ab cdef gh ab cdef gh ab cdef gh", "size": 24, "x": 200, "y": 200}), 0);
+    assert!(!h.state().ui.type_box_overflow, "point text");
+}
+
+/// `ui.inspect` reports the overflow port only while an edit session is open: the flag is a
+/// per-frame overlay snapshot, and a commit or cancel can end the session before the overlay
+/// frame that resets the flag — an agent would otherwise read `typeBoxOverflow: true` beside
+/// a null `textEdit`.
+#[test]
+fn inspect_gates_the_overflow_flag_on_the_session() {
+    let mut a = new_app();
+    let id = a.run("type.create", json!({"text": "ab\n.cd", "size": 24, "box": [200, 150, 260, 40]})).unwrap()["layer"].as_u64().unwrap();
+    a.session.select_layer(LayerId(id)).unwrap();
+    a.ui.text_edit = Some(crate::state::TextEdit {
+        layer: id,
+        document: None,
+        caret: 0,
+        anchor: 0,
+        session: "s".into(),
+        created: false,
+        mask: false,
+        dragging: false,
+        resize: None,
+        preedit: None,
+    });
+    // Snapshot state as the overlay wrote it while the session was still open.
+    a.ui.type_box_overflow = true;
+    let ctx = egui::Context::default();
+    assert_eq!(crate::control::inspect(&a, &ctx)["typeBoxOverflow"], json!(true), "an open session reports the overlay's snapshot");
+    // A commit (or cancel) between frames: `textEdit` is gone, so the flag must read as off.
+    a.ui.text_edit = None;
+    assert_eq!(crate::control::inspect(&a, &ctx)["typeBoxOverflow"], json!(false), "no session, no overflow");
+    assert_eq!(crate::control::inspect(&a, &ctx)["textEdit"], json!(null), "the session is closed either way");
+}
 fn ellipse_layer(app: &mut PhotocraftApp) -> u64 {
     app.run("shape.create", json!({"kind": "ellipse", "rect": [200, 200, 400, 300], "fill": "#dddddd"})).unwrap()["layer"].as_u64().unwrap()
 }
