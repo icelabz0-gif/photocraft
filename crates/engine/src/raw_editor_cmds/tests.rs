@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("photocraft-raw-editor-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -21,7 +22,7 @@ fn only_darktable_and_rapidraw_are_editors() {
     let cli = editor_paths("/opt/dt/bin/darktable-cli").unwrap();
     assert_eq!((cli.gui, cli.cli), (PathBuf::from("/opt/dt/bin/darktable"), PathBuf::from("/opt/dt/bin/darktable-cli")));
     let win = editor_paths("/opt/darktable/bin/Darktable.exe").unwrap();
-    assert!(win.cli.to_string_lossy().ends_with("bin/darktable-cli.exe"), "{:?}", win.cli);
+    assert_eq!(win.cli, PathBuf::from("/opt/darktable/bin/darktable-cli.exe"));
     let mac = editor_paths("/Applications/darktable.app").unwrap();
     assert_eq!(mac.cli, PathBuf::from("/Applications/darktable.app/Contents/MacOS/darktable-cli"));
     let rr = editor_paths("/usr/bin/rapidraw").unwrap();
@@ -38,7 +39,8 @@ fn commands_follow_each_editors_manual() {
     let dt = editor_paths("/usr/bin/darktable").unwrap();
     assert_eq!(edit_command(&dt, "/p/a.cr2"), ("/usr/bin/darktable".into(), vec!["/p/a.cr2".to_string()]));
     let (program, args) = develop_command(&dt, "/p/a.cr2", "/t/a.tif");
-    assert_eq!(program, "/usr/bin/darktable-cli");
+    // A path, not a string: Windows joins the sibling with `\`.
+    assert_eq!(Path::new(&program), Path::new("/usr/bin/darktable-cli"));
     assert_eq!(args, ["/p/a.cr2", "/t/a.tif", "--apply-custom-presets", "false", "--core", "--conf", "plugins/imageio/format/tiff/bpp=16"]);
     let rr = editor_paths("/usr/bin/RapidRAW").unwrap();
     let (program, args) = develop_command(&rr, "/p/a.cr2", "/t/a.tif");
