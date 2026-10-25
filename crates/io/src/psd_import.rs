@@ -985,6 +985,7 @@ pub(crate) fn psd_to_document_decoded_integrity(
         ));
     }
     doc.patterns = crate::pattern_map::from_global_blocks(&doc);
+    warnings.extend(crate::pattern_map::unpaintable_warnings(&doc.patterns));
     // Notes (`Anno`) and the measurement scale (resource 1074); raw data stays for verbatim export.
     doc.notes = crate::annotations_map::notes_from_blocks(&doc);
     if crate::annotations_map::anno_unreadable(&doc) {

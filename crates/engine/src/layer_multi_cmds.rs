@@ -5,7 +5,7 @@
 //! The selection itself lives in [`DocState::selected_layers`] (UI state, like the active layer):
 //! changing it never adds a history step. Every structural change below is one history step.
 
-use photocraft_color::PixelFormat;
+use photocraft_color::{PixelFormat, SampleType};
 use photocraft_doc::{Document, Layer, LayerContent, LayerId, VideoData};
 use photocraft_geom::Rect;
 use serde_json::{Value, json};
@@ -1097,14 +1097,80 @@ pub(crate) fn note_insert(s: &mut Session, before: &Document) {
     st.last_damage = step_damage(before, &st.doc);
 }
 
-/// Content bounds used by Align/Distribute: the layer's pixels (type and shape layers use their
-/// rendered pixels), or the union of a group's children. Fill and adjustment layers have none.
+/// Content bounds of a layer's pixels as stored (type and shape layers: their cached render), or
+/// the union of a group's children. Fill and adjustment layers have none. Cheap: Layers list,
+/// artboards, copy and slices call it for every layer.
 pub fn layer_bounds(l: &Layer) -> Option<Rect> {
     let r = match &l.content {
         LayerContent::Group(g) => g.children.iter().filter_map(layer_bounds).fold(Rect::EMPTY, |a, b| a.union(&b)),
         _ => l.surface().map(|s| s.content_bounds()).unwrap_or(Rect::EMPTY),
     };
     (!r.is_empty()).then_some(r)
+}
+
+/// The bounds Align and Distribute move by, in a document of bounds `canvas`: [`layer_bounds`],
+/// except that a shape layer is measured over everything it draws, beyond the canvas too (its
+/// cache is clipped to the canvas, #8660), by rendering it again. Only those commands pay for that
+/// render, once per click; `canvas` is the frame a shape's gradients are laid out in, so an opacity
+/// stop measures as it renders, and `sample` is the document's sample type (see
+/// [`shape_pixel_bounds`]).
+pub(crate) fn align_bounds(l: &Layer, canvas: Rect, sample: SampleType) -> Option<Rect> {
+    let r = match &l.content {
+        LayerContent::Group(g) => g.children.iter().filter_map(|c| align_bounds(c, canvas, sample)).fold(Rect::EMPTY, |a, b| a.union(&b)),
+        LayerContent::Shape(sh) => shape_pixel_bounds(sh, canvas, sample).unwrap_or_else(|| {
+            let cached = l.surface().map(|s| s.content_bounds()).unwrap_or(Rect::EMPTY);
+            // A fill that shows everywhere covers the canvas, rendered yet or not.
+            if cached.is_empty() && unbounded_fill(sh) { canvas } else { cached }
+        }),
+        _ => return layer_bounds(l),
+    };
+    (!r.is_empty()).then_some(r)
+}
+
+/// Whether the shape's fill shows everywhere (an inverted path, or below 100 % density), so it has
+/// no extent of its own.
+fn unbounded_fill(sh: &photocraft_doc::ShapeLayer) -> bool {
+    sh.fill.is_some() && (sh.path.inverted || (sh.density.is_finite() && sh.density < 1.0))
+}
+
+/// Largest area [`shape_pixel_bounds`] renders to find a shape's extent; beyond it the path and
+/// stroke bounds stand in.
+const SHAPE_BOUNDS_MAX_PX: u64 = 64 << 20;
+
+/// Pixels [`shape_pixel_bounds`] renders at a time.
+const SHAPE_BOUNDS_BAND_PX: u64 = 1 << 20;
+
+/// The pixels a shape layer draws, wherever they fall. Its cache is rendered clipped to the
+/// canvas, so a shape partly off the canvas measured from it looked smaller and Align moved it
+/// by the wrong amount, a little more on each click (#8660). The shape is rendered again over
+/// everything it can draw (its path, stroke and feather), unclipped, and measured from that. A fill
+/// that shows everywhere (an inverted path, or below 100 % density) has no extent of its own and
+/// keeps the canvas-clipped measure (`None`).
+fn shape_pixel_bounds(sh: &photocraft_doc::ShapeLayer, canvas: Rect, sample: SampleType) -> Option<Rect> {
+    if unbounded_fill(sh) {
+        return None;
+    }
+    let reach = photocraft_compose::shape_bounds(sh)?.inflate(1);
+    if u64::from(reach.width()) * u64::from(reach.height()) > SHAPE_BOUNDS_MAX_PX {
+        return photocraft_compose::hard_shape_bounds(sh);
+    }
+    // Gradients lay out in the document's frame (as the cached render does); the feather and the
+    // clip cover the shape's whole reach, beyond the canvas too.
+    let shape = photocraft_vector::CompiledShape::with_frames(sh, photocraft_vector::DEFAULT_TOLERANCE, reach, canvas);
+    // Alpha at the document's own precision, as the document stores it: an 8-bit render drops the
+    // faint stroke of a 16-bit or float document (the opaque body then aligns by a different
+    // extent than the document draws), and a float one would find alpha an 8-bit document never
+    // stores. A band of rows at a time keeps the working copy a few MB however large the shape.
+    let format = PixelFormat::new(photocraft_color::ColorMode::Grayscale, sample, true);
+    let band_rows = i32::try_from((SHAPE_BOUNDS_BAND_PX / u64::from(reach.width().max(1))).max(1)).unwrap_or(i32::MAX);
+    let mut bounds = Rect::EMPTY;
+    let mut top = reach.y0;
+    while top < reach.y1 {
+        let bottom = top.saturating_add(band_rows).min(reach.y1);
+        bounds = bounds.union(&shape.render(format, Rect::new(reach.x0, top, reach.x1, bottom)).content_bounds());
+        top = bottom;
+    }
+    (!bounds.is_empty()).then_some(bounds)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1148,7 +1214,7 @@ impl Edge {
 
 /// Selected top-level layers that have content bounds, bottom-to-top.
 fn bounded_selection(doc: &Document, sel: &[LayerId]) -> Vec<(LayerId, Rect)> {
-    top_level(doc, sel).into_iter().filter_map(|id| Some((id, layer_bounds(doc.layer(id)?)?))).collect()
+    top_level(doc, sel).into_iter().filter_map(|id| Some((id, align_bounds(doc.layer(id)?, doc.bounds(), doc.pixel_format().sample)?))).collect()
 }
 
 fn align(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
@@ -2447,6 +2513,89 @@ mod tests {
         }
     }
 
+    /// #8660: a shape partly off the canvas aligns by everything it draws, not the part on the
+    /// canvas, so one click aligns the layers and a second moves nothing.
+    #[test]
+    fn align_uses_a_shape_layers_full_extent_off_the_canvas() {
+        let mut s = session(8);
+        let drawn = |s: &Session, id: LayerId| align_bounds(doc(s).layer(id).unwrap(), doc(s).bounds(), SampleType::U8).unwrap();
+        let shape =
+            LayerId(s.execute("shape.create", json!({"kind": "rect", "rect": [-20, 10, 40, 20], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+        let measured = align_bounds(doc(&s).layer(shape).unwrap(), doc(&s).bounds(), SampleType::U8);
+        assert_eq!(measured, Some(Rect::new(-20, 10, 20, 30)), "Align: the shape's own extent, not the canvas-clipped render");
+        // Everything else keeps the cheap measure of the cached render (no re-render per layer).
+        assert_eq!(bounds(&s, shape), Rect::new(0, 10, 20, 30), "layer_bounds: the cache, clipped to the canvas");
+        let pixels = rect_layer(&mut s, Rect::new(30, 40, 60, 50));
+        select_all(&mut s, &[shape, pixels]);
+        s.execute("layer.align.leftEdges", json!({})).unwrap();
+        assert_eq!(bounds(&s, pixels), Rect::new(-20, 40, 10, 50));
+        assert_eq!(drawn(&s, shape), Rect::new(-20, 10, 20, 30));
+        s.execute("layer.align.leftEdges", json!({})).unwrap();
+        assert_eq!(bounds(&s, pixels), Rect::new(-20, 40, 10, 50), "a second click moves nothing");
+        // Centred: the union is -20..20 wide on the shape's side and 30 px for the pixel layer.
+        s.execute("layer.align.horizontalCenters", json!({})).unwrap();
+        assert_eq!(drawn(&s, shape), Rect::new(-20, 10, 20, 30));
+        assert_eq!(bounds(&s, pixels), Rect::new(-15, 40, 15, 50));
+        // A feathered shape is measured by its soft edge too, which reaches past the path.
+        let soft =
+            LayerId(s.execute("shape.create", json!({"kind": "rect", "rect": [-20, 50, 40, 20], "fill": "#00ff00"})).unwrap()["layer"].as_u64().unwrap());
+        s.edit("feather", |doc, _| {
+            if let Some(LayerContent::Shape(sh)) = doc.layer_mut(soft).map(|l| &mut l.content) {
+                sh.feather = 4.0;
+            }
+            Ok(())
+        })
+        .unwrap();
+        // Measured as Align does, in the document's frame: the feather off the canvas still counts.
+        let b = drawn(&s, soft);
+        assert!(b.x0 < -20 && b.x1 > 20 && b.y0 < 50 && b.y1 > 70, "{b:?}");
+        // A fill that shows everywhere keeps the canvas-clipped measure.
+        s.edit("invert", |doc, _| {
+            if let Some(LayerContent::Shape(sh)) = doc.layer_mut(soft).map(|l| &mut l.content) {
+                sh.feather = 0.0;
+                sh.path.inverted = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let LayerContent::Shape(sh) = &doc(&s).layer(soft).unwrap().content else { panic!("shape") };
+        assert_eq!(shape_pixel_bounds(sh, doc(&s).bounds(), SampleType::U8), None);
+        // Without a cached render yet, such a fill still measures as the canvas, not as empty.
+        let mut uncached = doc(&s).layer(soft).unwrap().clone();
+        if let LayerContent::Shape(sh) = &mut uncached.content {
+            sh.cache = None;
+        }
+        assert_eq!(align_bounds(&uncached, doc(&s).bounds(), SampleType::U8), Some(doc(&s).bounds()));
+    }
+
+    /// Review of #8779: shape extents are measured at the document's own alpha precision. A faint
+    /// stroke (0.001 opacity) is stored by a 16-bit or float document, so it counts in the extent
+    /// and Align moves the opaque body as the document draws it; an 8-bit document stores it as
+    /// nothing, so it does not widen the measure.
+    #[test]
+    fn align_bounds_follow_the_documents_alpha_precision() {
+        for (depth, sample, expected) in [
+            (8, SampleType::U8, Rect::new(60, 60, 120, 120)),
+            (16, SampleType::U16, Rect::new(50, 50, 130, 130)),
+            (32, SampleType::F32, Rect::new(50, 50, 130, 130)),
+        ] {
+            let mut s = session(depth);
+            let id =
+                LayerId(s.execute("shape.create", json!({"kind": "rect", "rect": [60, 60, 60, 60], "fill": "#000000"})).unwrap()["layer"].as_u64().unwrap());
+            s.edit("faint stroke", |doc, _| {
+                if let Some(LayerContent::Shape(sh)) = doc.layer_mut(id).map(|l| &mut l.content) {
+                    sh.stroke = Some(photocraft_doc::ShapeStroke { width: 20.0, opacity: 0.001, ..Default::default() });
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(doc(&s).pixel_format().sample, sample);
+            let LayerContent::Shape(sh) = &doc(&s).layer(id).unwrap().content else { panic!("shape") };
+            assert_eq!(shape_pixel_bounds(sh, doc(&s).bounds(), sample), Some(expected), "depth {depth}");
+            assert_eq!(align_bounds(doc(&s).layer(id).unwrap(), doc(&s).bounds(), sample), Some(expected), "depth {depth}");
+        }
+    }
+
     #[test]
     fn align_single_layer_to_selection() {
         for depth in [8, 16, 32] {
@@ -3439,16 +3588,18 @@ mod layers_panel_parity_tests {
             assert!(mask.is_none() && !vector, "{cmd}: no selection, no path: no mask at all");
         }
 
-        s.execute("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 6})).unwrap();
         for (cmd, params) in KINDS {
+            s.execute("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 6})).unwrap();
             let (mask, vector) = create(&mut s, cmd, params, None);
             let mask = mask.unwrap_or_else(|| panic!("{cmd}: the selection still becomes the layer mask"));
             assert!(!vector, "{cmd}");
             assert!(mask.surface.pixel(6, 6)[0] > 0.99, "{cmd}: inside the selection reveals");
             assert!(mask.surface.pixel(20, 12)[0] < 0.01, "{cmd}: outside the selection hides");
+            assert!(s.active().unwrap().doc.selection.is_none(), "{cmd}: the selection went into the mask (#8801)");
         }
 
         // An explicit path wins over the selection, as with the option on.
+        s.execute("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 6})).unwrap();
         for selected in [true, false] {
             if !selected {
                 s.execute("select.deselect", json!({})).unwrap();
