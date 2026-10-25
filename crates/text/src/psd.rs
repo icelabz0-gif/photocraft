@@ -687,6 +687,9 @@ pub(crate) fn char_style(base: &[Option<&E>], d: &E, fonts: &[String], k: f32) -
         Some(2) => FontBaseline::Subscript,
         _ => FontBaseline::Normal,
     };
+    // Vertical type's roman text: 2 rotated along the column, 1 upright (#9470). A run without
+    // its own value takes the style sheet's, which Photoshop writes as 2.
+    s.rotate_roman = g("BaselineDirection").and_then(E::as_i64) == Some(2);
     if let Some(c) = g("FillColor") {
         // Positions matter (alpha, then the channels): a non-finite entry voids the colour.
         let v: Vec<f64> = c.get("Values").and_then(E::as_array).map(|a| a.iter().filter_map(E::as_f64).collect()).unwrap_or_default();
@@ -930,6 +933,7 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
                 FontBaseline::Subscript => 2,
             }),
         ),
+        ("BaselineDirection".into(), E::Int(if s.rotate_roman { 2 } else { 1 })),
         ("Underline".into(), E::Bool(s.underline)),
         ("Strikethrough".into(), E::Bool(s.strikethrough)),
         ("Ligatures".into(), E::Bool(s.ligatures)),
@@ -1913,6 +1917,25 @@ mod nonfinite_tests {
         assert_eq!(para_style(&[], &d, 1.0).start_indent_pt, 0.0);
         let d = parse(b"<< /FontSize 24.0 >>").unwrap();
         assert_eq!(char_style(&[], &d, &[], 1.0).size_pt, 24.0);
+    }
+
+    /// #9470: `BaselineDirection` sets vertical type's roman text upright (1, what Photoshop's
+    /// Vertical Type tool writes in the run) or rotated (2); a run without one takes the style
+    /// sheet's (Photoshop's default sheet says 2). It is written back.
+    #[test]
+    fn baseline_direction_round_trips() {
+        let sheet = parse(b"<< /BaselineDirection 2 >>").unwrap();
+        let upright = parse(b"<< /BaselineDirection 1 >>").unwrap();
+        assert!(!char_style(&[Some(&sheet)], &upright, &[], 1.0).rotate_roman, "the run's own value wins");
+        let plain = parse(b"<< /FontSize 24.0 >>").unwrap();
+        assert!(char_style(&[Some(&sheet)], &plain, &[], 1.0).rotate_roman, "else the sheet's");
+        assert!(!char_style(&[], &plain, &[], 1.0).rotate_roman, "none at all: upright");
+        for rotate in [false, true] {
+            let s = CharStyle { rotate_roman: rotate, ..Default::default() };
+            let data = style_sheet_data(&s, 0, 1.0);
+            assert_eq!(data.get("BaselineDirection").and_then(E::as_i64), Some(if rotate { 2 } else { 1 }));
+            assert_eq!(char_style(&[Some(&sheet)], &data, &[], 1.0).rotate_roman, rotate);
+        }
     }
 
     /// #5645: `FontBaseline` (1 superscript, 2 subscript) is read and written back.

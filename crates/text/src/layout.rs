@@ -10,8 +10,10 @@
 //! into text space: a line becomes a column running top to bottom, and successive columns advance
 //! right to left. Within a column, CJK characters stay upright (centred on the column, placed with
 //! the font's vertical metrics: `VORG`, `vhea`/`vmtx`, else the ideographic em box) and use the
-//! font's vertical alternates (`vert`) for punctuation, brackets and the long-vowel mark; other
-//! text (Latin, digits) runs rotated 90° clockwise, Photoshop's default. Lines, clusters, carets
+//! font's vertical alternates (`vert`) for punctuation, brackets and the long-vowel mark. Other
+//! text (Latin, digits) stands upright one character per em too, as Photoshop's Vertical Type tool
+//! sets it, or runs rotated 90° clockwise where its style says so (`CharStyle::rotate_roman`,
+//! PSD `BaselineDirection` 2; #9470). Lines, clusters, carets
 //! and hit tests stay in line space; [`TextLayout::to_text`] / [`TextLayout::to_line`] convert.
 
 use std::borrow::Cow;
@@ -608,8 +610,30 @@ impl Layouter {
             let fallback: Vec<String> = fonts.fallback_stack().map(str::to_string).collect();
             let si0 = style_at(prange.start);
             let si_end = run_starts.partition_point(|&rs| rs < content_end).max(si0 + 1).min(out.styles.len());
-            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px).
-            let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32]| -> Layout<RunBrush> {
+            // Vertical type's upright roman characters (#9470), as byte ranges in `ptext` with their
+            // letter spacing (px) and em (px): each takes one em down the column, as Photoshop
+            // sets them, where shaping gives it its horizontal advance.
+            let mut roman: Vec<(Range<usize>, f32, f32, usize)> = Vec::new();
+            if vertical {
+                for (ri, st) in out.styles.iter().enumerate().take(si_end).skip(si0) {
+                    let rs = run_starts[ri];
+                    let (a, z) = (rs.max(prange.start), (rs + runs[ri].len).min(content_end));
+                    if a >= z || st.rotate_roman {
+                        continue;
+                    }
+                    let base = a - prange.start + prefix.len();
+                    let piece = ptext.get(base..base + (z - a)).unwrap_or("");
+                    let px = st.size_pt * k;
+                    for (i, ch) in piece.char_indices() {
+                        if upright_roman(ch) && !ch.is_whitespace() {
+                            roman.push(((base + i)..(base + i + ch.len_utf8()), st.tracking / 1000.0 * px, px, ri));
+                        }
+                    }
+                }
+            }
+            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px)
+            // and each upright roman character by its spacing in `roman_spacing` (px).
+            let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32], roman_spacing: &[f32]| -> Layout<RunBrush> {
                 let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
                 // Paragraph-start style as the default (covers the direction mark and empty
                 // paragraphs), then every run piece intersecting this paragraph.
@@ -647,7 +671,11 @@ impl Layouter {
                             b.push(StyleProperty::Brush(RunBrush(ri as u32, cls as u8)), r);
                         };
                         for (i, ch) in piece.char_indices() {
-                            let cls = vertical_class(ch);
+                            // Roman text stands upright too unless the run rotates it (#9470).
+                            let cls = match vertical_class(ch) {
+                                VClass::Rotate if !st.rotate_roman && upright_roman(ch) => VClass::Upright,
+                                cls => cls,
+                            };
                             match seg {
                                 Some((_, c)) if c == cls => {}
                                 Some((from, c)) => {
@@ -672,6 +700,14 @@ impl Layouter {
                 }
                 for (&at, &spacing) in tabs.iter().zip(tab_spacing) {
                     b.push(StyleProperty::LetterSpacing(spacing), at..at + 1);
+                }
+                for ((range, _, _, ri), &spacing) in roman.iter().zip(roman_spacing) {
+                    b.push(StyleProperty::LetterSpacing(spacing), range.clone());
+                    // Pair kerning is horizontal: none between letters stacked upright. Nor ligatures:
+                    // each letter stands alone, one per em.
+                    let mut feats = feature_list(&out.styles[*ri], small_caps[*ri]);
+                    feats.extend(["kern", "liga", "clig", "dlig"].map(|f| format!("\"{f}\" 0")));
+                    b.push(StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))), range.clone());
                 }
                 b.build(&ptext)
             };
@@ -728,14 +764,23 @@ impl Layouter {
             // Break again with the tab widths that layout gives until they agree; if they don't
             // settle, keep the safe layout.
             let wide = if wraps { tab_px } else { 0.0 };
-            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()]);
+            let mut roman_spacing: Vec<f32> = roman.iter().map(|r| r.1).collect();
+            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &roman_spacing);
+            if !roman.is_empty() {
+                // Shaped advances (with the letter spacing) → spacing that makes each one em. The
+                // clusters are read from broken lines; the real break follows the rebuild.
+                let _ = break_lines(&mut layout);
+                let advances = cluster_advances(&layout, &roman);
+                roman_spacing = roman.iter().zip(&advances).map(|((_, track, em, _), a)| a.map_or(*track, |a| em + track - (a - track))).collect();
+                layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &roman_spacing);
+            }
             let (mut area_slots, mut area_full) = break_lines(&mut layout);
             if wraps && !tabs.is_empty() {
                 let first = tab_widths(&layout, &tabs, &out.styles, indent_start, first_indent, tab_px);
                 let mut want: Vec<f32> = first.iter().map(|t| t.width).collect();
                 for _ in 0..4 {
                     let spacing: Vec<f32> = first.iter().zip(&want).map(|(t, w)| w / t.scale - (t.advance - tab_px)).collect();
-                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing);
+                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing, &roman_spacing);
                     let (next_slots, next_full) = break_lines(&mut next);
                     let got: Vec<f32> = tab_widths(&next, &tabs, &out.styles, indent_start, first_indent, tab_px).iter().map(|t| t.width).collect();
                     if got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01) {
@@ -1375,6 +1420,31 @@ struct TabWidth {
     advance: f32,
     scale: f32,
     width: f32,
+}
+
+/// Whether vertical type sets `c` upright when its style doesn't rotate roman text (#9470): the
+/// rotating class except half-width katakana and Hangul, which keep their rotated setting.
+fn upright_roman(c: char) -> bool {
+    vertical_class(c) == VClass::Rotate && !(0xFF61..=0xFFDC).contains(&(c as u32))
+}
+
+/// The shaped advance (px, letter spacing included) of the cluster starting each of `ranges`
+/// (sorted byte ranges of the shaped text), `None` where no cluster starts there.
+fn cluster_advances(layout: &Layout<RunBrush>, ranges: &[(Range<usize>, f32, f32, usize)]) -> Vec<Option<f32>> {
+    let mut out = vec![None; ranges.len()];
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            for c in gr.run().visual_clusters() {
+                if let Ok(i) = ranges.binary_search_by_key(&c.text_range().start, |r| r.0.start) {
+                    out[i] = Some(c.advance());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The width of each tab (offsets `tabs` in the paragraph text) on the broken lines of `layout`,
