@@ -228,7 +228,9 @@ fn main() {
                     let (live, refresh, composite): (f64, f64, f64) = (r.live.iter().sum(), r.refresh.iter().sum(), r.composite.iter().sum());
                     let gpu_ms = if r.gpu.is_empty() { f64::NAN } else { r.gpu.iter().sum::<f64>() * r.composite.len() as f64 / r.gpu.len() as f64 };
                     per.push([r.begin + live, refresh, composite, gpu_ms, r.release, r.uploads as f64]);
-                    if r.kinds.iter().any(|k| !k.starts_with("gpu")) {
+                    // A GPU canvas that fell back (to `rect` uploads, say) is worth a note; the CPU
+                    // canvas (`--cpu`, or no adapter) always refreshes as `cpu`, which is not.
+                    if gpu.is_some() && r.kinds.iter().any(|k| !k.starts_with("gpu")) {
                         errors
                             .push(json!({"canvas": [w, h], "note": format!("refresh kinds {:?}", r.kinds.iter().collect::<std::collections::BTreeSet<_>>())}));
                     }
