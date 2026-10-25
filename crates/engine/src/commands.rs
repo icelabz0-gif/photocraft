@@ -452,7 +452,7 @@ fn new_adjustment(s: &mut Session, adj: Adjustment, p: &Value, cmd: &str) -> Res
     let id = s.edit(&label, |doc, active| {
         let mut l = Layer::new(doc.next_layer_name(&name), LayerContent::Adjustment(adj));
         mask_new_layer(doc, &mut l, p, cmd, true)?;
-        let id = doc.insert_above(*active, l);
+        let id = doc.insert_new(*active, l);
         *active = Some(id);
         Ok(id)
     })?;
@@ -1071,7 +1071,7 @@ fn build() -> Vec<CommandSpec> {
                     let fill = Fill::Solid(Color::rgba(c[0], c[1], c[2], c[3])).in_mode(doc.mode);
                     let mut l = Layer::new(doc.next_layer_name("Color Fill"), LayerContent::Fill(fill));
                     mask_new_layer(doc, &mut l, p, "layer.newFillLayer.solidColor", default_mask)?;
-                    let id = doc.insert_above(*active, l);
+                    let id = doc.insert_new(*active, l);
                     *active = Some(id);
                     Ok(id)
                 })?;
@@ -1103,7 +1103,7 @@ fn build() -> Vec<CommandSpec> {
                     .in_mode(doc.mode);
                     let mut l = Layer::new(doc.next_layer_name("Gradient Fill"), LayerContent::Fill(fill));
                     mask_new_layer(doc, &mut l, p, "layer.newFillLayer.gradient", default_mask)?;
-                    let id = doc.insert_above(*active, l);
+                    let id = doc.insert_new(*active, l);
                     *active = Some(id);
                     Ok(id)
                 })?;

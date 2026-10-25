@@ -190,6 +190,20 @@ impl Document {
         let top = self.layers.get(*path.first()?)?;
         top.artboard().map(|_| top.id)
     }
+    /// Insert a new layer where Photoshop puts one made while `active` is selected: on top of a
+    /// selected artboard's contents (so the board clips it), else directly above `active`
+    /// ([`Self::insert_above`]).
+    pub fn insert_new(&mut self, active: Option<LayerId>, layer: Layer) -> LayerId {
+        let board = active.filter(|a| self.layer(*a).is_some_and(|l| l.artboard().is_some()));
+        match board.and_then(|b| self.layer_mut(b)).and_then(Layer::children_mut) {
+            Some(children) => {
+                let id = layer.id;
+                children.push(layer);
+                id
+            }
+            None => self.insert_above(active, layer),
+        }
+    }
 }
 
 impl Layer {
