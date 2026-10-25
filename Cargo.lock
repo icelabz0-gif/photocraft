@@ -1309,7 +1309,7 @@ dependencies = [
 [[package]]
 name = "craft-blitter"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=759520ced7dc28dd829a479780b8a33ec7f977de#759520ced7dc28dd829a479780b8a33ec7f977de"
+source = "git+https://github.com/storytold/craft-libs?rev=07d1f07458b73ca23d4f26c035f60e11a1e806c7#07d1f07458b73ca23d4f26c035f60e11a1e806c7"
 dependencies = [
  "rayon",
 ]
