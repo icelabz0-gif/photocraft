@@ -238,11 +238,12 @@ impl<'a> Archive<'a> {
                     let raw = c.take(len)?;
                     // Only the first name per id is kept: charge and copy just that one.
                     if let std::collections::hash_map::Entry::Vacant(slot) = names.entry(id) {
-                        name_bytes = name_bytes.saturating_add(len);
+                        let name = String::from_utf8_lossy(raw).into_owned();
+                        name_bytes = name_bytes.saturating_add(name.len());
                         if name_bytes > MAX_NAME_BYTES {
                             return Err(Error::Limit("archive entry names too large"));
                         }
-                        slot.insert(String::from_utf8_lossy(raw).into_owned());
+                        slot.insert(name);
                     }
                 }
                 // Equal dates: the first table in the chain (the newest) wins, as in afread.

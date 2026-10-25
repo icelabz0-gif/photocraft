@@ -620,8 +620,14 @@ impl Reader<'_, '_, '_> {
         let s = self.s;
         if let Some(md) = s.obj(spread, b"SpMd") {
             self.charge_slots(s.array_len(md, b"PagR").unwrap_or(0))?;
-            let v: Vec<Rect> =
-                s.objs(md, b"PagR").into_iter().filter_map(|p| s.floats::<4>(p, b"rctp").map(rect)).filter(|r| r.x1 > r.x0 && r.y1 > r.y0).collect();
+            let remaining = MAX_PAGES.saturating_sub(self.pages);
+            let v: Vec<Rect> = s
+                .objs(md, b"PagR")
+                .into_iter()
+                .filter_map(|p| s.floats::<4>(p, b"rctp").map(rect))
+                .filter(|r| r.x1 > r.x0 && r.y1 > r.y0)
+                .take(remaining.saturating_add(1))
+                .collect();
             if !v.is_empty() {
                 self.charge_pages(v.len())?;
                 return Ok(v);
