@@ -145,6 +145,8 @@ pub struct Metadata {
     /// Photoshop layer data (TIFF tag 37724 `ImageSourceData`): a layered TIFF's layers. Kept
     /// opaque here; `photocraft-io` reads and writes it through `photocraft-psd`.
     pub photoshop_layers: Option<Vec<u8>>,
+    /// IPTC-NAA record (TIFF tag 33723, Photoshop resource 1028), kept opaque.
+    pub iptc: Option<Vec<u8>>,
 }
 
 impl Metadata {
@@ -155,6 +157,7 @@ impl Metadata {
             && self.text.is_empty()
             && self.photoshop_resources.is_none()
             && self.photoshop_layers.is_none()
+            && self.iptc.is_none()
     }
 }
 

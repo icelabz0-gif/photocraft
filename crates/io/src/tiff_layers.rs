@@ -81,6 +81,9 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     if let Some(exif) = &img.meta.exif {
         set_resource(&mut resources, ids::EXIF, Some(exif.clone()));
     }
+    if let Some(iptc) = &img.meta.iptc {
+        set_resource(&mut resources, ids::IPTC_NAA, Some(iptc.clone()));
+    }
 
     // The TIFF's pixels become the PSD's merged image: planar, big-endian, CMYK inverted.
     let img = if img.sample_type() == CSample::F16 {
@@ -249,10 +252,11 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions, ctl: &photocr
     ctl.check().map_err(|_| IoError::Cancelled)?;
     ctl.progress(TIFF_LAYERS_DONE);
     warnings.extend(w.into_iter().map(|w| format!("layer data: {w}")));
-    // The profile and XMP are written as TIFF tags, not as resources. EXIF stays a resource
+    // The profile, XMP and IPTC are written as TIFF tags, not as resources. EXIF stays a resource
     // (1058), which the PSD importer reads back unchanged; a block rebuilt from the TIFF's own
     // Exif directory keeps only the Exif, GPS and descriptive tags.
-    let resources: Vec<ImageResource> = file.resources.iter().filter(|r| !matches!(r.id, ids::ICC_PROFILE | ids::XMP)).cloned().collect();
+    let resources: Vec<ImageResource> = file.resources.iter().filter(|r| !matches!(r.id, ids::ICC_PROFILE | ids::XMP | ids::IPTC_NAA)).cloned().collect();
+    let iptc = file.resources.iter().find(|r| r.id == ids::IPTC_NAA).map(|r| r.data.clone());
     let resources = resources_to_bytes(&resources)?;
 
     let fmt = doc.pixel_format();
@@ -282,6 +286,8 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions, ctl: &photocr
         dpi: Some((doc.resolution_dpi, doc.resolution_dpi)),
         photoshop_resources: Some(resources),
         photoshop_layers: Some(layers),
+        // Tag 33723, where Photoshop keeps it (#9099).
+        iptc: iptc.filter(|_| opts.xmp == crate::XmpEmbed::All),
         ..Default::default()
     };
     encode_image(&img, Format::Tiff, opts, warnings)

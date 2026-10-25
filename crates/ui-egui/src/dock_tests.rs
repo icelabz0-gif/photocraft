@@ -351,6 +351,28 @@ fn a_single_tab_click_expands_a_collapsed_panel() {
     }
 }
 
+/// #9083: double-clicking a tab of an expanded group collapses it, whichever tab it is.
+#[test]
+fn double_clicking_a_tab_collapses_an_expanded_panel() {
+    for tab_index in [0, 1] {
+        let (mut app, _, _) = app_with_layers();
+        app.ui.dock_tabs.color = 0;
+        let mut h = harness(app, vec2(1200.0, 800.0), ThemeKind::ProMedium);
+        assert!(!h.state().ui.dock.is_collapsed(Group::Color));
+        let tab = last_strips(&h.ctx).iter().find(|s| s.group == Group::Color).unwrap().tabs.iter().find(|(i, _)| *i == tab_index).unwrap().1.center();
+        h.event(egui::Event::PointerMoved(tab));
+        h.run_steps(1);
+        for _ in 0..2 {
+            h.event(egui::Event::PointerButton { pos: tab, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+            h.step();
+            h.event(egui::Event::PointerButton { pos: tab, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+        assert!(h.state().ui.dock.is_collapsed(Group::Color), "tab {tab_index}");
+    }
+}
+
 /// Auto-Collapse Iconic Panels: a group expanded by clicking a tab on its collapsed strip
 /// closes again when the next click lands outside it; with the preference off it stays open.
 #[test]

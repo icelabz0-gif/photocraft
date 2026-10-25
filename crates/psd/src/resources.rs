@@ -8,6 +8,8 @@ use crate::io::{Reader, WriteExt, read_pascal, write_pascal};
 pub mod ids {
     /// Resolution info (`ResolutionInfo` structure).
     pub const RESOLUTION_INFO: u16 = 1005;
+    /// IPTC-NAA record.
+    pub const IPTC_NAA: u16 = 1028;
     /// Target layer index.
     pub const LAYER_STATE: u16 = 1024;
     /// Layer group ids (one u16 per layer).

@@ -45,6 +45,8 @@ use crate::options::{EncodeOptions, Limits, TiffCompression};
 
 const F: Format = Format::Tiff;
 const TAG_XMP: u16 = 700;
+/// IPTC-NAA record.
+const TAG_IPTC: u16 = 33723;
 /// Photoshop image resources (`8BIM` blocks).
 const TAG_PHOTOSHOP: u16 = 34377;
 /// Photoshop `ImageSourceData`: the layers of a layered TIFF.
@@ -273,7 +275,8 @@ fn metadata(f: &File<'_>, dir: &Ifd, icc: &mut Option<Vec<u8>>) -> Metadata {
         let s = std::str::from_utf8(b).ok()?.trim_end_matches('\0');
         (!s.is_empty()).then(|| s.to_owned())
     };
-    let mut meta = Metadata { xmp: text(TAG_XMP), ..Default::default() };
+    let iptc = f.tag_bytes(dir, TAG_IPTC).filter(|b| !b.is_empty()).map(<[u8]>::to_vec);
+    let mut meta = Metadata { xmp: text(TAG_XMP), iptc, ..Default::default() };
     let unit = f.tag_uint(dir, Tag::ResolutionUnit.to_u16()).unwrap_or(2);
     if let (Some(x), Some(y)) = (f.tag_f64(dir, Tag::XResolution.to_u16()), f.tag_f64(dir, Tag::YResolution.to_u16()))
         && x > 0.0
@@ -1077,6 +1080,7 @@ struct TagSet<'a> {
     /// The EXIF block's directories and IFD0 tags, written as the TIFF's own.
     exif: Option<ExifDirs>,
     xmp: Option<&'a [u8]>,
+    iptc: Option<&'a [u8]>,
     dpi: Option<(f32, f32)>,
     text: Vec<(Tag, &'a str)>,
     alpha: bool,
@@ -1118,6 +1122,9 @@ where
     }
     if let Some(xmp) = tags.xmp {
         d.write_tag(Tag::Unknown(TAG_XMP), xmp)?;
+    }
+    if let Some(iptc) = tags.iptc {
+        d.write_tag(Tag::Unknown(TAG_IPTC), Undefined(iptc))?;
     }
     for (tag, s) in &tags.text {
         d.write_tag(*tag, *s)?;
@@ -1193,7 +1200,7 @@ const CLASSIC_LIMIT: u64 = u32::MAX as u64;
 /// An upper estimate of the file size: the uncompressed samples plus every tag payload plus
 /// room for the directory and strip tables.
 fn estimated_size(img: &Image, tags: &TagSet<'_>) -> u64 {
-    let payloads = [tags.icc, tags.xmp, tags.photoshop_resources, tags.photoshop_layers].iter().flatten().map(|p| p.len() as u64).sum::<u64>();
+    let payloads = [tags.icc, tags.xmp, tags.iptc, tags.photoshop_resources, tags.photoshop_layers].iter().flatten().map(|p| p.len() as u64).sum::<u64>();
     let text = tags.text.iter().map(|(_, s)| s.len() as u64).sum::<u64>()
         + tags.exif.iter().flat_map(|e| e.ifd0.iter().chain(&e.exif).chain(&e.gps)).map(|f| f.value.len() as u64 + 12).sum::<u64>();
     // Strip tables: one offset and one count per strip of about 1 MB.
@@ -1230,6 +1237,7 @@ pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Ve
         icc: if opts.embed_icc { img.icc.as_deref() } else { None },
         exif: if opts.embed_metadata { img.meta.exif.as_deref().and_then(|e| tiff_exif::read(crate::orientation::tiff_body(e))) } else { None },
         xmp: xmp.as_deref().map(str::as_bytes),
+        iptc: if opts.embed_metadata { img.meta.iptc.as_deref().filter(|i| !i.is_empty()) } else { None },
         dpi: if opts.embed_metadata { img.meta.dpi.filter(|d| d.0 > 0.0 && d.1 > 0.0) } else { None },
         text,
         alpha: img.layout().has_alpha(),

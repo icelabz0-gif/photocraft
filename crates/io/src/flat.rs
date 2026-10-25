@@ -284,6 +284,10 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
     doc.metadata.exif = img.meta.exif.clone().map(Arc::new);
     doc.metadata.xmp = img.meta.xmp.as_deref().map(Arc::from);
     doc.metadata.text = img.meta.text.clone();
+    // Kept as Photoshop resource 1028, as a PSD keeps it (#9099).
+    if let Some(iptc) = &img.meta.iptc {
+        doc.metadata.psd_resources.push((photocraft_psd::resources::ids::IPTC_NAA, String::new(), Arc::new(iptc.clone())));
+    }
     if let Some((x, y)) = img.meta.dpi {
         doc.resolution_dpi = x;
         warnings.extend(crate::unequal_resolution_warning(f64::from(x), f64::from(y)));
@@ -490,6 +494,7 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
         xmp: doc.metadata.xmp.as_deref().map(str::to_owned),
         text: doc.metadata.text.clone(),
         dpi: Some((doc.resolution_dpi, doc.resolution_dpi)),
+        iptc: doc.metadata.psd_resources.iter().find(|(id, ..)| *id == photocraft_psd::resources::ids::IPTC_NAA).map(|(.., data)| data.to_vec()),
         ..Default::default()
     };
     Ok(img.with_icc(icc).with_meta(meta))
@@ -633,8 +638,9 @@ pub(crate) fn export_flat_with(doc: &Document, format: Format, opts: &ExportOpti
         // Export As's Metadata: None: the packet lists the text of every type layer and one id
         // per placed document (#647).
         img.meta.xmp = None;
-        // Free-form descriptions can contain the same sensitive text as an XMP packet.
+        // Free-form descriptions (and IPTC captions) can contain the same sensitive text.
         img.meta.text.clear();
+        img.meta.iptc = None;
     }
     if img.layout().has_alpha() && !format.caps().alpha {
         // Flattened over white, as saving a transparent document without transparency does.
