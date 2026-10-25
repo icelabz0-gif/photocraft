@@ -49,6 +49,9 @@ pub struct CropState {
     /// `UiState::crop_rect` is the untouched default frame ([`ensure_frame`]): a drag inside it
     /// draws a new frame (as in Photoshop) instead of moving it, and committing it does nothing.
     pub default_frame: bool,
+    /// The frame is what the crop menu's Reset made it ([`reset`]): the whole canvas, still a
+    /// pending frame, but committing it crops nothing as long as it still matches the bounds.
+    pub reset_frame: bool,
     /// The document (index and size) the default frame was made for.
     frame_for: Option<(usize, u32, u32)>,
     /// The frame is being edited (pressed since it was made): the canvas shows what lies past it.
@@ -71,6 +74,7 @@ struct CropStep {
     rect: Option<[f64; 4]>,
     angle: f64,
     default_frame: bool,
+    reset_frame: bool,
 }
 
 /// A crop gesture in progress. Rects are `[x0, y0, x1, y1]` in document coordinates.
@@ -386,6 +390,7 @@ fn frame(app: &mut PhotocraftApp) {
     }
     app.ui.crop_rect = Some([f64::from(r.x0), f64::from(r.y0), f64::from(r.x1), f64::from(r.y1)]);
     app.crop.default_frame = true;
+    app.crop.reset_frame = false;
     app.crop.frame_for = key;
     app.crop.editing = false;
     app.crop.undo.clear();
@@ -427,10 +432,23 @@ pub fn cancel(app: &mut PhotocraftApp) {
     app.ui.crop_angle = 0.0;
     app.crop.drag = None;
     app.crop.default_frame = false;
+    app.crop.reset_frame = false;
     app.crop.frame_for = None;
     app.crop.editing = false;
     clear_history(app);
     crate::crop_straighten::reset(app);
+}
+
+/// Reset the pending frame to the whole canvas, upright (the crop menu's Reset, #6561). The frame
+/// stays a real pending one, so ↵ on it crops nothing and the tool keeps behaving as during a crop.
+pub fn reset(app: &mut PhotocraftApp) {
+    let Some(st) = app.session.active() else { return };
+    let b = st.doc.bounds();
+    app.ui.crop_angle = 0.0;
+    keyed(app, [f64::from(b.x0), f64::from(b.y0), f64::from(b.x1), f64::from(b.y1)]);
+    app.crop.reset_frame = true;
+    crate::crop_mode::sync(app, None);
+    crate::crop_mode::sync_frame(app);
 }
 
 /// Drop the box's own Undo/Redo (leaving the tool, cancelling or committing a crop).
@@ -442,7 +460,7 @@ pub fn clear_history(app: &mut PhotocraftApp) {
 
 /// The frame's current state, as an undo step.
 fn step_of(app: &PhotocraftApp) -> CropStep {
-    CropStep { rect: app.ui.crop_rect, angle: app.ui.crop_angle, default_frame: app.crop.default_frame }
+    CropStep { rect: app.ui.crop_rect, angle: app.ui.crop_angle, default_frame: app.crop.default_frame, reset_frame: app.crop.reset_frame }
 }
 
 /// Put a frame state back.
@@ -450,6 +468,7 @@ fn apply_step(app: &mut PhotocraftApp, s: CropStep) {
     app.ui.crop_rect = s.rect;
     app.ui.crop_angle = s.angle;
     app.crop.default_frame = s.default_frame;
+    app.crop.reset_frame = s.reset_frame;
 }
 
 /// The pending frame, its box Undo/Redo and the view's turn, kept while `image.crop` runs so a
@@ -676,6 +695,7 @@ fn keyed(app: &mut PhotocraftApp, r: [f64; 4]) {
     if r.iter().all(|v| v.is_finite()) {
         app.ui.crop_rect = Some(r);
         app.crop.default_frame = false;
+        app.crop.reset_frame = false;
         app.crop.editing = true;
     }
 }
@@ -835,6 +855,11 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool 
                 && !matches!(drag, CropDrag::MoveImage { rect, .. } if app.ui.crop_rect == Some(rect));
             if ok && changed {
                 app.crop.default_frame = false;
+                // Only a gesture that actually moved the frame ends Reset's no-op: a click inside
+                // the reset frame, or on a handle, without a change keeps it an intentional no-op.
+                if !matches!(drag, CropDrag::Move { rect, .. } | CropDrag::Resize { rect, .. } if app.ui.crop_rect == Some(rect)) {
+                    app.crop.reset_frame = false;
+                }
             }
             match drag {
                 CropDrag::Draw { prev, .. } if !ok => app.ui.crop_rect = prev,
@@ -1758,6 +1783,106 @@ mod tests {
         assert_eq!(app.session.active().unwrap().doc.size, Size::new(60, 40));
         assert_eq!(crate::crop_mode::view_rotation(&app), 0.0);
         assert_eq!((app.ui.tool, app.ui.crop_rect), (Tool::Brush, None));
+    }
+
+    /// #6561: the crop menu's Reset leaves a pending full-canvas frame; committing it is a no-op:
+    /// no history step, and with Delete Cropped Pixels on, layer pixels past the canvas survive.
+    #[test]
+    fn reset_then_commit_crops_nothing() {
+        let mut app = app(SampleType::U8);
+        app.ui.tool_options.crop_delete = true;
+        // A layer whose pixels reach past the right edge: a full-canvas crop with delete would
+        // trim them.
+        app.run("layer.new.layer", json!({"name": "over"})).unwrap();
+        app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        app.run("layer.translate", json!({"dx": 40, "dy": 0})).unwrap();
+        let over = app.session.active().unwrap().doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        let past = over.surface().unwrap().content_bounds().x1;
+        assert!(past > 200, "the layer reaches past the canvas: {past}");
+        // A drawn frame, then Reset: the whole canvas again, still pending.
+        drag(&mut app, &[[10.0, 10.0], [50.0, 40.0]], NONE);
+        reset(&mut app);
+        assert_eq!(app.ui.crop_rect, Some([0.0, 0.0, 200.0, 100.0]));
+        assert!(pending(&app), "Reset keeps the crop pending");
+        let steps = app.session.active().unwrap().history.past_len();
+        crate::canvas::commit_crop(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!((st.doc.size, st.history.past_len()), (Size::new(200, 100), steps), "a reset frame commits as a no-op");
+        assert!(app.ui.crop_rect.is_none(), "the frame is gone");
+        let over = st.doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        assert_eq!(over.surface().unwrap().content_bounds().x1, past, "pixels outside the canvas are kept");
+    }
+
+    /// #6561: Undo after Reset restores the reset frame *as* a reset frame: committing it is
+    /// still a no-op, not a full-canvas `image.crop` that trims pixels outside the canvas.
+    #[test]
+    fn reset_edit_undo_then_commit_crops_nothing() {
+        let mut app = app(SampleType::U8);
+        app.ui.tool_options.crop_delete = true;
+        app.run("layer.new.layer", json!({"name": "over"})).unwrap();
+        app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        app.run("layer.translate", json!({"dx": 40, "dy": 0})).unwrap();
+        let over = app.session.active().unwrap().doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        let past = over.surface().unwrap().content_bounds().x1;
+        assert!(past > 200, "the layer reaches past the canvas: {past}");
+        // Reset, then a gesture that shrinks the frame, then Undo back to the reset frame.
+        reset(&mut app);
+        drag(&mut app, &[[0.0, 0.0], [50.0, 40.0]], NONE);
+        assert_eq!(app.ui.crop_rect, Some([50.0, 40.0, 200.0, 100.0]), "the corner drag resizes the frame");
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.ui.crop_rect, Some([0.0, 0.0, 200.0, 100.0]), "Undo restores the reset frame");
+        assert!(pending(&app));
+        let steps = app.session.active().unwrap().history.past_len();
+        crate::canvas::commit_crop(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!((st.doc.size, st.history.past_len()), (Size::new(200, 100), steps), "the undone reset frame commits as a no-op");
+        assert!(app.ui.crop_rect.is_none(), "the frame is gone");
+        let over = st.doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        assert_eq!(over.surface().unwrap().content_bounds().x1, past, "pixels outside the canvas are kept");
+    }
+
+    /// A click inside the reset frame that doesn't move it is not an edit: Reset stays an
+    /// intentional no-op, so Commit crops nothing.
+    #[test]
+    fn reset_then_a_still_click_keeps_the_no_op() {
+        let mut app = app(SampleType::U8);
+        app.ui.tool_options.crop_delete = true;
+        app.run("layer.new.layer", json!({"name": "over"})).unwrap();
+        app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        app.run("layer.translate", json!({"dx": 40, "dy": 0})).unwrap();
+        reset(&mut app);
+        drag(&mut app, &[[100.0, 50.0], [100.0, 50.0]], NONE);
+        assert!(app.crop.reset_frame, "a click without a frame change keeps the reset marker");
+        let steps = app.session.active().unwrap().history.past_len();
+        crate::canvas::commit_crop(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!((st.doc.size, st.history.past_len()), (Size::new(200, 100), steps), "the click leaves the no-op");
+    }
+
+    /// After Reset, a gesture that really moves the frame ends the no-op — even when a later
+    /// gesture brings the frame back to the full bounds: Commit then crops for real, and with
+    /// Delete Cropped Pixels the off-canvas pixels go.
+    #[test]
+    fn reset_then_frame_edit_back_to_bounds_commits_a_real_crop() {
+        let mut app = app(SampleType::U8);
+        app.ui.tool_options.crop_delete = true;
+        app.run("layer.new.layer", json!({"name": "over"})).unwrap();
+        app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        app.run("layer.translate", json!({"dx": 40, "dy": 0})).unwrap();
+        let over = app.session.active().unwrap().doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        let past = over.surface().unwrap().content_bounds().x1;
+        assert!(past > 200, "the layer reaches past the canvas: {past}");
+        reset(&mut app);
+        drag(&mut app, &[[0.0, 0.0], [50.0, 40.0]], NONE); // shrink: a real edit
+        assert!(!app.crop.reset_frame, "moving the frame ends the reset no-op");
+        drag(&mut app, &[[50.0, 40.0], [0.0, 0.0]], NONE); // back to the full bounds
+        assert_eq!(app.ui.crop_rect, Some([0.0, 0.0, 200.0, 100.0]));
+        let steps = app.session.active().unwrap().history.past_len();
+        crate::canvas::commit_crop(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.past_len(), steps + 1, "the restored frame commits as a real crop");
+        let over = st.doc.layers.iter().rev().find(|l| l.name == "over").unwrap();
+        assert_eq!(over.surface().unwrap().content_bounds().x1, 200, "pixels outside the canvas are deleted");
     }
 
     /// #3368: the untouched default frame (the canvas, or the selection's bounds) is just dropped

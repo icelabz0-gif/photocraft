@@ -207,6 +207,18 @@ pub fn commit_params(app: &PhotocraftApp, p: &mut Value) {
     }
 }
 
+/// Whether committing a crop would resample to a target size or set a resolution (W x H x
+/// Resolution with those fields filled): a frame over the whole canvas is then not a no-op.
+pub fn resamples(app: &PhotocraftApp) -> bool {
+    let o = &app.ui.tool_options;
+    if o.crop_ratio != WHR {
+        return false;
+    }
+    let dpi = app.session.active().map_or(72.0, |st| f64::from(st.doc.resolution_dpi));
+    let pt_per_in = app.session.prefs().units_and_rulers.point_size.per_inch();
+    target(o, dpi, pt_per_in).is_some() || resolution_ppi(o).is_some()
+}
+
 /// Fills W, H (px) and the resolution from the active document, in W x H x Resolution mode.
 pub fn front_image(app: &mut PhotocraftApp) {
     let Some(d) = app.session.active().map(|st| (st.doc.size, f64::from(st.doc.resolution_dpi))) else { return };

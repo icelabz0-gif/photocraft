@@ -4272,6 +4272,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             // menu belongs to the selected Zoom or Hand, not to Space or a held zoom key.
             if crate::canvas_tool_menu::pasteboard_at(app, tool, xf.to_doc(p)) {
                 crate::canvas_tool_menu::open_pasteboard(app, &ctx, tool, [p.x, p.y]);
+            } else if tool == Tool::Crop && crate::crop_ui::pending(app) {
+                // On a pending crop frame: the crop menu (#6561).
+                crate::canvas_tool_menu::open_crop(app, &ctx, [p.x, p.y]);
             } else if crate::canvas_tool_menu::is_view_tool(tool) {
                 if tool == app.ui.tool {
                     crate::canvas_tool_menu::open_view(app, &ctx, tool, [p.x, p.y], xf.to_doc(p));
@@ -6840,12 +6843,14 @@ pub fn commit_crop(app: &mut PhotocraftApp) {
     // The crop's default mode leaves the view upright (`crop_mode`).
     crate::crop_mode::upright(app);
     // The untouched default frame around the whole canvas crops nothing (Photoshop's ↵ on it does
-    // nothing); one framing the selection's bounds crops to them (#1789).
-    if std::mem::take(&mut app.crop.default_frame) {
-        let whole = app.session.active().map(|st| st.doc.bounds()).map(|b| [f64::from(b.x0), f64::from(b.y0), f64::from(b.x1), f64::from(b.y1)]);
-        if whole.is_none_or(|b| b == r) {
-            return;
-        }
+    // nothing); one framing the selection's bounds crops to them (#1789). The crop menu's Reset
+    // (#6561) leaves a full-canvas frame that stays pending: committing it crops nothing either,
+    // unless it was turned since or W x H x Resolution resamples it.
+    let default_frame = std::mem::take(&mut app.crop.default_frame);
+    let reset_frame = std::mem::take(&mut app.crop.reset_frame);
+    let whole = app.session.active().map(|st| st.doc.bounds()).map(|b| [f64::from(b.x0), f64::from(b.y0), f64::from(b.x1), f64::from(b.y1)]);
+    if whole.is_none_or(|b| b == r) && (default_frame || (reset_frame && crate::crop_ui::angle(app) == 0.0 && !crate::crop_size::resamples(app))) {
+        return;
     }
     let (x, y) = (r[0].round(), r[1].round());
     let (w, h) = ((r[2] - r[0]).round().max(1.0), (r[3] - r[1]).round().max(1.0));
