@@ -896,6 +896,21 @@ fn move_hue_range_handle(bounds: [f32; 4], k: usize, deg: f32) -> [f32; 4] {
     b
 }
 
+/// The range handle a press at `x` grabs, given the four handles' x positions: the nearest
+/// within 10 points, or within a third of the gap to the next handle on that side, so the middle
+/// third of a narrow zone still drags the zone (at least 3 points, for handles that coincide).
+fn hue_range_handle_at(xs: [f32; 4], x: f32) -> Option<u8> {
+    let k = nearest(&xs, x)?;
+    let d = x - xs[k as usize];
+    let gap = xs
+        .iter()
+        .enumerate()
+        .filter(|&(j, &o)| j != k as usize && (o - xs[k as usize]) * d.signum() >= 0.0)
+        .map(|(_, &o)| (o - xs[k as usize]).abs())
+        .fold(f32::INFINITY, f32::min);
+    (d.abs() < (gap / 3.0).clamp(3.0, 10.0)).then_some(k)
+}
+
 /// Which zone of a colour range a hue `deg` falls in, between its handles: 0 = the left fade
 /// (between the first two), 1 = the fully-on span, 2 = the right fade; `None` outside the range.
 fn hue_range_zone(bounds: [f32; 4], deg: f32) -> Option<u8> {
@@ -1085,7 +1100,7 @@ fn hue_saturation(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
             && ui.input(|i| i.pointer.primary_pressed())
             && let Some(pos) = ui.input(|i| i.pointer.press_origin())
         {
-            which = nearest(&b.map(xof), pos.x).filter(|k| (xof(b[*k as usize]) - pos.x).abs() < 10.0);
+            which = hue_range_handle_at(b.map(xof), pos.x);
             zone = if which.is_none() { hue_range_zone(b, deg_of(pos.x)).map(|z| (z, b, pos.x)) } else { None };
         }
         if bresp.is_pointer_button_down_on()
@@ -1797,6 +1812,23 @@ mod tests {
     /// #9252: Photoshop 2025's zone drags on a colour range (measured on Reds): the fully-on span
     /// moves all four handles, each fade its own two; a side stops at the other and the range
     /// never passes a turn.
+    /// #9272 review: at the narrowest Properties panel (a 230-point bar) a 30° zone is ~19 points
+    /// wide; a press in its middle grabs the zone, not a handle, while each handle stays grabbable.
+    #[test]
+    fn hue_range_zones_stay_selectable_on_a_narrow_bar() {
+        let w = 230.0;
+        let xs = [75.0f32, 105.0, 135.0, 165.0].map(|d| d / 360.0 * w);
+        for (a, z) in [(0, 1), (1, 2), (2, 3)] {
+            assert_eq!(hue_range_handle_at(xs, (xs[a] + xs[z]) / 2.0), None, "the middle of zone {a}..{z} is the zone's");
+        }
+        for (k, x) in xs.iter().enumerate() {
+            assert_eq!(hue_range_handle_at(xs, *x + 1.0), Some(k as u8), "handle {k}");
+        }
+        assert_eq!(hue_range_handle_at(xs, xs[0] - 9.0), Some(0), "the full reach outside the range");
+        let stacked = [50.0, 50.0, 80.0, 120.0];
+        assert!(hue_range_handle_at(stacked, 51.0).is_some(), "coinciding handles stay grabbable");
+    }
+
     #[test]
     fn hue_range_zones_move_their_handles() {
         let reds = [-45.0, -15.0, 15.0, 45.0];
