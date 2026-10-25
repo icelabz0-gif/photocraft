@@ -2,7 +2,7 @@
 //! (`DyBm.Bckg` → archive entry `c/N`), which is imported as is; other pixels are planar tiles of
 //! 256 bytes × 256 rows per channel, each its own archive entry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{Affine, Image, Pixels, Reader};
@@ -123,7 +123,7 @@ fn decode(r: &mut Reader, bitmap: ObjId, crop: (u32, u32, u32, u32), world: Affi
     let scratch = pixels.checked_mul(channels * bps).ok_or(Error::Limit("pixel layer size"))?;
     r.admit_pixels(pixels.checked_mul(4).ok_or(Error::Limit("pixel layer size"))?, scratch)?;
     let mut planes = Vec::with_capacity(channels);
-    let mut cache = HashMap::new();
+    let mut cache = Cache::new();
     for c in 1..=channels {
         planes.push(plane(r, bitmap, c, bps, (x0, y0, w, h), &mut cache)?);
     }
@@ -210,14 +210,24 @@ fn tag(prefix: &[u8; 3], c: usize) -> [u8; 4] {
     [prefix[0], prefix[1], prefix[2], b'0' + c as u8]
 }
 
+/// Decoded tiles by archive entry name: a tile shared by several grid cells or channels is
+/// extracted (and charged to the archive's budget) once.
+type Cache<'s> = HashMap<&'s str, Vec<u8>>;
+
+/// A tile to copy into a plane once its entry is decoded: pixel column and row of its corner.
+struct Place<'s> {
+    name: &'s str,
+    at: (usize, usize),
+}
+
 /// One channel of level 0, cropped to (x0, y0, w, h) pixels; `bps` bytes per sample.
-fn plane(
-    r: &mut Reader,
+fn plane<'s>(
+    r: &mut Reader<'s, '_, '_>,
     bitmap: ObjId,
     c: usize,
     bps: usize,
     (x0, y0, w, h): (u32, u32, u32, u32),
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Cache<'s>,
 ) -> Result<Vec<u8>, Error> {
     let s = r.s;
     let width = s.int(bitmap, b"BmpW").and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
@@ -242,6 +252,15 @@ fn plane(
     let mut out = vec![0u8; row * h as usize];
     let (bx0, bx1) = (x0 as usize * bps, (x0 + w) as usize * bps);
     let (py0, py1) = (y0 as usize, (y0 + h) as usize);
+    let crop = (bx0, py0, bx1, py1);
+    // First walk the grid: flat cells are filled right away (cells never overlap, so the order
+    // of the copies does not matter) and the tiles that show are collected. They are extracted
+    // together below, on several threads, then copied. A walk that fails still extracts the
+    // tiles before the failing cell, as a tile-by-tile walk would have.
+    let mut places: Vec<Place<'s>> = Vec::new();
+    let mut wanted: Vec<&'s str> = Vec::new();
+    let mut queued: HashSet<&'s str> = HashSet::new();
+    let mut failure = None;
     for (t, state) in states.iter().enumerate().take(tw.saturating_mul(th)) {
         let state = &if let Value::UInt(u) = state { u8::try_from(*u).unwrap_or(255) } else { 255 };
         let (ty, tx) = (t / tw.max(1), t % tw.max(1));
@@ -249,25 +268,22 @@ fn plane(
             0 | 1 => None,
             2 => Some(0xFF),
             4 => {
-                let Some(blck) = tiles.next() else { return Err(Error::Malformed("missing pixel tile")) };
+                let Some(blck) = tiles.next() else {
+                    failure = Some(Error::Malformed("missing pixel tile"));
+                    break;
+                };
                 let (ox, oy) = (tx * TILE, ty * TILE);
                 if ox >= bx1 || ox + TILE <= bx0 || oy >= py1 || oy + TILE <= py0 {
                     continue;
                 }
-                let name = s.entry(blck, b"Data").ok_or(Error::Malformed("pixel tile without data"))?.to_string();
-                if !cache.contains_key(&name) {
-                    let mut data = r.archive.read(&name)?;
-                    // Older files wrap a tile in a one-field stream: header, then a 64 KiB blob.
-                    if data.len() == TILE_BYTES + 22 && data.starts_with(b"\x00\xffKS") {
-                        data = data.get(21..21 + TILE_BYTES).ok_or(Error::Malformed("pixel tile"))?.to_vec();
-                    }
-                    if data.len() != TILE_BYTES {
-                        return Err(Error::Malformed("pixel tile size"));
-                    }
-                    cache.insert(name.clone(), data);
+                let Some(name) = s.entry(blck, b"Data") else {
+                    failure = Some(Error::Malformed("pixel tile without data"));
+                    break;
+                };
+                if !cache.contains_key(name) && queued.insert(name) {
+                    wanted.push(name);
                 }
-                let tile = cache.get(&name).ok_or(Error::Malformed("pixel tile"))?;
-                copy(&mut out, row, (bx0, py0, bx1, py1), (ox, oy), Some(tile), 0);
+                places.push(Place { name, at: (ox, oy) });
                 continue;
             }
             3 => {
@@ -278,11 +294,33 @@ fn plane(
                 r.warn("pixel layers drawn from an embedded image (left empty)");
                 None
             }
-            _ => return Err(Error::Malformed("unknown pixel tile state")),
+            _ => {
+                failure = Some(Error::Malformed("unknown pixel tile state"));
+                break;
+            }
         };
         if let Some(v) = fill {
-            copy(&mut out, row, (bx0, py0, bx1, py1), (tx * TILE, ty * TILE), None, v);
+            copy(&mut out, row, crop, (tx * TILE, ty * TILE), None, v);
         }
+    }
+    let decoded = r.archive.read_many(&wanted);
+    // A tile that fails to extract is reported before the failure of the walk after it.
+    for (name, mut data) in wanted.into_iter().zip(decoded?) {
+        // Older files wrap a tile in a one-field stream: header, then a 64 KiB blob.
+        if data.len() == TILE_BYTES + 22 && data.starts_with(b"\x00\xffKS") {
+            data = data.get(21..21 + TILE_BYTES).ok_or(Error::Malformed("pixel tile"))?.to_vec();
+        }
+        if data.len() != TILE_BYTES {
+            return Err(Error::Malformed("pixel tile size"));
+        }
+        cache.insert(name, data);
+    }
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    for place in &places {
+        let tile = cache.get(place.name).ok_or(Error::Malformed("pixel tile"))?;
+        copy(&mut out, row, crop, place.at, Some(tile), 0);
     }
     Ok(out)
 }

@@ -817,7 +817,13 @@ mod raster_identity {
     }
 
     /// The per-byte closure copy `plane` used before the row copies.
-    fn copy_reference(out: &mut [u8], row: usize, (bx0, py0, bx1, py1): (usize, usize, usize, usize), (ox, oy): (usize, usize), at: impl Fn(usize, usize) -> u8) {
+    fn copy_reference(
+        out: &mut [u8],
+        row: usize,
+        (bx0, py0, bx1, py1): (usize, usize, usize, usize),
+        (ox, oy): (usize, usize),
+        at: impl Fn(usize, usize) -> u8,
+    ) {
         for y in oy.max(py0)..(oy + 256).min(py1) {
             for x in ox.max(bx0)..(ox + 256).min(bx1) {
                 if let Some(b) = out.get_mut((y - py0) * row + (x - bx0)) {
@@ -831,7 +837,9 @@ mod raster_identity {
     fn tile_copy_matches_the_byte_loop_for_every_crop() {
         let tile = bytes(256 * 256, 77);
         // Crops that cut the tile on each side, sit inside it, and miss it.
-        for &(bx0, bx1, py0, py1) in &[(0, 600, 0, 600), (10, 300, 20, 200), (100, 150, 100, 130), (256, 512, 0, 256), (0, 256, 300, 400), (255, 257, 255, 257), (300, 301, 0, 1)] {
+        for &(bx0, bx1, py0, py1) in
+            &[(0, 600, 0, 600), (10, 300, 20, 200), (100, 150, 100, 130), (256, 512, 0, 256), (0, 256, 300, 400), (255, 257, 255, 257), (300, 301, 0, 1)]
+        {
             for &(ox, oy) in &[(0, 0), (256, 0), (0, 256), (256, 256), (512, 256)] {
                 let row = bx1 - bx0;
                 let mut old = vec![0xAAu8; row * (py1 - py0)];
@@ -844,5 +852,71 @@ mod raster_identity {
                 assert_eq!(old, new, "fill {ox},{oy} crop {bx0}..{bx1} x {py0}..{py1}");
             }
         }
+    }
+}
+
+/// `Archive::read_many` against the same reads made one at a time.
+mod read_many {
+    use crate::synth::{self, Method};
+    use crate::{Archive, Error, Limits};
+
+    fn entry(i: usize) -> Vec<u8> {
+        (0..4096 + i * 37).map(|b| (b * 31 + i * 7) as u8).collect()
+    }
+
+    fn archive(count: usize, method: Method) -> Vec<u8> {
+        let datas: Vec<Vec<u8>> = (0..count).map(entry).collect();
+        let names: Vec<String> = (0..count).map(|i| format!("d/{i}")).collect();
+        let entries: Vec<(&str, &[u8], Method)> = names.iter().zip(&datas).map(|(n, d)| (n.as_str(), d.as_slice(), method)).collect();
+        synth::container(&entries, None)
+    }
+
+    #[test]
+    fn matches_serial_reads_and_charges_the_same() {
+        for method in [Method::Stored, Method::Zlib, Method::Zstd] {
+            for count in [1, 3, 4, 5, 40] {
+                let file = archive(count, method);
+                let names: Vec<String> = (0..count).map(|i| format!("d/{i}")).collect();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                let mut one = Archive::open(&file, Limits::default()).unwrap();
+                let serial: Vec<Vec<u8>> = names.iter().map(|n| one.read(n).unwrap()).collect();
+                let mut many = Archive::open(&file, Limits::default()).unwrap();
+                assert_eq!(many.read_many(&names).unwrap(), serial);
+                assert_eq!(many.extracted(), one.extracted());
+                assert_eq!(serial[count - 1], entry(count - 1));
+            }
+        }
+    }
+
+    #[test]
+    fn the_limit_stops_at_the_same_entry_as_serial_reads() {
+        let file = archive(12, Method::Zstd);
+        let names: Vec<String> = (0..12).map(|i| format!("d/{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let limits = Limits { max_total: (0..7).map(|i| entry(i).len()).sum(), ..Limits::default() };
+        let mut one = Archive::open(&file, limits).unwrap();
+        let failed = names.iter().position(|n| one.read(n).is_err()).unwrap();
+        assert_eq!(failed, 7);
+        let mut many = Archive::open(&file, limits).unwrap();
+        assert!(matches!(many.read_many(&names), Err(Error::Limit(_))));
+        assert_eq!(many.extracted(), one.extracted());
+    }
+
+    #[test]
+    fn the_first_failing_entry_in_order_is_reported() {
+        let mut file = archive(12, Method::Stored);
+        // Flip a data byte of entry 2 (checksum failure); entry 9 is missing from the list.
+        let at = file.windows(4).position(|w| w == b"#Fil").unwrap();
+        let second = at + 4 + entry(0).len();
+        let third = second + 4 + entry(1).len();
+        file[third + 4 + 10] ^= 0xFF;
+        let names: Vec<String> = (0..12).map(|i| if i == 9 { "gone".to_string() } else { format!("d/{i}") }).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = Archive::open(&file, Limits::default()).unwrap();
+        assert_eq!(a.read_many(&names).unwrap_err(), Error::Malformed("archive entry checksum mismatch"));
+        // Without the corrupt entry the missing one is what fails.
+        let intact = archive(12, Method::Stored);
+        let mut a = Archive::open(&intact, Limits::default()).unwrap();
+        assert_eq!(a.read_many(&names).unwrap_err(), Error::Malformed("missing archive entry"));
     }
 }
