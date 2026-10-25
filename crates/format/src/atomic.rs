@@ -13,10 +13,11 @@
 //!   if it does anyway, the save fails with a clear error. It never falls back to writing the
 //!   destination in place.
 //! - **Unwritable folder:** the save fails with a clear error instead of writing in place.
-//! - **Missing folder:** the save fails with a clear error; it never creates the folder tree, so
-//!   a typo in a scripted or batch path can't scatter folders beside the user's files (#6606).
-//!   Callers that intentionally produce output trees (batch export, Image Assets, packages)
-//!   create their directories explicitly.
+//! - **Missing folder:** a plain or scripted save fails with a clear error instead of creating the
+//!   folder tree, so a typo in its path can't scatter folders beside the user's files (#6606).
+//!   Batch output is the exception: callers that intentionally produce output trees (batch export,
+//!   Image Assets, packages) create their directories explicitly, so a typo in one of those paths
+//!   does create folders under the intended destination.
 //! - **Network shares (macOS):** `sync_all` asks for a full flush to the disk's platters
 //!   (`F_FULLFSYNC`), which SMB shares and some virtual file systems refuse while a plain `fsync`
 //!   works. [`sync_file`] falls back to the plain one there (#1336).
@@ -172,11 +173,20 @@ pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    if !dir.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("cannot save {}: the folder {} does not exist; create it first", path.display(), dir.display()),
-        ));
+    // Inspect the folder instead of `exists()`: that swallows access errors, which would be
+    // misreported as a missing folder (#6606 review).
+    match dir.metadata() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("cannot save {}: the folder {} does not exist; create it first", path.display(), dir.display()),
+            ));
+        }
+        Err(e) => return Err(io::Error::new(e.kind(), format!("cannot save {}: the folder {} could not be read ({e})", path.display(), dir.display()))),
+        Ok(m) if !m.is_dir() => {
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("cannot save {}: {} is a file, not a folder", path.display(), dir.display())));
+        }
+        Ok(_) => {}
     }
 
     // Create a fresh temporary file next to the target (same directory, so the rename never

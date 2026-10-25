@@ -118,6 +118,35 @@ fn missing_parent_folder_is_an_error_and_creates_nothing() {
     assert_no_temp(&d.0);
 }
 
+/// A parent path that is a file is reported as such, not as a missing folder.
+#[test]
+fn parent_that_is_a_file_is_an_error() {
+    let d = TempDir::new("parent-file");
+    std::fs::write(d.0.join("blocker"), b"x").unwrap();
+    let e = atomic_write(&d.0.join("blocker/out.png"), b"x").unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotADirectory);
+    assert!(e.to_string().contains("not a folder"), "{e}");
+    assert_no_temp(&d.0);
+}
+
+/// An ancestor that denies traversal is an access error, not a "folder does not exist" one.
+#[cfg(unix)]
+#[test]
+fn unreadable_folder_is_not_reported_as_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = TempDir::new("noexec");
+    let locked = d.0.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let e = atomic_write(&locked.join("sub/out.png"), b"x").unwrap_err();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if e.kind() == io::ErrorKind::NotFound {
+        return; // running as root: permissions aren't enforced
+    }
+    assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!e.to_string().contains("does not exist"), "{e}");
+}
+
 #[test]
 fn write_failure_halfway_keeps_original() {
     let d = TempDir::new("write");
