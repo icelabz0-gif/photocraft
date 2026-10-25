@@ -341,7 +341,7 @@ fn content_spread_over_millions_of_bands_is_refused_before_planning_them() {
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_fifo_in_place_of_a_module_file_does_not_block_loading() {
     let dir = std::env::temp_dir().join(format!("photocraft-plugin-fifo-{}", std::process::id()));

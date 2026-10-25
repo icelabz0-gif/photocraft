@@ -617,7 +617,7 @@ fn the_budget_is_applied_to_the_rendered_extent_not_the_input_points() {
     let mut brush = BrushSettings { size: 24.0, hardness: 1.0, ..Default::default() };
     brush.scattering.enabled = true;
     brush.scattering.scatter.jitter = 6.0;
-    let stroke = Stroke { brush, points: vec![StrokePoint::new(10.0, 10.0, 1.0), StrokePoint::new(40.0, 10.0, 1.0)] };
+    let stroke = Stroke { brush, points: vec![StrokePoint::new(10.0, 10.0, 1.0), StrokePoint::new(40.0, 10.0, 1.0)], fit_curve: false };
 
     // What the renderer really covered, once scattering has placed every dab.
     let (bounds, cov) = super::coverage_within("t", &stroke, u64::MAX).unwrap();
