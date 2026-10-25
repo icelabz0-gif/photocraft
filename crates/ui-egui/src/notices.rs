@@ -129,7 +129,14 @@ pub fn slow_cpu_refresh(app: &mut PhotocraftApp, doc: u64, ms: f64, reason: Opti
         crate::i18n::fmt(tl!("This redraw took {seconds} s on the CPU."), &[("seconds", &seconds)]),
         tl!("Edits that change the whole document, such as a layer's blend mode, opacity or visibility, redraw all of it.").into(),
     ];
-    if reason == Some(crate::gpu_canvas::OVER_BUDGET) {
+    if reason == Some(crate::gpu_canvas::OVER_BUDGET) && crate::chrome_ui::cpu_redraws_by_design(app) {
+        // The Automatic budget left the layers off a GPU that shares system memory (#9007): a
+        // higher GPU Memory would copy them into the same memory again (#9010).
+        lines.push(
+            tl!("This GPU uses the computer's own memory, so the layers of a document this large aren't copied to it a second time: edits in view still draw on the GPU, and redraws of the whole document run on the CPU in the background.")
+                .into(),
+        );
+    } else if reason == Some(crate::gpu_canvas::OVER_BUDGET) {
         if let Some(fit) = app.perf.gpu_layer_fit.filter(|f| f.doc == doc && !f.fits()) {
             lines.push(crate::i18n::fmt(
                 tl!("Its layers need {needed} of GPU memory; the budget leaves them {budget}."),
@@ -428,6 +435,27 @@ mod tests {
         let text = app.ui.notices[1].lines.join(" ");
         assert!(text.contains("Blend If on `Overlay`"), "{text}");
         assert!(!text.contains("Memory usage"), "the budget hint is only for the budget fallback: {text}");
+    }
+
+    /// #9010: on a GPU that shares system memory with GPU Memory Automatic, the notice explains
+    /// the CPU redraw instead of suggesting a GPU Memory that would copy the layers again.
+    #[test]
+    fn a_slow_cpu_refresh_on_shared_gpu_memory_suggests_no_higher_budget() {
+        let mut app = PhotocraftApp::new(Session::new(), Services::default());
+        app.perf.gpu_info.shared_memory = true;
+        app.perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { doc: 1, needed: 3600 << 20, budget: 192 << 20 });
+        slow_cpu_refresh(&mut app, 1, 2_000.0, Some(crate::gpu_canvas::OVER_BUDGET));
+        let text = app.ui.notices[0].lines.join(" ");
+        assert!(text.contains("uses the computer's own memory"), "{text}");
+        assert!(!text.contains("Set GPU Memory"), "{text}");
+        // GPU Memory set by hand: the budget hint is back.
+        app.run("prefs.set", serde_json::json!({"path": "performance.gpuMemoryMb", "value": 2048})).unwrap();
+        slow_cpu_refresh(&mut app, 2, 2_000.0, Some(crate::gpu_canvas::OVER_BUDGET));
+        let text = app.ui.notices[1].lines.join(" ");
+        assert!(text.contains("Set GPU Memory"), "{text}");
+        // Another reason on shared memory names it, as before.
+        slow_cpu_refresh(&mut app, 3, 2_000.0, Some("Blend If on `Overlay` (composited on the CPU)"));
+        assert!(app.ui.notices[2].lines.join(" ").contains("Blend If on `Overlay`"));
     }
 
     #[test]

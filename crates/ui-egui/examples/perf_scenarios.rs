@@ -586,13 +586,7 @@ fn full_canvas_layer_scenarios(b: &mut Bench, sz: &Sizes) {
         // As the app counts it (`canvas::gpu_budget`).
         let pixels = st.memory_bytes() as u64;
         let allowance = u64::from(photocraft_engine::prefs::Performance::default().memory_usage_mb) << 20;
-        g.set_memory_budget(photocraft_ui_egui::gpu_canvas::memory_budget(
-            allowance,
-            pixels,
-            photocraft_ui_egui::gpu_canvas::physical_memory(),
-            g.video_memory(),
-            0,
-        ));
+        g.set_memory_budget(g.budget_for(&st.doc, allowance, pixels, 0));
     }
     let _ = b.refresh(&s, true);
     let reps = b.reps;
