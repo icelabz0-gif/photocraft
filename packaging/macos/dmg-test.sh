@@ -2,8 +2,8 @@
 # The app in the macOS DMG, and a copy installed from it, pass `codesign --verify --strict --deep`
 # (#3034). Runs package.sh and verify.sh end to end, signed ad hoc, around a stand-in executable
 # (no Rust build, no secrets), with a font licence that carries Finder info as the input. Then
-# shows the check rejects the image `hdiutil makehybrid -hfs` made of the same files. macOS only;
-# CI: .github/workflows/packaging-lint.yml.
+# shows the check, and verify.sh, reject the image `hdiutil makehybrid -hfs` made of the same
+# files. macOS only; CI: .github/workflows/packaging-lint.yml.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -56,4 +56,18 @@ case "$out" in
   *) fail "check_dmg_app rejected the makehybrid image for another reason: $out" ;;
 esac
 
-echo "ok: the app in the DMG passes codesign --strict; a makehybrid image of it is rejected"
+# verify.sh, the release workflow's check of the artifact as shipped, must reject it too: the
+# makehybrid image converted and signed (ad hoc) as package.sh made DMGs before, in the good one's
+# place. Its own signature passes, so only verify.sh's check of the app in it can fail it.
+hdiutil convert -quiet "$OLD" -format UDZO -o "$TMP/makehybrid-udzo.dmg"
+codesign --force --sign - --timestamp=none "$TMP/makehybrid-udzo.dmg"
+cp "$TMP/makehybrid-udzo.dmg" "$DMG"
+if out="$("$HERE/verify.sh" --arch "$ARCH" 2>&1)"; then
+  fail "verify.sh accepted a DMG whose app fails codesign --strict"
+fi
+case "$out" in
+  *"PhotoCraft.app in $(basename "$DMG") fails codesign --verify --strict --deep"*) ;;
+  *) fail "verify.sh rejected the makehybrid image for another reason: $out" ;;
+esac
+
+echo "ok: the app in the DMG passes codesign --strict; a makehybrid image of it is rejected by check_dmg_app and verify.sh"
