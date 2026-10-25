@@ -2776,8 +2776,8 @@ fn tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
                 None => {}
             }
             let has_path = st.path.is_some();
-            resp.context_menu(|ui| {
-                tab_action = tab_context_menu(ui, i, tab_count, has_path);
+            crate::context_menu::show(&resp, |m| {
+                tab_action = tab_context_menu(m, i, tab_count, has_path);
             });
         }
         // Files opening in the background: a tab with a progress underline; × cancels.
@@ -2869,16 +2869,17 @@ fn tab_context_items(index: usize, count: usize, has_path: bool) -> [(&'static s
     ]
 }
 
-fn tab_context_menu(ui: &mut egui::Ui, index: usize, count: usize, has_path: bool) -> Option<(&'static str, serde_json::Value)> {
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(170.0);
+fn tab_context_menu(m: &mut crate::context_menu::MenuUi, index: usize, count: usize, has_path: bool) -> Option<(&'static str, serde_json::Value)> {
+    m.scroll(|m| {
+        m.min_width(170.0);
+        let mut chosen = None;
+        // Every row is listed (a native menu records them all), the first one chosen wins.
         for (label, id, params, enabled) in tab_context_items(index, count, has_path) {
-            if ui.add_enabled(enabled, egui::Button::new(tl!(label))).clicked() {
-                ui.close();
-                return Some((id, params));
+            if m.item_enabled(enabled, tl!(label)) && chosen.is_none() {
+                chosen = Some((id, params));
             }
         }
-        None
+        chosen
     })
 }
 
@@ -3114,8 +3115,8 @@ fn pro_tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
             None => {}
         }
         let has_path = app.session.documents().get(i).is_some_and(|d| d.path.is_some());
-        resp.context_menu(|ui| {
-            tab_action = tab_context_menu(ui, i, tab_count, has_path);
+        crate::context_menu::show(&resp, |m| {
+            tab_action = tab_context_menu(m, i, tab_count, has_path);
         });
         doc_tabs.push((i, r));
     }
@@ -3439,14 +3440,12 @@ fn home_recent(app: &mut PhotocraftApp, ui: &mut egui::Ui, recent: &[String]) {
         if resp.clicked() && remove.is_none() {
             open = Some(path.clone());
         }
-        resp.context_menu(|ui| {
-            if ui.button(tl!("Remove from Recent")).clicked() {
+        crate::context_menu::show(&resp, |m| {
+            if m.item(tl!("Remove from Recent")) {
                 remove = Some(path.clone());
-                ui.close();
             }
-            if ui.button(tl!("Clear Recent Files")).clicked() {
+            if m.item(tl!("Clear Recent Files")) {
                 clear = true;
-                ui.close();
             }
         });
     }

@@ -76,19 +76,18 @@ fn unit_menu_items(current: Unit, units: &[Unit]) -> Vec<(String, &'static str, 
 
 /// The length units menu that right-clicking a ruler (or Free Transform's W and H fields) opens;
 /// the chosen unit's name is returned (`None` if the menu is dismissed without a pick).
-pub(crate) fn unit_menu(ui: &mut egui::Ui, current: Unit) -> Option<&'static str> {
-    unit_menu_of(ui, current, &UNITS)
+pub(crate) fn unit_menu(m: &mut crate::context_menu::MenuUi, current: Unit) -> Option<&'static str> {
+    unit_menu_of(m, current, &UNITS)
 }
 
 /// [`unit_menu`] with only `units` in it.
-pub(crate) fn unit_menu_of(ui: &mut egui::Ui, current: Unit, units: &[Unit]) -> Option<&'static str> {
-    crate::widgets::menu_scroll(ui, |ui| {
-        ui.set_min_width(150.0);
+pub(crate) fn unit_menu_of(m: &mut crate::context_menu::MenuUi, current: Unit, units: &[Unit]) -> Option<&'static str> {
+    m.scroll(|m| {
+        m.min_width(150.0);
         let mut chosen = None;
         for (label, name, checked) in unit_menu_items(current, units) {
-            let label = if checked { format!("✓ {label}") } else { label };
-            if ui.button(label).clicked() {
-                ui.close();
+            let row = crate::context_menu::Row::new(&label).checked(checked);
+            if m.row(row, |ui| ui.button(if checked { format!("✓ {label}") } else { label.clone() })) {
                 chosen = Some(name);
             }
         }
@@ -528,8 +527,8 @@ pub fn draw_rulers(app: &mut PhotocraftApp, ui: &mut egui::Ui, full: Rect, xf: &
             d.over_ruler = resp.interact_pointer_pos().is_some_and(|p| dropped_on_a_ruler(app, full, p));
             finish_drag(app, d);
         }
-        resp.context_menu(|ui| {
-            if let Some(name) = unit_menu(ui, unit) {
+        crate::context_menu::show(&resp, |m| {
+            if let Some(name) = unit_menu(m, unit) {
                 chosen_unit = Some(name);
             }
         });

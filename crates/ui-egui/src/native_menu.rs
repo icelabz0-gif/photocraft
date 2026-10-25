@@ -218,7 +218,7 @@ pub fn from_items(tops: &[&str], items: &[MenuItem]) -> MenuBar {
 }
 
 /// Drop separators at the start or end of a level and collapse runs of them, at every depth.
-fn tidy(nodes: Vec<Node>) -> Vec<Node> {
+pub(crate) fn tidy(nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::with_capacity(nodes.len());
     for n in nodes {
         let n = match n {
@@ -632,6 +632,10 @@ pub enum Event {
     Click(String),
     /// A key equivalent was pressed: the shortcut, to be handled as the key press it was.
     Key(Chord),
+    /// Item `id` was chosen in context menu `serial` ([`Backend::popup`]).
+    ContextChosen { serial: u64, id: String },
+    /// Context menu `serial` closed, after reporting its choice if there was one.
+    ContextClosed(u64),
 }
 
 /// A platform's native menu bar (the desktop app implements it for macOS with muda).
@@ -642,6 +646,16 @@ pub trait Backend {
     /// Events since the last call. Platform items (Hide, Services, Zoom, …) are handled by the
     /// backend and not reported.
     fn drain(&mut self) -> Vec<Event>;
+    /// Can [`Backend::popup`] show context menus?
+    fn can_popup(&self) -> bool {
+        false
+    }
+    /// Pop `nodes` up as context menu `serial` at `pos` (points from the top left of the window's
+    /// content), once the frame is done; report [`Event::ContextChosen`] and then
+    /// [`Event::ContextClosed`]. False when it can't (nothing will be reported).
+    fn popup(&mut self, _serial: u64, _nodes: &[Node], _pos: [f32; 2]) -> bool {
+        false
+    }
 }
 
 /// The native menu bar, while PhotoCraft uses one (the in-window menus are hidden then).
@@ -653,11 +667,28 @@ pub struct NativeMenu {
     /// AppKit toggled a check item itself: re-sync.
     dirty: bool,
     logged: bool,
+    /// Context menu events since the last frame, for [`run`].
+    context_events: Vec<Event>,
+    /// The context menu popped up last: its serial, and the request it showed.
+    context: Option<(u64, crate::context_menu::Request)>,
+    serial: u64,
+    /// The backend failed to pop a context menu up: right-click menus are egui's from then on.
+    popup_failed: bool,
 }
 
 impl NativeMenu {
     pub fn new(backend: Box<dyn Backend>) -> NativeMenu {
-        NativeMenu { backend, state: None, clicks: Vec::new(), dirty: true, logged: false }
+        NativeMenu {
+            backend,
+            state: None,
+            clicks: Vec::new(),
+            dirty: true,
+            logged: false,
+            context_events: Vec::new(),
+            context: None,
+            serial: 0,
+            popup_failed: false,
+        }
     }
 
     /// Before egui sees this frame's input: key equivalents become the key presses they were,
@@ -681,15 +712,67 @@ impl NativeMenu {
                     }
                 }
                 Event::Click(id) => self.clicks.push(id),
+                e @ (Event::ContextChosen { .. } | Event::ContextClosed(_)) => self.context_events.push(e),
             }
             self.dirty = true;
         }
     }
+
+    /// Hand the context menu events to the menus' code (`context_menu`), before the UI runs.
+    fn context_events(&mut self, ctx: &egui::Context) {
+        crate::context_menu::expire(ctx);
+        for e in std::mem::take(&mut self.context_events) {
+            match e {
+                Event::ContextChosen { serial, id } => {
+                    if let Some((s, req)) = &self.context
+                        && *s == serial
+                        && let Some(label) = crate::context_menu::label_of(&req.nodes, &id)
+                    {
+                        crate::context_menu::chosen(ctx, req.owner, id, label);
+                    }
+                }
+                Event::ContextClosed(serial) => {
+                    if self.context.as_ref().is_some_and(|(s, _)| *s == serial)
+                        && let Some((_, req)) = self.context.take()
+                    {
+                        crate::context_menu::closed(ctx, req.owner);
+                    }
+                }
+                Event::Click(_) | Event::Key(_) => {}
+            }
+        }
+    }
+
+    /// Pop up the context menu this frame asked for, if any (`context_menu`).
+    fn popup(&mut self, ctx: &egui::Context) {
+        let Some(req) = crate::context_menu::take_request(ctx) else { return };
+        // A menu that is still showing (AppKit's menus are modal, so only a menu opened without
+        // the pointer could ask) keeps the screen; the new one closes unshown.
+        if self.context.is_some() {
+            crate::context_menu::closed(ctx, req.owner);
+            return;
+        }
+        self.serial += 1;
+        // Window points: egui's points scaled by its zoom (Preferences › UI Scaling).
+        let zoom = ctx.zoom_factor();
+        let pos = [req.pos.x * zoom, req.pos.y * zoom];
+        if self.backend.popup(self.serial, &req.nodes, pos) {
+            self.context = Some((self.serial, req));
+        } else {
+            log::warn!("couldn't show a native context menu; using egui's");
+            self.popup_failed = true;
+            crate::context_menu::closed(ctx, req.owner);
+        }
+    }
 }
 
-/// Run the native menu clicks that arrived since the last frame, like in-window menu clicks.
+/// Run the native menu clicks that arrived since the last frame, like in-window menu clicks, and
+/// hand the context menus their picks.
 pub fn run(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let Some(menu) = app.services.native_menu.as_mut() else { return };
+    // Agents (a control channel) see, click and screenshot egui's menus.
+    crate::context_menu::set_native(ctx, menu.backend.can_popup() && !menu.popup_failed && app.control_rx.is_none());
+    menu.context_events(ctx);
     let clicks = std::mem::take(&mut menu.clicks);
     for id in clicks {
         if id == MINIMIZE {
@@ -711,6 +794,8 @@ pub fn run(app: &mut PhotocraftApp, ctx: &egui::Context) {
 /// document or selection changed, or the user clicked or pressed a key. Building the rows walks
 /// every command's enabled state, so it doesn't run on frames that only animate or scroll.
 pub fn sync(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let Some(menu) = app.services.native_menu.as_mut() else { return };
+    menu.popup(ctx);
     let Some(menu) = app.services.native_menu.as_ref() else { return };
     let state = state_hash(app, had_input(ctx).then_some(app.frame));
     if menu.state == Some(state) && !menu.dirty {
@@ -764,6 +849,51 @@ pub(crate) fn state_hash(app: &PhotocraftApp, input: Option<u64>) -> u64 {
     serde_json::to_string(&(&ui.panels, &ui.extras, &ui.view, ui.theme, ui.tool)).unwrap_or_default().hash(&mut h);
     s.prefs().interface.language.hash(&mut h);
     h.finish()
+}
+
+/// A native menu backend for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Backend, Event, MenuBar, Node};
+
+    /// Pops context menus up for the test: records them, and reports what the test queues.
+    #[derive(Clone, Default)]
+    pub(crate) struct Popups(pub(crate) std::rc::Rc<std::cell::RefCell<(Vec<Popup>, Vec<Event>)>>);
+
+    /// A popped-up context menu: its serial, rows and position.
+    pub(crate) type Popup = (u64, Vec<Node>, [f32; 2]);
+
+    impl Backend for Popups {
+        fn sync(&mut self, _bar: &MenuBar) {}
+        fn drain(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.0.borrow_mut().1)
+        }
+        fn can_popup(&self) -> bool {
+            true
+        }
+        fn popup(&mut self, serial: u64, nodes: &[Node], pos: [f32; 2]) -> bool {
+            self.0.borrow_mut().0.push((serial, nodes.to_vec(), pos));
+            true
+        }
+    }
+
+    impl Popups {
+        /// Report `label`'s pick in the last menu, then its close, as AppKit does; the app sees them
+        /// on its next frame.
+        pub(crate) fn choose(&self, label: &str) {
+            let (serial, nodes, _) = self.0.borrow().0.last().cloned().expect("a native menu");
+            let id = find(&nodes, label).unwrap_or_else(|| panic!("{label} in {nodes:?}"));
+            self.0.borrow_mut().1.extend([Event::ContextChosen { serial, id }, Event::ContextClosed(serial)]);
+        }
+    }
+
+    fn find(nodes: &[Node], label: &str) -> Option<String> {
+        nodes.iter().find_map(|n| match n {
+            Node::Item(it) if it.label == label => Some(it.id.clone()),
+            Node::Submenu { children, .. } => find(children, label),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1257,6 +1387,252 @@ mod tests {
         for (i, title) in crate::menus::TOP_MENUS.iter().enumerate() {
             assert_eq!(native[i] + 1, in_window[i], "{title}: {} in-window, {} with the Mac menu bar", in_window[i], native[i]);
         }
+    }
+
+    use super::testing::Popups;
+
+    /// A right-click on a Layers row pops its menu up natively (no egui popup); the item chosen there
+    /// runs through the panel's own code, here Color › Red on the clicked layer. With a control
+    /// channel attached the menu is egui's, so agents can see and click it.
+    #[test]
+    fn layer_row_context_menu_is_native_and_its_pick_runs() {
+        use egui::{Event as E, Modifiers, PointerButton};
+        use egui_kittest::{Harness, kittest::Queryable};
+        let harness = |popups: Popups, control: bool| {
+            let mut s = photocraft_engine::Session::new();
+            s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+            s.execute("layer.new.layer", json!({"name": "Tagged"})).unwrap();
+            s.execute("layer.new.layer", json!({"name": "Active"})).unwrap();
+            let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+                PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+                let mut app = PhotocraftApp::new(s, crate::Services::default());
+                if control {
+                    app = app.with_control(std::sync::mpsc::channel().1);
+                }
+                app.services.native_menu = Some(NativeMenu::new(Box::new(popups)));
+                app
+            });
+            let ctx = h.ctx.clone();
+            let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
+            crate::control::handle(h.state_mut(), &ctx, &req);
+            h.run_steps(8);
+            let at = h.get_by_label("Tagged").rect().center();
+            h.hover_at(at);
+            h.step();
+            for pressed in [true, false] {
+                h.event(E::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+                h.step();
+            }
+            h.run_steps(2);
+            (h, at)
+        };
+
+        let popups = Popups::default();
+        let (mut h, at) = harness(popups.clone(), false);
+        assert!(h.query_by_label("Blending Options…").is_none(), "no egui popup");
+        let (serial, nodes, pos) = popups.0.borrow().0.last().cloned().expect("a native menu");
+        assert_eq!(popups.0.borrow().0.len(), 1, "popped up once");
+        assert!((pos[0] - at.x).abs() < 1.0 && (pos[1] - at.y).abs() < 1.0, "at the pointer: {pos:?}, {at:?}");
+        let labels: Vec<&str> = nodes.iter().filter_map(|n| if let Node::Item(it) = n { Some(it.label.as_str()) } else { None }).collect();
+        assert_eq!(labels.first(), Some(&"Blending Options…"));
+        assert!(labels.contains(&"Rename Layer…"), "{labels:?}");
+        let Some(Node::Submenu { children, .. }) = nodes.iter().find(|n| matches!(n, Node::Submenu { label, .. } if label == "Color")) else {
+            panic!("a Color submenu: {nodes:?}")
+        };
+        let red = children.iter().find_map(|n| if let Node::Item(it) = n { (it.label == "Red").then(|| it.id.clone()) } else { None }).expect("Red");
+        // AppKit reports the pick, then the close.
+        popups.0.borrow_mut().1.extend([Event::ContextChosen { serial, id: red }, Event::ContextClosed(serial)]);
+        let mut raw = egui::RawInput::default();
+        h.state_mut().services.native_menu.as_mut().unwrap().raw_input(&mut raw);
+        h.run_steps(2);
+        let st = h.state().session.active().unwrap();
+        let tagged = st.doc.walk().into_iter().map(|(_, _, l)| l).find(|l| l.name == "Tagged").expect("Tagged");
+        assert_eq!(tagged.label, photocraft_doc::LabelColor::Red);
+        assert_eq!(st.doc.layer(st.active_layer.unwrap()).unwrap().name, "Tagged", "the clicked row became the active layer first");
+        assert_eq!(popups.0.borrow().0.len(), 1, "nothing else popped up");
+
+        let popups = Popups::default();
+        let (h, _) = harness(popups.clone(), true);
+        assert!(popups.0.borrow().0.is_empty(), "agents get egui's menu");
+        h.get_by_label("Blending Options…");
+    }
+
+    /// With native menus a right press opens them, before the button comes up: the canvas tool
+    /// menu and a Layers row's menu pop up on the press, and the release that follows (when AppKit's
+    /// menu doesn't take it) opens nothing more.
+    #[test]
+    fn native_context_menus_open_on_the_right_press() {
+        use egui::{Event as E, Modifiers, PointerButton};
+        use egui_kittest::{Harness, kittest::Queryable};
+        let popups = Popups::default();
+        let mut s = photocraft_engine::Session::new();
+        s.execute("file.new", json!({"width": 640, "height": 480})).unwrap();
+        s.execute("layer.new.layer", json!({"name": "Tagged"})).unwrap();
+        let backend = popups.clone();
+        let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotocraftApp::new(s, crate::Services::default());
+            app.services.native_menu = Some(NativeMenu::new(Box::new(backend)));
+            app
+        });
+        h.state_mut().ui.tool = crate::state::Tool::RectMarquee;
+        let ctx = h.ctx.clone();
+        let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
+        crate::control::handle(h.state_mut(), &ctx, &req);
+        h.run_steps(8);
+        // What the app's input hook does with the OS's events.
+        let button = |h: &mut Harness<'_, PhotocraftApp>, at: egui::Pos2, pressed: bool| {
+            let mut events = vec![E::PointerMoved(at), E::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE }];
+            h.state_mut().menu_press.complete(&ctx, &mut events, |_| false);
+            for e in events {
+                h.event(e);
+            }
+            h.step();
+        };
+        let popped = |popups: &Popups| popups.0.borrow().0.len();
+        let close = |h: &mut Harness<'_, PhotocraftApp>, popups: &Popups| {
+            let serial = popups.0.borrow().0.last().map(|p| p.0).unwrap();
+            popups.0.borrow_mut().1.push(Event::ContextClosed(serial));
+            let mut raw = egui::RawInput::default();
+            h.state_mut().services.native_menu.as_mut().unwrap().raw_input(&mut raw);
+            h.run_steps(2);
+        };
+
+        let canvas = h.state().last_canvas_rect.center();
+        h.hover_at(canvas);
+        h.step();
+        button(&mut h, canvas, true);
+        h.step();
+        assert_eq!(popped(&popups), 1, "the canvas tool menu, on the press");
+        assert!(h.state().ui.canvas_tool_menu.is_some());
+        close(&mut h, &popups);
+        button(&mut h, canvas, false);
+        h.run_steps(2);
+        assert_eq!(popped(&popups), 1, "the release opens nothing");
+        assert!(h.state().ui.canvas_tool_menu.is_none());
+
+        let row = h.get_by_label("Tagged").rect().center();
+        h.hover_at(row);
+        h.step();
+        button(&mut h, row, true);
+        h.step();
+        assert_eq!(popped(&popups), 2, "the layer menu, on the press");
+        assert!(h.query_by_label("Blending Options…").is_none(), "no egui popup");
+        close(&mut h, &popups);
+        button(&mut h, row, false);
+        h.run_steps(2);
+        assert_eq!(popped(&popups), 2);
+        assert!(h.query_by_label("Blending Options…").is_none(), "nor on the release");
+    }
+
+    /// A docked panel's title (craft-ui's tab) opens a native menu on the right press, with the
+    /// rows of craft-ui's egui menu: the panel's own menu, Float Panel, Group with, Close Panel.
+    /// Choosing Close Panel closes it, as craft-ui's would.
+    #[test]
+    fn panel_title_menu_is_native() {
+        use egui::{Event as E, Modifiers, PointerButton};
+        use egui_kittest::{Harness, kittest::Queryable};
+        let popups = Popups::default();
+        let mut app = app(true);
+        // The shared docking surface (craft-ui), as after any panel is floated.
+        app.run("window.panel.float", json!({"panel": "swatches", "x": 20, "y": 40})).unwrap();
+        app.services.native_menu = Some(NativeMenu::new(Box::new(popups.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        let ctx = h.ctx.clone();
+        let layers = "layers".to_string();
+        let at = ctx.read_response(crate::panel_docking::tab_id(&layers)).expect("the Layers title").rect.center();
+        // What the app's input hook does with the OS's events.
+        let button = |h: &mut Harness<'_, PhotocraftApp>, pressed: bool| {
+            let mut events = vec![E::PointerMoved(at), E::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE }];
+            h.state_mut().menu_press.complete(&ctx, &mut events, |_| false);
+            crate::panel_docking::take_tab_right_click(h.state(), &ctx, &mut events);
+            for e in events {
+                h.event(e);
+            }
+            h.step();
+        };
+        h.hover_at(at);
+        h.step();
+        button(&mut h, true);
+        h.step();
+        let (serial, nodes, _) = popups.0.borrow().0.last().cloned().expect("a native menu on the press");
+        assert!(h.query_by_label("Close Panel").is_none(), "no egui menu");
+        let labels: Vec<String> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Item(it) => Some(it.label.clone()),
+                Node::Submenu { label, .. } => Some(format!("[{label}]")),
+                _ => None,
+            })
+            .collect();
+        for want in ["New Layer…", "Flatten Image", "Float Panel", "[Group with]", "Close Panel"] {
+            assert!(labels.iter().any(|l| l == want), "{want} in {labels:?}");
+        }
+        let close = nodes.iter().find_map(|n| if let Node::Item(it) = n { (it.label == "Close Panel").then(|| it.id.clone()) } else { None }).unwrap();
+        popups.0.borrow_mut().1.extend([Event::ContextChosen { serial, id: close }, Event::ContextClosed(serial)]);
+        let mut raw = egui::RawInput::default();
+        h.state_mut().services.native_menu.as_mut().unwrap().raw_input(&mut raw);
+        h.run_steps(2);
+        assert!(!h.state().ui.docking.as_ref().unwrap().contains(&layers), "Close Panel closed Layers");
+        // The release that follows opens nothing.
+        button(&mut h, false);
+        h.run_steps(2);
+        assert_eq!(popups.0.borrow().0.len(), 1);
+        assert!(h.query_by_label("Float Panel").is_none());
+    }
+
+    /// A docked group's ellipsis drops its menu down natively on the left press: the panel's rows
+    /// and the group's, no egui popup; Close Tab Group closes the group.
+    #[test]
+    fn panel_menu_button_is_native() {
+        use egui::{Event as E, Modifiers, PointerButton};
+        use egui_kittest::{Harness, kittest::Queryable};
+        let popups = Popups::default();
+        let mut app = app(true);
+        app.run("window.panel.float", json!({"panel": "swatches", "x": 20, "y": 40})).unwrap();
+        app.services.native_menu = Some(NativeMenu::new(Box::new(popups.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        let ctx = h.ctx.clone();
+        // The Layers group's ellipsis: the one level with the Layers title.
+        let title = ctx.read_response(crate::panel_docking::tab_id(&"layers".to_string())).expect("the Layers title").rect;
+        let button = h.query_all_by_label("Panel menu").map(|n| n.rect()).find(|r| r.y_range().contains(title.center().y)).expect("its ellipsis");
+        let at = button.center();
+        let press = |h: &mut Harness<'_, PhotocraftApp>, pressed: bool| {
+            let mut events = vec![E::PointerMoved(at), E::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }];
+            h.state_mut().menu_press.complete(&ctx, &mut events, |_| false);
+            for e in events {
+                h.event(e);
+            }
+            h.step();
+        };
+        h.hover_at(at);
+        h.step();
+        press(&mut h, true);
+        h.step();
+        let (serial, nodes, pos) = popups.0.borrow().0.last().cloned().expect("a native menu on the press");
+        assert!((pos[0] - button.left()).abs() < 1.0 && (pos[1] - button.bottom()).abs() < 1.0, "below the button: {pos:?}, {button:?}");
+        assert!(h.query_by_label("Close Tab Group").is_none(), "no egui popup");
+        let labels: Vec<&str> = nodes.iter().filter_map(|n| if let Node::Item(it) = n { Some(it.label.as_str()) } else { None }).collect();
+        for want in ["New Layer…", "Float Panel", "Close Tab Group"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        let close = nodes.iter().find_map(|n| if let Node::Item(it) = n { (it.label == "Close Tab Group").then(|| it.id.clone()) } else { None }).unwrap();
+        popups.0.borrow_mut().1.extend([Event::ContextChosen { serial, id: close }, Event::ContextClosed(serial)]);
+        let mut raw = egui::RawInput::default();
+        h.state_mut().services.native_menu.as_mut().unwrap().raw_input(&mut raw);
+        h.run_steps(2);
+        assert!(!h.state().ui.docking.as_ref().unwrap().contains(&"layers".to_string()), "Close Tab Group closed the Layers group");
+        press(&mut h, false);
+        h.run_steps(2);
+        assert_eq!(popups.0.borrow().0.len(), 1, "the release opens nothing");
     }
 
     #[test]

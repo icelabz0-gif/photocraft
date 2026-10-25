@@ -360,19 +360,22 @@ fn warning(ui: &mut egui::Ui, rect: Rect, mask: u8, on: &mut bool, label: &str) 
 /// Scope display options. The menu stays open while toggling, so options that depend on
 /// Show Vectorscope appear in place.
 fn context_menu(response: &egui::Response, has_selection: bool, view: &mut CameraRawScopeState) {
-    egui::Popup::context_menu(response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| context(ui, has_selection, view));
+    crate::context_menu::show_with(response, egui::PopupCloseBehavior::CloseOnClickOutside, |m| context(m, has_selection, view));
 }
 
-fn context(ui: &mut egui::Ui, has_selection: bool, view: &mut CameraRawScopeState) {
-    widgets::checkbox(ui, &mut view.lab, tl!("Show Lab Color Readouts"));
-    widgets::checkbox(ui, &mut view.vectorscope, tl!("Show Vectorscope"));
+fn context(m: &mut crate::context_menu::MenuUi, has_selection: bool, view: &mut CameraRawScopeState) {
+    let mut check = |on: &mut bool, label: &str| {
+        m.toggle(on, crate::context_menu::Row::new(label), |ui, on| widgets::checkbox(ui, on, label));
+    };
+    check(&mut view.lab, tl!("Show Lab Color Readouts"));
+    check(&mut view.vectorscope, tl!("Show Vectorscope"));
     if view.vectorscope {
         if has_selection {
-            widgets::checkbox(ui, &mut view.selected_region, tl!("Show Selected Region"));
+            check(&mut view.selected_region, tl!("Show Selected Region"));
         }
-        widgets::checkbox(ui, &mut view.red_right, tl!("Show Red at 3 o'clock"));
+        check(&mut view.red_right, tl!("Show Red at 3 o'clock"));
         let mut skin = !view.hide_skin_line;
-        widgets::checkbox(ui, &mut skin, tl!("Show Skin Tone Indicator"));
+        check(&mut skin, tl!("Show Skin Tone Indicator"));
         view.hide_skin_line = !skin;
     }
 }

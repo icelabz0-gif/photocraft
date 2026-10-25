@@ -229,27 +229,25 @@ fn commit(app: &mut PhotocraftApp) -> Result<Value, String> {
 
 /// Photoshop's right-click menu on a constraint: its orientation (the current one checked) and
 /// Delete. A right-click away from every constraint opens nothing.
-fn constraint_menu(ui: &mut egui::Ui, d: &mut WideAngleDialog) {
+fn constraint_menu(m: &mut crate::context_menu::MenuUi, d: &mut WideAngleDialog) {
     let Some(i) = d.menu_for.filter(|i| *i < d.params.constraints.len()) else {
-        ui.close();
+        m.close();
         return;
     };
     for (o, label) in [(Orientation::Free, tl!("Free")), (Orientation::Horizontal, tl!("Horizontal")), (Orientation::Vertical, tl!("Vertical"))] {
         let current = d.params.constraints.get(i).is_some_and(|c| c.orientation == o);
-        if ui.radio(current, label).clicked() {
-            if let Some(c) = d.params.constraints.get_mut(i) {
-                c.orientation = o;
-                d.dirty = true;
-            }
-            ui.close();
+        if m.row(crate::context_menu::Row::new(label).checked(current), |ui| ui.radio(current, label))
+            && let Some(c) = d.params.constraints.get_mut(i)
+        {
+            c.orientation = o;
+            d.dirty = true;
         }
     }
-    ui.separator();
-    if ui.button(tl!("Delete")).clicked() {
+    m.separator();
+    if m.item(tl!("Delete")) {
         d.params.constraints.remove(i);
         d.menu_for = None;
         d.dirty = true;
-        ui.close();
     }
 }
 
@@ -320,7 +318,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             d.menu_for = near.filter(|(_, dist)| *dist < 10.0).map(|(i, _)| i);
         }
-        resp.context_menu(|ui| constraint_menu(ui, d));
+        crate::context_menu::show(&resp, |m| constraint_menu(m, d));
         let show_src = !d.preview || d.drag.is_some();
         let tex = if show_src { d.src_tex.as_ref() } else { d.out_tex.as_ref() };
         widgets::checker(&painter, img_r, 8.0);

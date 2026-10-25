@@ -139,11 +139,13 @@ and picas. The readout retains the document's pixels-per-inch value.
 
 `menu_catalog.rs` holds Photoshop's menu tree (standard command names, order, separators, default shortcuts). Items whose id matches an engine or UI command are live; others render disabled until implemented. Give new commands the catalogue's id (for example `image.imageSize`) and they light up in the right place automatically.
 
-Menus never run off the window: the menu bar's menus and submenus scroll with arrows (`menu_nav::level`), and long right-click menus (Layers, canvas tools, Channels, Paths, document tabs) wrap their rows in `widgets::menu_scroll`, so they move up to fit and scroll only when taller than the visible window.
+Menus never run off the window: the menu bar's menus and submenus scroll with arrows (`menu_nav::level`), and long right-click menus (Layers, canvas tools, Channels, Paths, document tabs) wrap their rows in `MenuUi::scroll` (`widgets::menu_scroll`), so they move up to fit and scroll only when taller than the visible window.
+
+Right-click menus are written against `context_menu::MenuUi` and opened with `context_menu::show`, never with egui's `Response::context_menu`: on macOS they are native `NSMenu`s (like the menu bar), elsewhere egui popups. `MenuUi::row` takes the egui drawing (a swatch, a radio, a "✓ " label) and the native row (label, enabled, checked, shortcut) separately, so both look right.
 
 ## Automation for visual checks
 
-Use `ui.click {x,y}`, `ui.move`, `ui.key` and `ui.type` (synthetic input in screen points) to open menus, popups and context menus, then `ui.screenshot`.
+Use `ui.click {x,y}`, `ui.move`, `ui.key` and `ui.type` (synthetic input in screen points) to open menus, popups and context menus, then `ui.screenshot`. With the control channel attached, context menus are egui popups on macOS too, so they show in the screenshot.
 
 ## Font menus
 

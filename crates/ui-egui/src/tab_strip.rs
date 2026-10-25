@@ -146,14 +146,12 @@ fn tabs_in(
         }
         // The context menu belongs to the actual tab response, so its normal clicks
         // and double-click-to-collapse behavior are not intercepted by an overlay.
-        resp.context_menu(|ui| {
-            if ui.button(tl!("Close")).clicked() {
+        crate::context_menu::show(&resp, |m| {
+            if m.item(tl!("Close")) {
                 out.context = Some(TabContextAction::Close(i));
-                ui.close();
             }
-            if ui.button(tl!("Close Tab Group")).clicked() {
+            if m.item(tl!("Close Tab Group")) {
                 out.context = Some(TabContextAction::CloseGroup);
-                ui.close();
             }
         });
         out.tabs.push((i, r));

@@ -940,6 +940,34 @@ fn menu_id() -> egui::Id {
     egui::Id::new("canvas-selection-menu")
 }
 
+/// The open menu's rows, the spelling suggestions first; `selected` gets the chosen row's command.
+fn menu_rows(app: &PhotocraftApp, menu: &CanvasToolMenu, m: &mut crate::context_menu::MenuUi, selected: &mut Option<String>) {
+    use crate::context_menu::Row;
+    let size = egui::vec2(200.0, 20.0);
+    let spelling = spelling_rows(menu);
+    for (label, command) in &spelling {
+        let text = if spelling_label_is_ui(command) { tl!(label).to_string() } else { label.clone() };
+        let enabled = entry_enabled(app, menu, command);
+        if m.row_open(Row::new(&text).enabled(enabled), |ui| ui.add_enabled(enabled, egui::Button::new(text.as_str()).min_size(size))) {
+            *selected = Some(command.clone());
+        }
+    }
+    if !spelling.is_empty() {
+        m.separator();
+    }
+    for row in rows(menu) {
+        let Some((label, command)) = *row else {
+            m.separator();
+            continue;
+        };
+        let (label, checked, enabled) = (tl!(label), mode_checked(app, menu, command), entry_enabled(app, menu, command));
+        if m.row_open(Row::new(label).enabled(enabled).checked(checked), |ui| ui.add_enabled(enabled, egui::Button::selectable(checked, label).min_size(size)))
+        {
+            *selected = Some(command.to_string());
+        }
+    }
+}
+
 pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
     let Some(menu) = app.ui.canvas_tool_menu.clone() else { return };
     if ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -952,10 +980,19 @@ pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
         return;
     }
     let id = menu_id();
+    let mut selected = None;
+    // A native menu where the app has them (`context_menu`).
+    if let Some(open) = crate::context_menu::show_native(ctx, id, egui::pos2(menu.pos[0], menu.pos[1]), |m| menu_rows(app, &menu, m, &mut selected)) {
+        if let Some(command) = selected {
+            choose(app, ctx, &command);
+        } else if !open {
+            app.ui.canvas_tool_menu = None;
+        }
+        return;
+    }
     let screen = ctx.content_rect();
     let size = ctx.memory(|m| m.area_rect(id)).map_or(egui::vec2(210.0, 140.0), |r| r.size());
     let pos = egui::pos2(menu.pos[0].min(screen.right() - size.x).max(screen.left()), menu.pos[1].min(screen.bottom() - size.y).max(screen.top()));
-    let mut selected = None;
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::menu(ui.style()).show(ui, |ui| {
             let t = crate::theme::Tokens::get(ui.ctx());
@@ -969,29 +1006,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
             v.widgets.hovered.corner_radius = egui::CornerRadius::same(3);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.set_width(200.0);
-            crate::widgets::menu_scroll(ui, |ui| {
-                let spelling = spelling_rows(&menu);
-                for (label, command) in &spelling {
-                    let text = if spelling_label_is_ui(command) { tl!(label).to_string() } else { label.clone() };
-                    let item = egui::Button::new(text).min_size(egui::vec2(200.0, 20.0));
-                    if ui.add_enabled(entry_enabled(app, &menu, command), item).clicked() {
-                        selected = Some(command.clone());
-                    }
-                }
-                if !spelling.is_empty() {
-                    ui.separator();
-                }
-                for row in rows(&menu) {
-                    let Some((label, command)) = *row else {
-                        ui.separator();
-                        continue;
-                    };
-                    let item = egui::Button::selectable(mode_checked(app, &menu, command), tl!(label)).min_size(egui::vec2(200.0, 20.0));
-                    if ui.add_enabled(entry_enabled(app, &menu, command), item).clicked() {
-                        selected = Some((*command).to_string());
-                    }
-                }
-            });
+            crate::widgets::menu_scroll(ui, |ui| menu_rows(app, &menu, &mut crate::context_menu::MenuUi::egui(ui), &mut selected));
         });
     });
     if let Some(command) = selected {

@@ -141,16 +141,14 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     action = Some(("layerComp.reorder", json!({"comp":source.comp, "index":to})));
                 }
             }
-            resp.context_menu(|ui| {
-                if ui.add_enabled(index > 0, egui::Button::new(tl!("Move Up"))).clicked() {
+            crate::context_menu::show(&resp, |m| {
+                if m.item_enabled(index > 0, tl!("Move Up")) {
                     action = Some(("layerComp.reorder", json!({"comp":c.id, "index":index.saturating_sub(1)})));
                     select = Some(c.id);
-                    ui.close();
                 }
-                if ui.add_enabled(index + 1 < doc.layer_comps.len(), egui::Button::new(tl!("Move Down"))).clicked() {
+                if m.item_enabled(index + 1 < doc.layer_comps.len(), tl!("Move Down")) {
                     action = Some(("layerComp.reorder", json!({"comp":c.id, "index":index + 1})));
                     select = Some(c.id);
-                    ui.close();
                 }
             });
             if selected == Some(c.id) {

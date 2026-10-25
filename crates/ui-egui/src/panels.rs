@@ -704,7 +704,8 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         if button.clicked() {
                             crate::prefs_ui::cycle_appearance(app, ui.ctx());
                         }
-                        button.context_menu(|ui| crate::prefs_ui::appearance_context_menu(app, ui));
+                        let ctx = ui.ctx().clone();
+                        crate::context_menu::show(&button, |m| crate::prefs_ui::appearance_context_menu(app, &ctx, m));
                     }
                     if rtl { ui.min_rect().right() } else { ui.min_rect().left() }
                 };
@@ -986,14 +987,12 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
                         // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
                         let mut reset = None;
-                        tool_icon.context_menu(|ui| {
-                            if ui.button(tl!("Reset Tool")).clicked() {
+                        crate::context_menu::show(&tool_icon, |m| {
+                            if m.item(tl!("Reset Tool")) {
                                 reset = Some("tool.reset");
-                                ui.close();
                             }
-                            if ui.button(tl!("Reset All Tools")).clicked() {
+                            if m.item(tl!("Reset All Tools")) {
                                 reset = Some("tool.resetAll");
-                                ui.close();
                             }
                         });
                         if let Some(id) = reset
@@ -1639,7 +1638,11 @@ fn fixed_size_field(ui: &mut egui::Ui, px: &mut f32, units: widgets::FieldUnits,
         *px = unit.to_px(f64::from(v), dpi, extent, ppi).clamp(1.0, FIXED_SIZE_MAX_PX) as f32;
     }
     let mut picked = None;
-    resp.context_menu(|ui| picked = crate::rulers::unit_menu(ui, unit));
+    crate::context_menu::show(&resp, |m| {
+        if let Some(name) = crate::rulers::unit_menu(m, unit) {
+            picked = Some(name);
+        }
+    });
     picked
 }
 
@@ -3223,9 +3226,11 @@ fn layer_row(
             actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "visible": !l.visible})));
         }
     }
-    eye_resp.context_menu(|ui| {
-        crate::widgets::style_spectrum_popup_menu(ui);
-        crate::layer_menu_ui::color_choices(app, ui, l, row.multi && selected, actions);
+    crate::context_menu::show(&eye_resp, |m| {
+        if let Some(ui) = m.ui() {
+            crate::widgets::style_spectrum_popup_menu(ui);
+        }
+        crate::layer_menu_ui::color_choices(app, m, l, row.multi && selected, actions);
     });
     // Everything but the thumbnails, the indentation and the name, so a narrow panel squeezes
     // the indentation first, then the thumbnails (a layer with two masks has three).
@@ -3431,16 +3436,18 @@ fn layer_row(
         ctx.data_mut(|d| d.insert_temp(on_mask_id, on_mask));
     }
     if !eye_resp.secondary_clicked() && !eye_resp.context_menu_opened() {
-        resp.context_menu(|ui| {
-            crate::widgets::style_spectrum_popup_menu(ui);
-            if ui.ctx().data(|d| d.get_temp::<bool>(on_mask_id)).unwrap_or(false) {
-                crate::layer_menu_ui::show_mask(app, ui, l, actions);
+        crate::context_menu::show(&resp, |m| {
+            if let Some(ui) = m.ui() {
+                crate::widgets::style_spectrum_popup_menu(ui);
+            }
+            if ctx.data(|d| d.get_temp::<bool>(on_mask_id)).unwrap_or(false) {
+                crate::layer_menu_ui::show_mask(app, m, l, actions);
                 return;
             }
             // Right-clicking inside a multi-selection keeps it and acts on every selected layer.
             let on_set = row.multi && selected;
-            if crate::layer_menu_ui::show(app, ui, l, on_set, actions)
-                && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), l.id.0, &l.name)
+            if crate::layer_menu_ui::show(app, m, l, on_set, actions)
+                && let Some(done) = crate::layer_row_ui::start_rename(ctx, l.id.0, &l.name)
             {
                 actions.push(done);
             }
@@ -3814,14 +3821,12 @@ fn snapshot_rows(app: &mut PhotocraftApp, ui: &mut egui::Ui, selected: Option<u6
         } else if resp.clicked() {
             cmd = Some(("history.selectSnapshot", json!({"snapshot": snap.id})));
         }
-        resp.context_menu(|ui| {
-            if ui.button(tl!("Rename…")).clicked() {
+        crate::context_menu::show(&resp, |m| {
+            if m.item(tl!("Rename…")) {
                 renaming = Some((snap.id, snap.name.clone()));
-                ui.close();
             }
-            if ui.button(tl!("Delete")).clicked() {
+            if m.item(tl!("Delete")) {
                 cmd = Some(("history.deleteSnapshot", json!({"snapshot": snap.id})));
-                ui.close();
             }
         });
     }
@@ -4767,9 +4772,11 @@ fn effect_rows(app: &mut PhotocraftApp, ui: &mut egui::Ui, l: &Layer, depth: usi
             crate::layer_style::open_for_layer(app, l.id, kind);
         }
         // #2846: right-click opens the layer style menu (Create Layer, Copy Layer Style…), as in Photoshop.
-        resp.context_menu(|ui| {
-            crate::widgets::style_spectrum_popup_menu(ui);
-            crate::layer_menu_ui::show_effects(app, ui, l, actions);
+        crate::context_menu::show(&resp, |m| {
+            if let Some(ui) = m.ui() {
+                crate::widgets::style_spectrum_popup_menu(ui);
+            }
+            crate::layer_menu_ui::show_effects(app, m, l, actions);
         });
     }
 }
