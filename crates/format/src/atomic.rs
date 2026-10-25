@@ -300,7 +300,10 @@ fn temp_is_stale(pid: u32, path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         let _ = pid;
-        std::fs::symlink_metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        std::fs::symlink_metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age >= STALE_TEMP_AGE)
     }
 }
