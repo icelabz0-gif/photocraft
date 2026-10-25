@@ -553,8 +553,8 @@ pub(crate) fn shift_shape(doc: &Document, sh: &mut ShapeLayer, dx: f64, dy: f64)
     }
 }
 
-/// Applies an affine transform to a shape's path, keeping the live shape when the transform
-/// is a translation plus axis-aligned scale (otherwise the shape stops being parametric).
+/// Applies an affine transform to a shape's path, preserving live parameters when
+/// they can still reproduce the transformed geometry accurately.
 /// Returns axial and perpendicular scales only when an affine transform keeps an
 /// arrowhead's local axes perpendicular. A skewed head cannot be regenerated
 /// faithfully from the current ArrowLine width and length parameters.
@@ -578,6 +578,27 @@ fn arrow_axis_scales(a: &Affine, from: [f64; 2], to: [f64; 2]) -> Option<(f64, f
 }
 
 pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
+    // Check original arrow dimensions before transforming the path.
+    // Parameters already clamped by arrow_line cannot faithfully
+    // regenerate the transformed geometry.
+    if let Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, .. }) = sh.live.as_ref()
+        && (*start || *end)
+    {
+        let original_length = (to[0] - from[0]).hypot(to[1] - from[1]);
+
+        if !weight.is_finite()
+            || *weight < 0.1
+            || !width.is_finite()
+            || *width < 1.0
+            || !length.is_finite()
+            || *length < 1.0
+            || !original_length.is_finite()
+            || original_length < 1.0
+        {
+            sh.live = None;
+        }
+    }
+
     sh.path = sh.path.transform(a);
     let [m0, m1, m2, m3, tx, ty] = a.m;
     let axis_aligned = m1.abs() < 1e-12 && m2.abs() < 1e-12 && m0 > 0.0 && m3 > 0.0;
@@ -663,8 +684,43 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 _ => None,
             }
         }
+        // Arbitrary rotations and other orthogonal-axis affine transforms also
+        // preserve arrow geometry and should keep their editable live parameters.
+        (Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity }), false) => {
+            arrow_axis_scales(a, from, to).map(|(axial_scale, perpendicular_scale)| {
+                let pt = |p: [f64; 2]| [m0 * p[0] + m2 * p[1] + tx, m1 * p[0] + m3 * p[1] + ty];
+                LiveShape::ArrowLine {
+                    from: pt(from),
+                    to: pt(to),
+                    weight: weight * perpendicular_scale,
+                    start,
+                    end,
+                    width: width * perpendicular_scale,
+                    length: length * axial_scale,
+                    concavity,
+                }
+            })
+        }
         _ => None,
     };
+    // Keep the exact transformed outline. Remove live arrow parameters
+    // when minimum-size constraints would alter its regenerated geometry.
+    if let Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, .. }) = sh.live.as_ref()
+        && (*start || *end)
+    {
+        let line_length = (to[0] - from[0]).hypot(to[1] - from[1]);
+        if !weight.is_finite()
+            || *weight < 0.1
+            || !width.is_finite()
+            || *width < 1.0
+            || !length.is_finite()
+            || *length < 1.0
+            || !line_length.is_finite()
+            || line_length < 1.0
+        {
+            sh.live = None;
+        }
+    }
     sh.psd_raw = None;
 }
 
@@ -2108,6 +2164,78 @@ mod tests;
 #[cfg(test)]
 mod arrow_affine_regression_tests {
     use super::*;
+
+    #[test]
+    fn forty_five_degree_rotation_retains_live_arrow_and_geometry() {
+        let live =
+            LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 8.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 50.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        let c = std::f64::consts::FRAC_PI_4.cos();
+        let s = std::f64::consts::FRAC_PI_4.sin();
+        a.m = [c, s, -s, c, 0.0, 0.0];
+        transform_shape(&mut sh, &a);
+        let Some(LiveShape::ArrowLine { width, length, .. }) = sh.live.as_ref() else {
+            panic!("Arrow must remain parametrically editable after 45-degree rotation");
+        };
+        assert!((*width - 31.0).abs() < 1e-9);
+        assert!((*length - 31.0).abs() < 1e-9);
+        let rebuilt = vector::shapes::live_path(sh.live.as_ref().unwrap());
+        assert_eq!(sh.path.subpaths.len(), rebuilt.subpaths.len());
+        for (existing, generated) in sh.path.subpaths.iter().zip(rebuilt.subpaths.iter()) {
+            assert_eq!(existing.knots.len(), generated.knots.len());
+            for (a, b) in existing.knots.iter().zip(generated.knots.iter()) {
+                assert!((a.anchor.x - b.anchor.x).abs() < 1e-8);
+                assert!((a.anchor.y - b.anchor.y).abs() < 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn subpixel_scale_keeps_transformed_path_but_drops_unreproducible_live_parameters() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 5.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.01, 0.0, 0.0, 0.01, 0.0, 0.0];
+
+        let expected_path = sh.path.transform(&a);
+        transform_shape(&mut sh, &a);
+
+        assert_eq!(sh.path, expected_path);
+        assert!(sh.live.is_none());
+    }
+
+    #[test]
+    fn headless_short_arrow_remains_editable_after_scaling() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [0.5, 0.0], weight: 0.05, start: false, end: false, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.5, 0.0, 0.0, 0.5, 0.0, 0.0];
+
+        let expected = sh.path.transform(&a);
+        transform_shape(&mut sh, &a);
+
+        assert_eq!(sh.path, expected);
+        assert!(matches!(sh.live, Some(LiveShape::ArrowLine { start: false, end: false, .. })));
+    }
+
+    #[test]
+    fn scale_above_minimum_still_keeps_live_arrow_editable() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 5.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.5, 0.0, 0.0, 0.5, 0.0, 0.0];
+
+        transform_shape(&mut sh, &a);
+
+        let Some(LiveShape::ArrowLine { width, length, .. }) = sh.live else {
+            panic!("Ordinary scaling must preserve editable arrow parameters");
+        };
+
+        assert!((width - 15.5).abs() < 1e-9);
+        assert!((length - 15.5).abs() < 1e-9);
+    }
 
     #[test]
     fn reflected_horizontal_arrow_uses_axial_scale_for_head_length() {

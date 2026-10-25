@@ -222,7 +222,14 @@ pub fn line(a: (f64, f64), b: (f64, f64), weight: f64) -> Path {
 pub fn arrow_line(a: (f64, f64), b: (f64, f64), weight: f64, start: bool, end: bool, width: f64, length: f64, concavity: f64) -> Path {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let distance = dx.hypot(dy);
-    if !distance.is_finite() || distance < 1.0 || !weight.is_finite() {
+    if !distance.is_finite() || !weight.is_finite() {
+        return Path::default();
+    }
+    // Without arrowheads, use the ordinary line even for segments shorter than 1 px.
+    if !start && !end {
+        return line(a, b, weight);
+    }
+    if distance < 1.0 {
         return Path::default();
     }
     let (ux, uy) = (dx / distance, dy / distance);
@@ -402,6 +409,13 @@ mod tests {
 #[cfg(test)]
 mod line_arrow_6408_tests {
     use super::*;
+
+    #[test]
+    fn short_line_without_heads_matches_regular_line() {
+        let a = (0.0, 0.0);
+        let b = (0.25, 0.0);
+        assert_eq!(arrow_line(a, b, 5.0, false, false, 52.0, 50.0, 0.0), line(a, b, 5.0));
+    }
 
     #[test]
     fn plain_line_has_single_subpath() {
