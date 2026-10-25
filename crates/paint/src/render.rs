@@ -1237,6 +1237,9 @@ impl SampledTip<'_> {
         let (cx, dy) = (f64::from(self.cx), f64::from(dy));
         let (sn, cs, flip_x, flip_y) = (f64::from(self.sn), f64::from(self.cs), f64::from(self.flip_x), f64::from(self.flip_y));
         let (inv, tw, th, ro) = (f64::from(self.inv_scale), f64::from(self.tw), f64::from(self.th), f64::from(self.ro));
+        // The error terms take magnitudes: a direct caller's negative radius (and roundness)
+        // makes `inv` (and `ro`) negative, which would shrink the margin and the size below.
+        let (inv_a, ro_a) = (inv.abs(), ro.abs());
         // Rounding error of the f32 mapping: `dx` carries at most three roundings of magnitudes
         // up to `d`, the projection and rotation scale it by at most `2p`, and each of their 14
         // roundings (counted 24 times) is of a magnitude up to `g`; then the scale and offset.
@@ -1245,11 +1248,11 @@ impl SampledTip<'_> {
         let p = 1.0 + 2.0 * k.abs();
         let g = 2.0 * p * (d + e_d) * (1.0 + 8.0 * eps);
         let e_uv = 2.0 * p * e_d + 24.0 * eps * g;
-        let e_px = inv * e_uv + 3.0 * eps * (g * inv + tw);
-        let e_py = inv / ro * e_uv + 4.0 * eps * (g * inv / ro + th);
+        let e_px = inv_a * e_uv + 3.0 * eps * (g * inv_a + tw);
+        let e_py = inv_a / ro_a * e_uv + 4.0 * eps * (g * inv_a / ro_a + th);
         let margin = 2.0 * (e_px.max(e_py) + eps * (tw + th + 2.0)) + 1e-3;
         // Below 1e9 nothing overflows and f64's own error (~1e-6) is far inside the margin.
-        let size = g * inv / ro + g * inv + tw + th;
+        let size = g * inv_a / ro_a + g * inv_a + tw + th;
         if !(size < 1e9 && margin.is_finite() && [ax, ay, k, sn, cs, flip_x, flip_y, inv, tw, th, ro].iter().all(|v| v.is_finite())) {
             return None;
         }

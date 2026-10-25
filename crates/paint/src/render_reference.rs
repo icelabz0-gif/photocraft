@@ -410,6 +410,20 @@ fn exceptional_sampled_dabs_match_scalar_bits() {
     for c in [Point::new(f64::NAN, 3.0), Point::new(3.0, f64::INFINITY), Point::new(1e30, -1e30)] {
         compare_sampled(&ctx, &Dab::round(c, 6.0, 1.0), false, Rect::new(-8, -8, 17, 16), false);
     }
+    // A negative radius (and roundness) turns the tip mapping's scale negative: the column
+    // bound must still hold, near the origin and far out, where f32 rounds the pixel grid.
+    for (x, y) in [(4.0, 4.0), (16_777_216.25, -16_777_216.75), (-3.0e7, 1.2e7)] {
+        for radius in [-0.25, -6.0, -150.0] {
+            for (roundness, angle) in [(1.0, 0.0), (0.3, 0.0), (-0.4, 0.0), (1.0, 0.4), (-0.4, 0.4)] {
+                let mut d = Dab::round(Point::new(x, y), radius, 0.9);
+                (d.roundness, d.angle) = (roundness, angle);
+                let (cx, cy) = (x as i32, y as i32);
+                for with_depth in [false, true] {
+                    compare_sampled(&ctx, &d, false, Rect::new(cx - 20, cy - 9, cx + 21, cy + 10), with_depth);
+                }
+            }
+        }
+    }
 }
 
 /// A whole stroke rendered with the frozen scalar rasterizer: the renderer's own dab generation,
@@ -580,7 +594,9 @@ impl Rng {
 /// The row bound the kernel skips columns by ([`SampledTip::columns`]) holds every pixel whose
 /// f32 window test passes, for mappings far beyond what brushes produce: centres to ±3·10⁷
 /// (where f32 can't hold the pixel grid), any rotation and flip, projection up to the strongest,
-/// scales from 1/1000 to 10⁴ texels per pixel, squash to 1/10⁴ and tips up to 5000 texels.
+/// scales from 1/1000 to 10⁴ texels per pixel, squash to 1/10⁴ and tips up to 5000 texels; on
+/// one row in four the scale is negative, and on one in eight the squash too (a direct caller's
+/// negative radius and roundness).
 #[test]
 fn sampled_tip_column_bound_holds_every_pixel_in_the_window() {
     let mut rng = Rng(0x5eed_1234_abcd_ef01);
@@ -594,6 +610,8 @@ fn sampled_tip_column_bound_holds_every_pixel_in_the_window() {
         let pa = rng.range(-4.0, 4.0) as f32;
         let proj = rng.next() < 0.5;
         let k = if proj { rng.range(0.0, 19.0) as f32 } else { 0.0 };
+        // The signs come from `n`, so the random draws stay those of the positive mappings.
+        let (inv_sign, ro_sign) = (if n % 4 == 1 { -1.0 } else { 1.0 }, if n % 8 == 5 { -1.0 } else { 1.0 });
         let tip = SampledTip {
             cx: if far { rng.magnitude(6.5, 7.5) } else { rng.magnitude(-1.0, 6.0) } as f32,
             sn,
@@ -601,10 +619,10 @@ fn sampled_tip_column_bound_holds_every_pixel_in_the_window() {
             flip_x: if rng.next() < 0.5 { -1.0 } else { 1.0 },
             flip_y: if rng.next() < 0.5 { -1.0 } else { 1.0 },
             proj: (pa.cos(), pa.sin(), k),
-            inv_scale: 10f64.powf(if far { rng.range(-1.0, 1.0) } else { rng.range(-3.0, 4.0) }) as f32,
+            inv_scale: inv_sign * 10f64.powf(if far { rng.range(-1.0, 1.0) } else { rng.range(-3.0, 4.0) }) as f32,
             tw: rng.range(1.0, 5000.0).round() as f32,
             th: rng.range(1.0, 5000.0).round() as f32,
-            ro: 10f64.powf(if far { rng.range(-0.5, 0.0) } else { rng.range(-4.0, 0.0) }) as f32,
+            ro: ro_sign * 10f64.powf(if far { rng.range(-0.5, 0.0) } else { rng.range(-4.0, 0.0) }) as f32,
             lw: 2,
             lh: 2,
             data: &data,
