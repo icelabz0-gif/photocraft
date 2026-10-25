@@ -56,62 +56,46 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     });
 
     // Brush size and opacity are the two controls a comic artist changes constantly. They stay
-    // on the bottom edge, within thumb reach, together with undo/redo, color and layers. The row
-    // wraps and shrinks on narrow viewports (a phone in portrait) so none of these is pushed off
-    // screen; on a tablet it stays a single row.
+    // on the bottom edge, within thumb reach, together with undo/redo, color and layers. On a
+    // tablet this is one row. A phone-width viewport gets two explicit rows: an `Area` gives its
+    // content a small default width, so `horizontal_wrapped` would wrap a tablet row too early.
     crate::paint_mouse::sync_tool_brush(app);
     let before = app.session.tools.brush.clone();
     let mut brush = before.clone();
-    let narrow = ctx.content_rect().width() < 640.0;
-    let button = if narrow { 38.0 } else { 42.0 };
-    let size_width = if narrow { 150.0 } else { 180.0 };
-    let opacity_width = if narrow { 120.0 } else { 150.0 };
+    let compact = ctx.content_rect().width() < 640.0;
+    let button = if compact { 38.0 } else { 42.0 };
+    let (size_width, opacity_width) = if compact {
+        // Two rows: undo/redo plus both sliders, then color/layers/preset. Keep the slider split
+        // inside the screen width even on a 320-point phone.
+        let available = (ctx.content_rect().width() - 24.0).max(240.0);
+        let budget = (available - 2.0 * button - 12.0).max(180.0);
+        ((budget * 0.58).clamp(90.0, 180.0), (budget * 0.42).clamp(80.0, 150.0))
+    } else {
+        (180.0, 150.0)
+    };
     egui::Area::new(Id::new("drawing-bar")).order(Order::Foreground).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -14.0)).show(ctx, |ui| {
         frame().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(if narrow { 4.0 } else { 6.0 }, 4.0);
-
-                if crate::icons::button(ui, "undo-2", button, false, tl!("Undo")).clicked() {
-                    let _ = crate::menus::invoke(app, ctx, "edit.undo", serde_json::json!({}));
-                }
-                if crate::icons::button(ui, "redo-2", button, false, tl!("Redo")).clicked() {
-                    let _ = crate::menus::invoke(app, ctx, "edit.redo", serde_json::json!({}));
-                }
-
-                ui.add_sized([size_width, button], egui::Slider::new(&mut brush.size, 1.0..=500.0).show_value(true).text(tl!("Size")));
-                let mut opacity = brush.opacity * 100.0;
-                if ui.add_sized([opacity_width, button], egui::Slider::new(&mut opacity, 0.0..=100.0).show_value(true).text(tl!("Opacity"))).changed() {
-                    brush.opacity = opacity / 100.0;
-                }
-
-                // Foreground color swatch. The color sheet carries the full picker.
-                let fg = app.session.tools.foreground;
-                let color = Color32::from_rgba_unmultiplied((fg[0] * 255.0) as u8, (fg[1] * 255.0) as u8, (fg[2] * 255.0) as u8, (fg[3] * 255.0) as u8);
-                let color_clicked = ui
-                    .scope(|ui| {
-                        ui.spacing_mut().interact_size = vec2(button, button);
-                        crate::widgets::color_swatch_button(ui, color, tl!("Color")).clicked()
-                    })
-                    .inner;
-                if color_clicked {
-                    app.ui.drawing.color = !app.ui.drawing.color;
-                    app.ui.drawing.layers = false;
-                }
-
-                if crate::icons::button(ui, "layers", button, false, tl!("Layers")).clicked() {
-                    app.ui.drawing.layers = !app.ui.drawing.layers;
-                    app.ui.drawing.color = false;
-                }
-
-                // Pick a different brush preset without leaving the canvas. The picker opens
-                // above the quick bar; its own gear opens the full Brush Settings panel.
-                if app.ui.tool.is_brushlike() {
-                    let response = crate::icons::button(ui, "brush", button, false, tl!("Brush Preset picker"));
-                    if response.clicked() {
-                        crate::brush_picker::open(&mut app.ui, ctx, [response.rect.left(), response.rect.top() - 440.0]);
-                    }
-                }
-            });
+            if compact {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        quick_undo_redo(app, ui, ctx, button);
+                        quick_sliders(ui, &mut brush.size, &mut brush.opacity, size_width, opacity_width, button);
+                    });
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        quick_toggles(app, ui, ctx, button);
+                    });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    quick_undo_redo(app, ui, ctx, button);
+                    quick_sliders(ui, &mut brush.size, &mut brush.opacity, size_width, opacity_width, button);
+                    quick_toggles(app, ui, ctx, button);
+                });
+            }
         });
     });
 
@@ -120,6 +104,53 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
 
     show_sheet(app, ctx, &frame);
+}
+
+fn quick_undo_redo(app: &mut PhotocraftApp, ui: &mut egui::Ui, ctx: &egui::Context, button: f32) {
+    if crate::icons::button(ui, "undo-2", button, false, tl!("Undo")).clicked() {
+        let _ = crate::menus::invoke(app, ctx, "edit.undo", serde_json::json!({}));
+    }
+    if crate::icons::button(ui, "redo-2", button, false, tl!("Redo")).clicked() {
+        let _ = crate::menus::invoke(app, ctx, "edit.redo", serde_json::json!({}));
+    }
+}
+
+fn quick_sliders(ui: &mut egui::Ui, size: &mut f32, opacity: &mut f32, size_width: f32, opacity_width: f32, height: f32) {
+    ui.add_sized([size_width, height], egui::Slider::new(size, 1.0..=500.0).show_value(true).text(tl!("Size")));
+    let mut percent = *opacity * 100.0;
+    if ui.add_sized([opacity_width, height], egui::Slider::new(&mut percent, 0.0..=100.0).show_value(true).text(tl!("Opacity"))).changed() {
+        *opacity = percent / 100.0;
+    }
+}
+
+fn quick_toggles(app: &mut PhotocraftApp, ui: &mut egui::Ui, ctx: &egui::Context, button: f32) {
+    // Foreground color swatch. The color sheet carries the full picker.
+    let fg = app.session.tools.foreground;
+    let color = Color32::from_rgba_unmultiplied((fg[0] * 255.0) as u8, (fg[1] * 255.0) as u8, (fg[2] * 255.0) as u8, (fg[3] * 255.0) as u8);
+    let color_clicked = ui
+        .scope(|ui| {
+            ui.spacing_mut().interact_size = vec2(button, button);
+            crate::widgets::color_swatch_button(ui, color, tl!("Color")).clicked()
+        })
+        .inner;
+    if color_clicked {
+        app.ui.drawing.color = !app.ui.drawing.color;
+        app.ui.drawing.layers = false;
+    }
+
+    if crate::icons::button(ui, "layers", button, false, tl!("Layers")).clicked() {
+        app.ui.drawing.layers = !app.ui.drawing.layers;
+        app.ui.drawing.color = false;
+    }
+
+    // Pick a different brush preset without leaving the canvas. The picker opens above the
+    // quick bar; its own gear opens the full Brush Settings panel.
+    if app.ui.tool.is_brushlike() {
+        let response = crate::icons::button(ui, "brush", button, false, tl!("Brush Preset picker"));
+        if response.clicked() {
+            crate::brush_picker::open(&mut app.ui, ctx, [response.rect.left(), response.rect.top() - 440.0]);
+        }
+    }
 }
 
 /// The Layers or Color sheet beside the compact palette. Both stay on the right edge: the
