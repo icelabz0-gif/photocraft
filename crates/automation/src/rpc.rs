@@ -346,14 +346,11 @@ fn serve_tcp_until_idle(
 ) -> Result<(), AutomationError> {
     // Resolve and check the address before binding, so a non-loopback socket is never opened,
     // not even for the moment between `bind` and the check.
-    let resolved = addr
-        .to_socket_addrs()
-        .map_err(|e| AutomationError::Io(format!("resolve {addr}: {e}")))?
-        .collect::<Vec<_>>();
-    let Some(first) = resolved.first().filter(|_| resolved.iter().all(|a| a.ip().is_loopback())) else {
+    let resolved = addr.to_socket_addrs().map_err(|e| AutomationError::Io(format!("resolve {addr}: {e}")))?.collect::<Vec<_>>();
+    if resolved.is_empty() || !resolved.iter().all(|a| a.ip().is_loopback()) {
         return Err(bad(format!("{addr} is not a loopback address")));
-    };
-    let listener = TcpListener::bind(first).map_err(|e| AutomationError::Io(format!("bind {addr}: {e}")))?;
+    }
+    let listener = TcpListener::bind(&resolved[..]).map_err(|e| AutomationError::Io(format!("bind {addr}: {e}")))?;
     let local = listener.local_addr().map_err(|e| AutomationError::Io(e.to_string()))?;
     if !local.ip().is_loopback() {
         return Err(bad(format!("{addr} is not a loopback address")));
