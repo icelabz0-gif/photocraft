@@ -3896,6 +3896,10 @@ curves	Smooth	Làm mượt
 	Not rendered: this adjustment ({key}) is kept as imported.	Không được kết xuất: điều chỉnh này ({key}) được giữ nguyên như khi nhập.
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Foreground/background Color Picker shortcuts (#8762).
+	Color Picker (Foreground Color)	Bộ chọn màu (Màu trước)
+	Color Picker (Background Color)	Bộ chọn màu (Màu nền)
 # Color panel menu: modes, copy commands and colour ramps (#6000)
 	Hue Cube	Khối sắc màu
 	Brightness Cube	Khối độ sáng

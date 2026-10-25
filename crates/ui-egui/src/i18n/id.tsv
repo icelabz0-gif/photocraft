@@ -3419,6 +3419,10 @@ curves	Smooth	Haluskan
 	Not rendered: this adjustment ({key}) is kept as imported.	Tidak dirender: penyesuaian ini ({key}) disimpan seperti saat diimpor.
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Foreground/background Color Picker shortcuts (#8762).
+	Color Picker (Foreground Color)	Pemilih Warna (Warna Foreground)
+	Color Picker (Background Color)	Pemilih Warna (Warna Background)
 # Color panel menu: modes, copy commands and colour ramps (#6000)
 	Hue Cube	Kubus Hue
 	Brightness Cube	Kubus Kecerahan

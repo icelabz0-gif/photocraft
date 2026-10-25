@@ -87,6 +87,10 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
 
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
 pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if matches!(id, "color.picker.foreground" | "color.picker.background") {
+        let target = if id == "color.picker.background" { "background" } else { "foreground" };
+        return Ok(json!({"dialog": crate::color_picker_ui::open(app, target)}));
+    }
     if let Some(tool) = crate::tool_shortcuts::tool(id) {
         crate::tool_memory::select(app, tool);
         return Ok(json!({"tool": tool}));
@@ -732,6 +736,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     }
     match id {
         "window.panel.activate" | "window.panel.layout" => true,
+        "color.picker.foreground" | "color.picker.background" => true,
         "window.panel.group" | "window.panel.move" | "window.panel.float" | "window.panel.dock" | "window.panel.close" => !app.session.prefs().workspace_locked,
         "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
         i if i.starts_with("file.openRecent.") => true,

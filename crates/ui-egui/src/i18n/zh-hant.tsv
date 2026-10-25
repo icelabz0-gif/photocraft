@@ -3028,6 +3028,10 @@ curves	Smooth	平滑
 	Not rendered: this adjustment ({key}) is kept as imported.	未算繪：此調整（{key}）依匯入時的原樣保留。
 # Print preview image (#8236)
 	Print preview image	Print preview image
+
+# Foreground/background Color Picker shortcuts (#8762).
+	Color Picker (Foreground Color)	檢色器（前景色）
+	Color Picker (Background Color)	檢色器（背景色）
 # Color panel menu: modes, copy commands and colour ramps (#6000)
 	Hue Cube	色相立方體
 	Brightness Cube	亮度立方體

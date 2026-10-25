@@ -4133,6 +4133,10 @@ cameraData	Lens	Lens
 	Not rendered: this adjustment ({key}) is kept as imported.	Görüntülenmiyor: bu ayarlama ({key}) içe aktarıldığı gibi korunuyor.
 # Print preview image (#8236)
 	Print preview image	Baskı Önizleme Görüntüsü
+
+# Foreground/background Color Picker shortcuts (#8762).
+	Color Picker (Foreground Color)	Renk Seçici (Ön Plan Rengi)
+	Color Picker (Background Color)	Renk Seçici (Arka Plan Rengi)
 # Color panel menu: modes, copy commands and colour ramps (#6000)
 	Hue Cube	Renk Tonu Küpü
 	Brightness Cube	Parlaklık Küpü
