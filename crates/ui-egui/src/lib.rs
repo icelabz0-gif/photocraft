@@ -2465,6 +2465,7 @@ impl eframe::App for PhotocraftApp {
         if (chrome && self.ui.panels.toolbar) || tabbed_in {
             panels::toolbar(self, ui);
         }
+        panel_docking::reconcile(self);
         if (chrome && self.ui.panels.dock) || tabbed_in {
             panels::right_dock(self, ui);
         }
@@ -2474,8 +2475,6 @@ impl eframe::App for PhotocraftApp {
             canvas::document_area(self, ui);
         });
         panels::properties_window(self, &ctx);
-        brush_panel::window(self, &ctx);
-        preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);
         type_panels_ui::windows(self, &ctx);
         analysis_ui::windows(self, &ctx);
@@ -2711,6 +2710,7 @@ impl PhotocraftApp {
             self.ui.dock_tabs.color = tab;
         }
         self.ui.theme = kind;
+        panel_docking::reconcile(self);
         panel_docking::sync_visibility(self);
         theme::apply(ctx, kind);
         self.checker = None;
