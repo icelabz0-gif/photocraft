@@ -1826,6 +1826,8 @@ mod tests {
             let mut h = popup_percent_field();
             assert!(!h.state().1, "an idle field does not report a change");
             let at = h.get_by_label("Opacity").rect().center();
+            h.hover_at(at);
+            h.run();
             h.drag_at(at);
             h.run();
             h.event(egui::Event::ModifiersChanged(mods));
@@ -1858,7 +1860,9 @@ mod tests {
             h.run_steps(2);
             let slider = h.get_by_role(Role::Slider).rect();
             let start = egui::pos2(slider.left() + slider.width() * 0.3, slider.center().y);
-            let end = egui::pos2(slider.left() + slider.width() * 0.637, slider.center().y);
+            let end = egui::pos2(slider.left() + slider.width() * 0.624, slider.center().y);
+            h.hover_at(start);
+            h.run();
             h.drag_at(start);
             h.run();
             h.event(egui::Event::ModifiersChanged(mods));
