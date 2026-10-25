@@ -64,6 +64,9 @@ pub const KINDS: &[(&str, &str)] = &[
 /// Effect kinds Photoshop offers several instances of (stored as `…Multi` lists in the PSD).
 const MULTI: &[&str] = &["stroke", "dropShadow", "innerShadow", "colorOverlay", "gradientOverlay"];
 
+/// Field holding the user defaults (Make Default) that new instances start from.
+const USER_DEFAULTS: &str = "userDefaults";
+
 fn multi(kind: &str) -> bool {
     MULTI.contains(&kind)
 }
@@ -76,9 +79,15 @@ fn defaults(kind: &str) -> Value {
     photocraft_engine::layer_style::effect_defaults(kind)
 }
 
-/// Factory params for a new instance, with the shared light angle filled in.
-fn fresh_params(kind: &str, light: f32) -> Value {
+/// Params for a new instance: the user default saved by Make Default over the factory
+/// defaults (#9477), with the shared light angle filled in.
+fn fresh_params(kind: &str, light: f32, user: Option<&Value>) -> Value {
     let mut p = defaults(kind);
+    if let (Some(o), Some(u)) = (p.as_object_mut(), user.and_then(Value::as_object)) {
+        for (k, v) in u {
+            o.insert(k.clone(), v.clone());
+        }
+    }
     if p.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
         p["angle"] = json!(light);
     }
@@ -461,7 +470,8 @@ fn next_id(f: &Map<String, Value>) -> String {
 fn add_instance(f: &mut Map<String, Value>, kind: &str) {
     let light = f.get("pendingGlobalLight").or_else(|| f.get("globalLight")).and_then(Value::as_f64).unwrap_or(120.0) as f32;
     let id = next_id(f);
-    let new = json!({"id": id, "kind": kind, "on": true, "params": fresh_params(kind, light)});
+    let user = f.get(USER_DEFAULTS).and_then(|d| d.get(kind));
+    let new = json!({"id": id, "kind": kind, "on": true, "params": fresh_params(kind, light, user)});
     if let Some(a) = f.get_mut("effects").and_then(Value::as_array_mut) {
         let pos = a.iter().rposition(|e| e.get("kind").and_then(Value::as_str) == Some(kind)).map_or(a.len(), |i| i + 1);
         a.insert(pos, new);
@@ -525,7 +535,13 @@ pub fn drag_shadow(f: &mut Map<String, Value>, start: bool, total: [f64; 2]) {
 }
 
 pub fn initial_fields(layer: &Layer, select: Option<&str>, light: f32) -> Map<String, Value> {
+    initial_fields_with(layer, select, light, Map::new())
+}
+
+/// The dialog's fields, with the user defaults (`kind` → params) new instances start from.
+pub fn initial_fields_with(layer: &Layer, select: Option<&str>, light: f32, user_defaults: Map<String, Value>) -> Map<String, Value> {
     let mut f = Map::new();
+    f.insert(USER_DEFAULTS.into(), Value::Object(user_defaults));
     f.insert("layer".into(), json!(layer.id.0));
     f.insert("globalLight".into(), json!(light));
     f.insert("preview".into(), json!(true));
@@ -581,7 +597,8 @@ pub fn open(app: &mut PhotocraftApp, select: Option<&str>) -> Option<u64> {
     let layer = st.doc.layer(st.active_layer?)?.clone();
     let light = st.doc.global_light.angle;
     let mode = st.doc.mode;
-    let mut f = initial_fields(&layer, select, light);
+    let user = app.session.presets.layer_defaults.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut f = initial_fields_with(&layer, select, light, user);
     // Channels and Blend If list the document's own colour channels.
     set_blending_fields(&mut f, &layer, mode);
     f.insert("__document".into(), json!(st.doc.id));
@@ -1155,8 +1172,12 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                     {
                         e["params"] = v["params"].clone();
                     }
-                    if crate::widgets::secondary_button(ui, tl!("Make Default"), 110.0).clicked() {
-                        let _ = app.run("layer.layerStyle.makeDefault", json!({"kind": sel_kind, "params": disp}));
+                    if crate::widgets::secondary_button(ui, tl!("Make Default"), 110.0).clicked()
+                        && app.run("layer.layerStyle.makeDefault", json!({"kind": sel_kind, "params": disp})).is_ok()
+                        && let Some(d) = f.get_mut(USER_DEFAULTS).and_then(Value::as_object_mut)
+                    {
+                        // A + in this same dialog starts from it too.
+                        d.insert(sel_kind.to_string(), disp.clone());
                     }
                 });
             });
@@ -1610,6 +1631,30 @@ mod tests {
         assert_eq!(fx.len(), 1);
         assert_eq!(fx[0]["kind"], json!("dropShadow"));
         assert!(fx[0]["fx"].is_object(), "the existing drop shadow, not a new instance");
+    }
+
+    /// Make Default (#9477): a stroke added afterwards, by opening the dialog on it or with the
+    /// list's checkbox or +, starts from the saved values; other kinds keep the factory ones.
+    #[test]
+    fn new_effects_start_from_the_made_default() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.run("layer.layerStyle.makeDefault", json!({"kind": "stroke", "params": {"size": 7, "position": "outside"}})).unwrap();
+
+        let id = open(&mut app, Some("stroke")).unwrap();
+        let mut f = app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone();
+        add_instance(&mut f, "stroke");
+        add_instance(&mut f, "dropShadow");
+        let fx = effects_of(&f);
+        let strokes: Vec<_> = fx.iter().filter(|e| e["kind"] == json!("stroke")).collect();
+        assert_eq!(strokes.len(), 2);
+        for e in strokes {
+            assert_eq!((&e["params"]["size"], &e["params"]["position"]), (&json!(7), &json!("outside")));
+            assert_eq!(e["params"]["opacity"], defaults("stroke")["opacity"], "unsaved keys keep the factory value");
+        }
+        let shadow = fx.iter().find(|e| e["kind"] == json!("dropShadow")).unwrap();
+        assert_eq!(shadow["params"]["size"], defaults("dropShadow")["size"]);
     }
 
     #[test]
