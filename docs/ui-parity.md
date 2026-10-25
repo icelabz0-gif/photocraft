@@ -234,7 +234,7 @@ Paragraph; the rest open as in-app floating windows.
 | Themes: Photoshop's four greys | partial | five themes; #2661 |
 | Document tabs: overflow, context menu, reorder | done | UI-217-6; middle-click close #2570 |
 | Layers panel: wheel steps blend modes, drop on New/Trash | partial | UI-217-14 |
-| Layers panel filter-type dropdown (Kind, Name, Effect, Mode, Attribute, Color, Smart Object, Selected, Artboard) | partial | Kind, Name and Mode; the other six missing. `layer_filter_ui.rs`, `ui.set {layerFilter}` (#5048) |
+| Layers panel filter-type dropdown (Kind, Name, Effect, Mode, Attribute, Color, Smart Object, Selected, Artboard) | partial | Kind, Name, Mode and Artboard; the other five missing. `layer_filter_ui.rs`, `ui.set {layerFilter}` (#5048) |
 | Adjustment scope: clipping control visible above tall Properties editors in a compact dock | done (2026-10-21) | `panels.rs`, `clipping_indicator_tests.rs`; #5231; stack-wide default retained |
 | Smart filter rows: click selects, drag onto another smart object moves, ⌥-drag copies, drag onto Delete removes; with a row selected, the Delete button and the ⌫/Delete key remove that filter, not the smart object | done | `smart_ui.rs`, `layer.smartFilter.transfer` (#4271), `smart_ui::keys` (#4751) |
 | Layers panel: Clip Thumbnails to Layer Bounds (panel menu, `interface.clipThumbnailsToLayerBounds`) | done (2026-10-12) | `layer_thumb_bounds_tests.rs`; #4281. Thumbnail size and the Panel Options dialog to come |
@@ -294,6 +294,7 @@ Paragraph; the rest open as in-app floating windows.
 | 2026-10-14 | minor | Move › Show Transform Controls frames every selected layer and outlines the selected shapes |
 | 2026-10-21 | minor | Crop rows corrected against the code and the scorecard: saved custom crop presets (TOOL-214-9, #2723) and Delete Cropped Pixels off are done (#6562); no percentage changed |
 | 2026-10-20 | minor | Free Transform of an artboard child omits ancestor paper from the covering and isolated composites while retaining board clipping. The base canvas and whole-artboard backgrounds are preserved; synthetic regressions in `transform_tool.rs`. No parity percentage changed. |
+| 2026-10-24 | minor | Layers panel filter row: Artboard lists only the artboards that hold the selected layers, and the unfiltered tree when nothing is selected or a selected layer is in no artboard; drivable by `ui.set {layerFilter: {by: "artboard"}}`; no percentage changed |
 | 2026-10-18 | minor | Move tool: dragging selected pixels shrinks the marching ants to the moved pixels as the drag starts, and the dropped selection is theirs, as in Photoshop (#7538) |
 | 2026-10-18 | minor | Marching ants drawn in device pixels like Photoshop's: equally thick on every edge at 125 %/150 % display scale, thicker on HiDPI, slanted dash ends (#7489) |
 | 2026-10-16 | minor | View › Extras (⌘H) hides the Move tool's transform controls and their handles stop responding; ⌘H again restores them, and Show Transform Controls keeps its setting (#6699) |

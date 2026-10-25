@@ -1,4 +1,4 @@
-//! #5048: the Layers panel's filter-type dropdown (Kind, Name, Mode).
+//! #5048: the Layers panel's filter-type dropdown (Kind, Name, Mode, Artboard).
 
 use egui::vec2;
 use egui_kittest::Harness;
@@ -134,4 +134,79 @@ fn the_dropdown_switches_the_panel_between_filter_types() {
     h.state_mut().ui.layer_filter_by = FilterBy::Kind;
     h.run_steps(4);
     assert_eq!(drawn(&h), ["ink notes"]);
+}
+
+/// On a Background: the artboard "Back" holding "Grass", the artboard "Front" holding the group
+/// "Trees" with "Oak", and "Loose" in no artboard, on top.
+fn boards_session() -> photocraft_engine::Session {
+    let mut s = photocraft_engine::Session::new();
+    s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+    s.execute("layer.new.layer", json!({"name": "Grass"})).unwrap();
+    s.execute("layer.new.artboardFromLayers", json!({"name": "Back"})).unwrap();
+    s.execute("layer.new.layer", json!({"name": "Oak"})).unwrap();
+    s.execute("layer.groupLayers", json!({"name": "Trees"})).unwrap();
+    s.execute("layer.new.artboardFromLayers", json!({"name": "Front"})).unwrap();
+    s.execute("layer.new.layer", json!({"name": "Loose"})).unwrap();
+    s.execute("layer.setExpanded", json!({"all": true, "expanded": true})).unwrap();
+    s
+}
+
+/// The names the Artboard filter lists with the layers `names` selected, every group open.
+fn listed_by_artboard(s: &mut photocraft_engine::Session, names: &[&str]) -> Vec<String> {
+    s.execute("select.deselectLayers", json!({})).unwrap();
+    for (i, name) in names.iter().enumerate() {
+        let id = layer(&s.active().unwrap().doc, name);
+        s.execute("layer.select", json!({"layer": id, "mode": if i == 0 { "replace" } else { "add" }})).unwrap();
+    }
+    let d = s.active().unwrap();
+    let mut f = filter(FilterBy::Artboard, &[], "", BlendMode::Normal);
+    f.board_rows = super::board_rows(&d.doc, &d.selected_layers());
+    listed(&d.doc, &f)
+}
+
+#[test]
+fn the_artboard_filter_lists_the_artboards_that_hold_the_selected_layers() {
+    let mut s = boards_session();
+    let all = ["Loose", "Front", "Trees", "Oak", "Back", "Grass", "Background"];
+    assert_eq!(listed_by_artboard(&mut s, &[]), all, "nothing selected: every layer");
+    // A layer at any depth in an artboard, or the artboard itself: that artboard only.
+    assert_eq!(listed_by_artboard(&mut s, &["Oak"]), ["Front", "Trees", "Oak"]);
+    assert_eq!(listed_by_artboard(&mut s, &["Front"]), ["Front", "Trees", "Oak"]);
+    assert_eq!(listed_by_artboard(&mut s, &["Grass"]), ["Back", "Grass"]);
+    // Layers in two artboards: both artboards.
+    assert_eq!(listed_by_artboard(&mut s, &["Oak", "Grass"]), ["Front", "Trees", "Oak", "Back", "Grass"]);
+    // A selected layer in no artboard: every layer again.
+    assert_eq!(listed_by_artboard(&mut s, &["Loose"]), all);
+    assert_eq!(listed_by_artboard(&mut s, &["Oak", "Loose"]), all);
+    let round = serde_json::to_value(UiState { layer_filter_by: FilterBy::Artboard, ..UiState::default() }).unwrap();
+    assert_eq!(round["layer_filter_by"], "artboard");
+}
+
+#[test]
+fn the_artboard_filter_follows_the_selection_in_the_panel() {
+    let session = boards_session();
+    let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotocraftApp::new(session, crate::Services::default())
+    });
+    h.run_steps(8);
+    let all = ["Loose", "Front", "Trees", "Oak", "Back", "Grass", "Background"];
+    h.get_by_value("Kind").click();
+    h.run_steps(4);
+    h.query_all_by_label("Artboard").last().expect("Artboard in the open list").click();
+    h.run_steps(4);
+    assert_eq!(h.state().ui.layer_filter_by, FilterBy::Artboard);
+    assert_eq!(drawn(&h), all, "Loose, in no artboard, is selected: every layer");
+    let oak = layer(&h.state().session.active().unwrap().doc, "Oak");
+    h.state_mut().session.execute("layer.select", json!({"layer": oak})).unwrap();
+    h.run_steps(4);
+    assert_eq!(drawn(&h), ["Front", "Trees", "Oak"]);
+    // The artboard's tree as the panel shows it: a closed group keeps its contents hidden.
+    let trees = layer(&h.state().session.active().unwrap().doc, "Trees");
+    h.state_mut().session.execute("layer.setExpanded", json!({"layer": trees, "expanded": false})).unwrap();
+    h.run_steps(4);
+    assert_eq!(drawn(&h), ["Front", "Trees"]);
+    h.state_mut().session.execute("select.deselectLayers", json!({})).unwrap();
+    h.run_steps(4);
+    assert_eq!(drawn(&h), ["Loose", "Front", "Trees", "Back", "Grass", "Background"], "nothing selected: every row");
 }
