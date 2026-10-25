@@ -112,6 +112,39 @@ pub fn editor(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Ed
     if !v.is_object() {
         *v = json!({});
     }
+    let mut e = preset_row(ui, kind, v, cx);
+    e.add(kind_editor(ui, kind, v, cx));
+    e
+}
+
+/// The Preset menu above Levels, Exposure, Black & White and Channel Mixer (#9263, #9265, #9268,
+/// #9270): PhotoCraft's own presets (`adjust_presets`), Custom once edited; a choice is one edit.
+fn preset_row(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Edit {
+    let list = crate::adjust_presets::presets(kind, cx.gray);
+    if list.is_empty() || (kind == "levels" && space_of(v) != ToneSpace::Rgb) {
+        return Edit::default();
+    }
+    let mut e = Edit::default();
+    ui.horizontal(|ui| {
+        label(ui, tl!("Preset:"));
+        let current = crate::adjust_presets::matching(kind, v, cx.gray).map_or("custom", |p| p.id);
+        let mut options: Vec<(&str, &str)> = list.iter().map(|p| (p.id, tl!(p.label))).collect();
+        if current == "custom" {
+            options.push(("custom", tl!("Custom")));
+        }
+        let mut picked = current;
+        if widgets::dropdown(ui, &format!("{kind}-preset"), &mut picked, &options, ui.available_width().min(220.0))
+            && picked != current
+            && let Some(settings) = list.iter().find(|p| p.id == picked).and_then(|p| crate::adjust_presets::settings(kind, p, cx.gray))
+        {
+            *v = settings;
+            e.add(Edit::discrete(true));
+        }
+    });
+    e
+}
+
+fn kind_editor(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Edit {
     match kind {
         "brightnessContrast" => brightness_contrast(ui, v),
         "levels" => levels(ui, v, cx),

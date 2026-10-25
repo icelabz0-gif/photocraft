@@ -784,6 +784,50 @@ mod tests {
         assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1);
     }
 
+    /// #9263, #9265, #9268, #9270: Levels, Exposure, Black & White and Channel Mixer open on the
+    /// Default preset; choosing another loads its settings (the preview follows) and an edit by
+    /// hand reads Custom.
+    #[test]
+    fn adjustment_preset_menus_load_presets_and_read_custom_after_an_edit() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        for (kind, label, key) in [
+            ("levels", "Increase Contrast 2", "inBlack"),
+            ("exposure", "Plus 1.0", "exposure"),
+            ("blackWhite", "Red Filter", "reds"),
+            ("channelMixer", "Black & White with Red Filter (RGB)", "monochrome"),
+        ] {
+            let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+            PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            let id = open(h.state_mut(), &format!("image.adjustments.{kind}")).unwrap();
+            h.run_steps(4);
+            let preset = |h: &Harness<'_, PhotocraftApp>| {
+                h.query_all_by_role(egui::accesskit::Role::ComboBox).next().and_then(|n| n.accesskit_node().value().map(|s| s.to_string()))
+            };
+            assert_eq!(preset(&h).as_deref(), Some("Default"), "{kind} opens on Default");
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).next().unwrap().click();
+            h.run_steps(2);
+            h.get_by_label(label).click();
+            h.run_steps(3);
+            assert_eq!(preset(&h).as_deref(), Some(label), "{kind}: the menu shows the preset");
+            let want = crate::adjust_presets::presets(kind, false)
+                .iter()
+                .find(|p| p.label == label)
+                .and_then(|p| crate::adjust_presets::settings(kind, p, false))
+                .unwrap();
+            assert_eq!(h.state().ui.dialogs[0].fields[key], want[key], "{kind}: the preset's settings are loaded");
+            let edit = match kind {
+                "levels" => ("gamma", json!(1.37)),
+                "exposure" => ("offset", json!(0.05)),
+                "blackWhite" => ("blues", json!(33)),
+                _ => ("gray", json!([90, 10, 0, 0])),
+            };
+            h.state_mut().ui.dialog_mut(id).unwrap().fields.insert(edit.0.into(), edit.1);
+            h.run_steps(3);
+            assert_eq!(preset(&h).as_deref(), Some("Custom"), "{kind}: an edit is Custom");
+            crate::dialogs::confirm(h.state_mut(), id).unwrap();
+        }
+    }
+
     #[test]
     fn curves_pointer_drag_previews_until_confirm_and_cancel_preserves_document() {
         for confirm in [false, true] {
