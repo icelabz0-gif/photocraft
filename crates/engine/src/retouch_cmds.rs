@@ -552,7 +552,9 @@ impl LiveRetouch {
         let bounds = self.bounds();
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
         let surface = surf.clone();
-        Ok(crate::brush_cmds::LiveCommit { cmd: self.cmd, base: self.base, params: self.params, seed: None, points: self.points, surface, bounds })
+        // Retouch previews have not restored untargeted colour samples. Let isolated-channel
+        // commits render normally rather than retaining their unrestricted preview texture.
+        Ok(crate::brush_cmds::LiveCommit { cmd: self.cmd, base: self.base, params: self.params, seed: None, points: self.points, surface, bounds, color: None })
     }
 
     /// Render more points; returns the rectangle that changed. Each changed area is redrawn from
@@ -1472,7 +1474,18 @@ impl LiveDab {
         self.bounds = self.bounds.union(&dmg);
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
         let surface = surf.clone();
-        Ok(crate::brush_cmds::LiveCommit { cmd: self.cmd, base, params: self.params, seed: None, points: self.points, surface, bounds: self.bounds })
+        // Unlike the Brush preview, this surface has not restored untargeted colour samples.
+        // A single-colour commit must therefore replay through the channel restriction.
+        Ok(crate::brush_cmds::LiveCommit {
+            cmd: self.cmd,
+            base,
+            params: self.params,
+            seed: None,
+            points: self.points,
+            surface,
+            bounds: self.bounds,
+            color: None,
+        })
     }
 }
 
