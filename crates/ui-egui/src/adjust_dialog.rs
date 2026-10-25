@@ -814,7 +814,11 @@ mod tests {
                 .find(|p| p.label == label)
                 .and_then(|p| crate::adjust_presets::settings(kind, p, false))
                 .unwrap();
-            assert_eq!(h.state().ui.dialogs[0].fields[key], want[key], "{kind}: the preset's settings are loaded");
+            let fields = &h.state().ui.dialogs[0].fields;
+            for (k, v) in want.as_object().expect("preset settings") {
+                assert_eq!(fields[k], *v, "{kind}: the preset's `{k}` is loaded");
+            }
+            assert_eq!(fields[key], want[key]);
             let edit = match kind {
                 "levels" => ("gamma", json!(1.37)),
                 "exposure" => ("offset", json!(0.05)),
