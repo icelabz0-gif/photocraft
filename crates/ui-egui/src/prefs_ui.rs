@@ -520,6 +520,7 @@ pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
     presets_store(app);
     sync_tooltips(app, ctx);
     sync_animations(app, ctx);
+    poll_model_lookups(app, ctx);
     app.sync_recent();
     if let Some(wait) = persist(app, ctx.input(|i| i.time)) {
         ctx.request_repaint_after(std::time::Duration::try_from_secs_f64(wait).unwrap_or_default());
@@ -1020,6 +1021,41 @@ pub(crate) fn capture_key_press(capture_mods: egui::Modifiers, i: &egui::InputSt
 
 // ------------------------------------------------------------------ menu routing
 
+/// The Generative Fill dialog: opens at once, starting from the server a fill would use (the
+/// parameters, then the environment, then Preferences › Integrations), and asks that server for its
+/// models on a worker thread. When it answers (see [`poll_model_lookups`]) the model becomes a menu
+/// of what the server has (the one chosen if the server has it, else an inpainting checkpoint, else
+/// the first); when it doesn't, the model stays a text box and the note says why. The dialog's
+/// backend and host fields are the server that was asked, so a fill goes to the server whose
+/// models are shown.
+fn generative_fill_dialog(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str) -> Option<u64> {
+    let saved = app.session.prefs().integrations.clone();
+    let spec = photocraft_engine::commands::find(id)?.params.to_string();
+    let (backend, mut host) = photocraft_engine::generative_fill_cmds::effective_server(&app.session, &json!({}))
+        .unwrap_or_else(|_| (saved.generative_fill_backend.name().to_string(), saved.generative_fill_host.clone()));
+    if host.trim().is_empty() {
+        host = photocraft_engine::generative_fill_cmds::default_host_for(&backend).unwrap_or_default();
+    }
+    let d = crate::filter_dialog::open_with_spec(app, id, "Generative Fill…", &spec, serde_json::Map::new());
+    if let Some(dm) = app.ui.dialog_mut(d) {
+        // No live preview: a fill is a long request to a server, not a filter.
+        dm.fields.remove("__preview");
+        dm.fields.insert("backend".into(), json!(backend));
+        dm.fields.insert("host".into(), json!(host));
+        if !saved.generative_fill_model.is_empty() {
+            dm.fields.insert("model".into(), json!(saved.generative_fill_model));
+            // Told apart later from a model the user types: this one yields to the server's default.
+            dm.fields.insert("__gfSeed".into(), json!(saved.generative_fill_model));
+        }
+        dm.fields.insert("__note".into(), json!(format!("Looking for models on {host}…")));
+    }
+    let key = format!("{backend}|{host}");
+    let slot = start_lookup(backend, host);
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Vec<(u64, String, LookupSlot)>>(egui::Id::new(GF_DIALOG_LOOKUPS_ID)).push((d, key, slot)));
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    Some(d)
+}
+
 /// Shell front ends for Edit-menu commands invoked without parameters (dialogs, pickers).
 /// `None` when `id` isn't handled here.
 pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
@@ -1065,6 +1101,12 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                 }
             }
             dialog(d)
+        }
+        "edit.generativeFill" => {
+            if !app.session.is_enabled(id) {
+                return Some(Err("Generative Fill needs a selection on a pixel layer".into()));
+            }
+            dialog(generative_fill_dialog(app, ctx, id))
         }
         // Photoshop's Content-Aware Fill workspace (caf_ui); the engine command with params
         // still runs directly.
@@ -1218,6 +1260,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             info.extend(gpu_memory_lines(app));
             f.insert("__gpuInfo".into(), json!(info));
             f.insert("__gpuAdapters".into(), json!(app.perf.gpu_info.adapters));
+            refresh_generative_models(ui.ctx(), f);
             let system = system_theme(app, ui.ctx());
             prefs_body(ui, f, system);
         }
@@ -1325,6 +1368,8 @@ fn choice_label(v: &str) -> String {
         "16" => "16 Bits/Channel".into(),
         "postScript" => "PostScript (72 points/inch)".into(),
         "traditional" => "Traditional (72.27 points/inch)".into(),
+        "comfyui" => "ComfyUI".into(),
+        "a1111" => "AUTOMATIC1111 / Forge / SD.Next".into(),
         "vulkan" => "Vulkan".into(),
         "dx12" => "DirectX 12".into(),
         "metal" => "Metal".into(),
@@ -1763,6 +1808,234 @@ fn interface_groups(ui: &mut egui::Ui, obj: &mut Map<String, Value>, keys: &[Str
 /// Where a clicked colour swatch leaves its preference path and label for the dialog body, which
 /// holds the fields the Color Picker request goes in.
 const PICK_ID: &str = "prefs-pick-color";
+/// Where the Preferences dialog publishes the Generative Fill model list for [`field_rows`]
+/// (`(models, note)`), and the flag its Refresh button raises.
+const GF_MODELS_ID: &str = "prefs-gf-models";
+const GF_REFRESH_ID: &str = "prefs-gf-refresh";
+
+/// A Generative Fill model lookup running on a worker thread; its reply lands here when it ends.
+type LookupSlot = std::sync::Arc<std::sync::Mutex<Option<Result<Value, String>>>>;
+
+/// The Preferences section's one lookup in flight, as `(backend|host it asked about, slot)`.
+const GF_PREF_LOOKUP_ID: &str = "prefs-gf-pref-lookup";
+/// The fill dialogs' lookups in flight, as `(dialog id, backend|host asked about, slot)`.
+const GF_DIALOG_LOOKUPS_ID: &str = "prefs-gf-dialog-lookups";
+/// How long a typed backend or host must stay unchanged before the Preferences list asks again.
+const GF_TYPING_PAUSE: f64 = 0.6;
+
+/// Ask a server for its models on a worker thread. The lookup waits on the network and resolves
+/// the host name, so it must not run on the interface's thread: the window stays responsive,
+/// Cancel included, while a slow or silent server is asked.
+fn start_lookup(backend: String, host: String) -> LookupSlot {
+    let slot = LookupSlot::default();
+    let out = slot.clone();
+    let work = move || {
+        let reply = photocraft_engine::generative_fill_cmds::lookup_models(&backend, &host).map_err(|e| e.to_string());
+        *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reply);
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::thread::Builder::new().name("model-lookup".into()).spawn(work).is_err() {
+        *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Err("couldn't start a worker thread".into()));
+    }
+    // The browser has no threads; the lookup refuses at once there.
+    #[cfg(target_arch = "wasm32")]
+    work();
+    slot
+}
+
+fn take_reply(slot: &LookupSlot) -> Option<Result<Value, String>> {
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+}
+
+/// The model names in a lookup reply and the one-line note about it.
+fn lookup_summary(reply: &Result<Value, String>) -> (Vec<String>, String) {
+    match reply {
+        Ok(v) => {
+            let names: Vec<String> = v["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+            let server = v["server"].as_str().unwrap_or_default();
+            let note = if names.is_empty() { format!("{server} has no models installed") } else { format!("{} models found on {server}", names.len()) };
+            (names, note)
+        }
+        Err(e) => (Vec::new(), format!("Couldn't list models: {e}")),
+    }
+}
+
+/// Keep the Generative Fill model list of the Integrations section current. The server is the one
+/// named by the (unsaved) backend and host in the section: it is asked once when the section is
+/// shown, again on Refresh, and again when either changes (after a short pause for typing), so
+/// the list never belongs to a server other than the one shown. The asking happens on a worker
+/// thread; until it answers the note says so and the model row is a text box. A server that
+/// doesn't answer leaves an empty list and the reason.
+fn refresh_generative_models(ctx: &egui::Context, f: &mut Map<String, Value>) {
+    if f.get("section").and_then(Value::as_str) != Some("integrations") {
+        return;
+    }
+    let draft = f.get("values").and_then(|v| v.get("integrations")).cloned().unwrap_or(Value::Null);
+    let backend = draft["generativeFillBackend"].as_str().unwrap_or("comfyui").to_string();
+    let typed = draft["generativeFillHost"].as_str().unwrap_or_default().trim().to_string();
+    // A blank host stands for the usual one on this machine.
+    let host = if typed.is_empty() { photocraft_engine::generative_fill_cmds::default_host_for(&backend).unwrap_or_default() } else { typed };
+    let want = format!("{backend}|{host}");
+    let id = egui::Id::new(GF_PREF_LOOKUP_ID);
+    let asked = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(GF_REFRESH_ID))).unwrap_or(false);
+    let now = ctx.input(|i| i.time);
+
+    // 1. A lookup that has finished: keep its answer only if it was for the server shown now.
+    let mut running: Option<(String, LookupSlot)> = ctx.data(|d| d.get_temp::<Vec<(String, LookupSlot)>>(id)).and_then(|v| v.into_iter().next());
+    if let Some((asked_of, slot)) = running.clone() {
+        if let Some(reply) = take_reply(&slot) {
+            running = None;
+            if asked_of == want {
+                let (models, note) = lookup_summary(&reply);
+                f.insert("__gfModels".into(), json!(models));
+                f.insert("__gfNote".into(), json!(note));
+                f.insert("__gfKey".into(), json!(asked_of));
+            }
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    // 2. Ask again when the list isn't for the server shown, or on Refresh.
+    if asked {
+        f.remove("__gfKey");
+    }
+    let first = !f.contains_key("__gfWant");
+    if f.get("__gfWant").and_then(Value::as_str) != Some(want.as_str()) {
+        f.insert("__gfWant".into(), json!(want));
+        f.insert("__gfWantAt".into(), json!(now));
+    }
+    let stale = f.get("__gfKey").and_then(Value::as_str) != Some(want.as_str());
+    if stale && running.as_ref().is_none_or(|(of, _)| *of != want) {
+        let since = now - f.get("__gfWantAt").and_then(Value::as_f64).unwrap_or(now);
+        if asked || first || since >= GF_TYPING_PAUSE {
+            running = Some((want.clone(), start_lookup(backend, host.clone())));
+            f.insert("__gfModels".into(), json!(Vec::<String>::new()));
+            f.insert("__gfNote".into(), json!(format!("Looking for models on {host}…")));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(id, running.into_iter().collect::<Vec<_>>()));
+
+    let models: Vec<String> = f.get("__gfModels").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    let note = f.get("__gfNote").and_then(Value::as_str).unwrap_or_default().to_string();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(GF_MODELS_ID), (models, note)));
+}
+
+/// The server a Generative Fill dialog's `backend` and `host` fields name now, as the same
+/// `backend|host` key the Integrations lookup uses (a blank host means the usual one).
+fn dialog_server(fields: &Map<String, Value>) -> (String, String) {
+    let backend = fields.get("backend").and_then(Value::as_str).unwrap_or("comfyui").to_string();
+    let typed = fields.get("host").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let host = if typed.is_empty() { photocraft_engine::generative_fill_cmds::default_host_for(&backend).unwrap_or_default() } else { typed };
+    (backend, host)
+}
+
+/// Keep the model list of every open Generative Fill dialog true to the server its fields name
+/// (called every frame). A lookup that finishes fills the model in (a menu of what the server has,
+/// or the reason there is none); one whose server is no longer the one named is dropped, so a
+/// list from another server never shows. When the backend or host is changed, the new server is
+/// asked after a short pause for typing and the model goes back to a text box meanwhile. A dialog
+/// closed in the meantime is left alone.
+fn poll_model_lookups(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let id = egui::Id::new(GF_DIALOG_LOOKUPS_ID);
+    let pending: Vec<(u64, String, LookupSlot)> = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    let open: Vec<u64> =
+        app.ui.dialogs.iter().filter(|d| d.fields.get("__command").and_then(Value::as_str) == Some("edit.generativeFill")).map(|d| d.id).collect();
+    if pending.is_empty() && open.is_empty() {
+        return;
+    }
+    let now = ctx.input(|i| i.time);
+    let key_of = |app: &PhotocraftApp, dialog: u64| -> Option<String> {
+        let dm = app.ui.dialogs.iter().find(|d| d.id == dialog)?;
+        let (backend, host) = dialog_server(&dm.fields);
+        Some(format!("{backend}|{host}"))
+    };
+    let mut waiting: Vec<(u64, String, LookupSlot)> = Vec::new();
+    for (dialog, key, slot) in pending {
+        if !open.contains(&dialog) {
+            continue;
+        }
+        match take_reply(&slot) {
+            None => waiting.push((dialog, key, slot)),
+            Some(reply) if key_of(app, dialog).as_deref() == Some(key.as_str()) => apply_dialog_lookup(app, dialog, &key, &reply),
+            // The fields name another server by now: this answer is for the wrong one.
+            Some(_) => {}
+        }
+    }
+    let mut changing = false;
+    for dialog in open {
+        let Some(want) = key_of(app, dialog) else { continue };
+        let Some(dm) = app.ui.dialog_mut(dialog) else { continue };
+        if dm.fields.get("__gfKey").and_then(Value::as_str) == Some(want.as_str()) || waiting.iter().any(|(d, k, _)| *d == dialog && *k == want) {
+            continue;
+        }
+        changing = true;
+        if dm.fields.get("__gfWant").and_then(Value::as_str) != Some(want.as_str()) {
+            dm.fields.insert("__gfWant".into(), json!(want));
+            dm.fields.insert("__gfWantAt".into(), json!(now));
+        }
+        let since = now - dm.fields.get("__gfWantAt").and_then(Value::as_f64).unwrap_or(now);
+        if since < GF_TYPING_PAUSE {
+            continue;
+        }
+        let (backend, host) = dialog_server(&dm.fields);
+        // The list shown belongs to the old server: back to a text box while the new one is asked.
+        if let Some(spec) = photocraft_engine::commands::find("edit.generativeFill") {
+            dm.fields.insert("__spec".into(), json!(spec.params));
+        }
+        dm.fields.insert("__note".into(), json!(format!("Looking for models on {host}…")));
+        dm.fields.remove("__gfKey");
+        waiting.retain(|(d, _, _)| *d != dialog);
+        waiting.push((dialog, want, start_lookup(backend, host)));
+    }
+    let more = !waiting.is_empty() || changing;
+    ctx.data_mut(|d| d.insert_temp(id, waiting));
+    if more {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Apply a finished lookup (for `key`, the server the dialog names) to its dialog: the model
+/// becomes a menu of what the server has. A model the user typed that the server doesn't list is
+/// kept as typed, in the text box, rather than swapped for another one; the model prefilled from
+/// Preferences is replaced by the server's default when the server lacks it.
+fn apply_dialog_lookup(app: &mut PhotocraftApp, dialog: u64, key: &str, reply: &Result<Value, String>) {
+    let saved_model = app.session.prefs().integrations.generative_fill_model.clone();
+    let Some(dm) = app.ui.dialog_mut(dialog) else { return };
+    let (all, mut note) = lookup_summary(reply);
+    dm.fields.insert("__gfKey".into(), json!(key));
+    // Names the dialog's notation can't hold (`|` separates choices) are left out of the menu.
+    let names: Vec<String> = all.into_iter().filter(|n| !n.contains(['|', '"'])).collect();
+    if let Ok(v) = reply
+        && !names.is_empty()
+    {
+        let typed = dm.fields.get("model").and_then(Value::as_str).unwrap_or_default().to_string();
+        let prefilled = dm.fields.get("__gfSeed").and_then(Value::as_str).unwrap_or_default() == typed;
+        let listed = names.contains(&typed);
+        if !typed.is_empty() && !listed && !prefilled {
+            note = format!("{note} ({typed} isn't one of them)");
+        } else {
+            let default = v["default"].as_str().unwrap_or_default();
+            let chosen =
+                [typed.as_str(), saved_model.as_str(), default].into_iter().find(|m| names.iter().any(|n| n == m)).unwrap_or(names[0].as_str()).to_string();
+            if let Some(spec) = dm.fields.get("__spec").and_then(Value::as_str) {
+                let spec = spec.replace("\"model\":text", &format!("\"model\":\"{}\"=\"{chosen}\"", names.join("|")));
+                dm.fields.insert("__spec".into(), json!(spec));
+            }
+            // A model picked here, not by the user, stands in for "no choice yet": when the server
+            // changes it is replaced by the new server's default instead of being kept as typed.
+            // A listed model the user typed or picked (`typed` differs from the seed) stays theirs.
+            if prefilled {
+                dm.fields.insert("__gfSeed".into(), json!(chosen));
+            }
+            dm.fields.insert("model".into(), json!(chosen));
+        }
+    }
+    dm.fields.insert("__note".into(), json!(note));
+}
 
 /// The colour swatch clicked this frame, if any: (preference path, label).
 fn ctx_take_pick(ui: &egui::Ui) -> Option<(String, String)> {
@@ -1868,6 +2141,37 @@ fn field_rows(ui: &mut egui::Ui, section: &str, obj: &mut Map<String, Value>, ke
                 pairs.extend(crate::i18n::Lang::for_picker().into_iter().map(|l| (l.code().to_string(), l.name())));
                 let mut cur = s.clone();
                 crate::widgets::dropdown(ui, &format!("pref-{path}"), &mut cur, &pairs, 220.0);
+                obj.insert(k, json!(cur));
+            }
+            // The models the server has, as a menu; "Automatic" leaves it to the fill (Flux Fill,
+            // else an inpainting model). Without a list (no server answered) a text box.
+            Value::String(s) if path == "integrations.generativeFillModel" => {
+                ui.label(RichText::new(tl!(&label)).color(t.text_dim));
+                let (models, note): (Vec<String>, String) = ui.ctx().data(|d| d.get_temp(egui::Id::new(GF_MODELS_ID))).unwrap_or_default();
+                let mut cur = s.clone();
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if models.is_empty() {
+                            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(260.0));
+                        } else {
+                            let auto = tl!("Automatic (the server's choice)");
+                            let mut pairs: Vec<(String, &str)> = vec![(String::new(), auto)];
+                            pairs.extend(models.iter().map(|m| (m.clone(), m.as_str())));
+                            // A saved model the server no longer lists stays selectable.
+                            let saved = cur.clone();
+                            if !saved.is_empty() && !models.contains(&saved) {
+                                pairs.push((saved.clone(), saved.as_str()));
+                            }
+                            crate::widgets::dropdown_literal(ui, &format!("pref-{path}"), &mut cur, &pairs, 260.0);
+                        }
+                        if ui.small_button(tl!("Refresh")).clicked() {
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(GF_REFRESH_ID), true));
+                        }
+                    });
+                    if !note.is_empty() {
+                        ui.label(RichText::new(note).color(t.text_faint));
+                    }
+                });
                 obj.insert(k, json!(cur));
             }
             Value::String(s) if prefs::choices(&path).is_some() => {
@@ -4089,10 +4393,12 @@ mod tests {
         let values = prefs::Preferences::default().to_json();
         assert!(has_visible_fields(&values, "general"));
         assert!(has_visible_fields(&values, "fileHandling"));
-        // Every setting of these sections is still unimplemented.
-        for section in ["integrations", "scratchDisks"] {
-            assert!(!has_visible_fields(&values, section), "{section}");
-        }
+        // Every setting of this section is still unimplemented.
+        assert!(!has_visible_fields(&values, "scratchDisks"));
+        // Integrations holds the live Generative Fill server settings; agent control stays hidden.
+        assert!(has_visible_fields(&values, "integrations"));
+        assert!(!prefs::is_hidden("integrations.generativeFillHost"));
+        assert!(prefs::is_hidden("integrations.allowAgentControl"));
         // "Fill new type layers with placeholder text" and "Use Escape to Commit" are live; other Type rows stay hidden.
         assert!(has_visible_fields(&values, "type"));
         assert!(!prefs::is_hidden("type.fillNewTypeLayersWithPlaceholder"));
@@ -4628,6 +4934,365 @@ mod tests {
         autosave_now(&mut app);
         tick(&mut app, &ctx);
         assert_eq!(take(), [format!("discard {}", ids[0]), format!("save {}", ids[1])]);
+    }
+
+    /// A one-request server for the model lookups: answers the ComfyUI checkpoint list, then closes.
+    fn one_checkpoint_list(names: &'static [&'static str]) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).unwrap();
+            let body = json!({"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [names]}}}}).to_string();
+            write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        (host, server)
+    }
+
+    /// An address nothing listens on.
+    fn nobody_home() -> String {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        closed.local_addr().unwrap().to_string()
+    }
+
+    /// Run frames until `done`: the lookups run on worker threads, so their answers arrive later.
+    fn frames_until(app: &mut PhotocraftApp, ctx: &egui::Context, what: &str, mut done: impl FnMut(&PhotocraftApp) -> bool) {
+        let started = std::time::Instant::now();
+        while !done(app) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(8), "timed out waiting for {what}");
+            tick(app, ctx);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn dialog_fields(app: &PhotocraftApp, d: u64) -> &Map<String, Value> {
+        &app.ui.dialogs.iter().find(|x| x.id == d).unwrap().fields
+    }
+
+    fn looking(fields: &Map<String, Value>) -> bool {
+        fields["__note"].as_str().unwrap_or_default().starts_with("Looking for models")
+    }
+
+    /// The Generative Fill dialog opens at once, from the server a fill would use, and asks that
+    /// server for its models on a worker thread: the model becomes a menu when the answer comes, or
+    /// stays a text box with the reason. Its backend and host are the server that was asked.
+    #[test]
+    fn generative_fill_dialog_lists_the_servers_models() {
+        let (host, server) = one_checkpoint_list(&["plain.safetensors", "fill-inpainting.safetensors"]);
+        let (mut app, _) = app_with_store();
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.sync_views();
+        app.run("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 8})).unwrap();
+        app.run("prefs.set", json!({"path": "integrations.generativeFillHost", "value": host})).unwrap();
+        let d = crate::menus::invoke(&mut app, &ctx, "edit.generativeFill", json!({})).unwrap()["dialog"].as_u64().unwrap();
+        // Open already, before the server has been heard from.
+        let fields = dialog_fields(&app, d);
+        assert!(looking(fields), "{:?}", fields["__note"]);
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":text"), "a text box until the models arrive");
+        assert_eq!((fields["backend"].as_str(), fields["host"].as_str()), (Some("comfyui"), Some(host.as_str())), "the server that is being asked");
+        assert!(!fields.contains_key("__preview"));
+        frames_until(&mut app, &ctx, "the model list", |a| !looking(dialog_fields(a, d)));
+        server.join().unwrap();
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "fill-inpainting.safetensors", "prefers an inpainting checkpoint");
+        assert!(fields["__note"].as_str().unwrap().starts_with("2 models found"), "{:?}", fields["__note"]);
+        let spec = fields["__spec"].as_str().unwrap();
+        assert!(spec.contains("\"model\":\"plain.safetensors|fill-inpainting.safetensors\""), "{spec}");
+        assert_eq!((fields["backend"].as_str(), fields["host"].as_str()), (Some("comfyui"), Some(host.as_str())), "still the server whose models are shown");
+
+        // Nothing listening: the dialog still opens, then says why, and keeps a text box.
+        let gone = nobody_home();
+        app.run("prefs.set", json!({"path": "integrations.generativeFillHost", "value": gone})).unwrap();
+        let d = crate::menus::invoke(&mut app, &ctx, "edit.generativeFill", json!({})).unwrap()["dialog"].as_u64().unwrap();
+        frames_until(&mut app, &ctx, "the failure", |a| !looking(dialog_fields(a, d)));
+        let fields = dialog_fields(&app, d);
+        assert!(fields["__note"].as_str().unwrap().starts_with("Couldn't list models"), "{:?}", fields["__note"]);
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":text"));
+        assert_eq!(fields["host"], json!(gone));
+    }
+
+    /// A dialog closed while its lookup is out is left alone when the answer arrives, and the
+    /// lookup's bookkeeping is cleared.
+    #[test]
+    fn closing_the_generative_fill_dialog_during_its_lookup_is_harmless() {
+        let (host, server) = one_checkpoint_list(&["a.safetensors"]);
+        let (mut app, _) = app_with_store();
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.sync_views();
+        app.run("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 8})).unwrap();
+        app.run("prefs.set", json!({"path": "integrations.generativeFillHost", "value": host})).unwrap();
+        let d = crate::menus::invoke(&mut app, &ctx, "edit.generativeFill", json!({})).unwrap()["dialog"].as_u64().unwrap();
+        app.ui.close_dialog(d);
+        let pending =
+            |ctx: &egui::Context| ctx.data(|c| c.get_temp::<Vec<(u64, String, LookupSlot)>>(egui::Id::new(GF_DIALOG_LOOKUPS_ID))).unwrap_or_default().len();
+        assert_eq!(pending(&ctx), 1);
+        let started = std::time::Instant::now();
+        while pending(&ctx) > 0 {
+            assert!(started.elapsed() < std::time::Duration::from_secs(8), "the lookup was never collected");
+            tick(&mut app, &ctx);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        server.join().unwrap();
+        assert!(app.ui.dialogs.iter().all(|x| x.id != d));
+    }
+
+    /// Like [`one_checkpoint_list`], but the server takes `delay_ms` to answer.
+    fn slow_checkpoint_list(names: &'static [&'static str], delay_ms: u64) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            let body = json!({"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [names]}}}}).to_string();
+            let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        });
+        (host, server)
+    }
+
+    /// One frame at egui time `t`, with the per-frame work of the app (the typing pause is
+    /// measured in egui time).
+    fn frame_at(app: &mut PhotocraftApp, ctx: &egui::Context, t: f64) {
+        ctx.begin_pass(egui::RawInput { time: Some(t), ..Default::default() });
+        tick(app, ctx);
+        ctx.end_pass().textures_delta.clear();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// An app with a selection, the Generative Fill dialog open on the host saved in Preferences.
+    fn generative_dialog(host: &str) -> (PhotocraftApp, egui::Context, u64) {
+        let (mut app, _) = app_with_store();
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.sync_views();
+        app.run("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 8})).unwrap();
+        app.run("prefs.set", json!({"path": "integrations.generativeFillHost", "value": host})).unwrap();
+        let d = crate::menus::invoke(&mut app, &ctx, "edit.generativeFill", json!({})).unwrap()["dialog"].as_u64().unwrap();
+        (app, ctx, d)
+    }
+
+    /// Changing the dialog's host (or backend) asks the new server and drops the old server's list
+    /// and answer: the models shown are always those of the server the fields name, so a fill
+    /// can't be sent to one server with another's model.
+    #[test]
+    fn changing_the_dialogs_server_asks_the_new_one_and_ignores_the_old_answer() {
+        let (old, old_server) = slow_checkpoint_list(&["old-a.safetensors", "old-b.safetensors"], 2500);
+        let (new, new_server) = one_checkpoint_list(&["new-a.safetensors", "new-b-inpaint.safetensors"]);
+        let (mut app, ctx, d) = generative_dialog(&old);
+        // The host is changed before the first server has answered.
+        app.ui.dialog_mut(d).unwrap().fields.insert("host".into(), json!(new));
+        let (mut t, started) = (0.0, std::time::Instant::now());
+        while !dialog_fields(&app, d)["__note"].as_str().unwrap().starts_with("2 models found") {
+            assert!(started.elapsed() < std::time::Duration::from_secs(8), "timed out: {:?}", dialog_fields(&app, d)["__note"]);
+            t += 0.05;
+            frame_at(&mut app, &ctx, t);
+        }
+        let fields = dialog_fields(&app, d);
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":\"new-a.safetensors|new-b-inpaint.safetensors\""), "{:?}", fields["__spec"]);
+        assert_eq!(fields["model"], "new-b-inpaint.safetensors");
+        assert_eq!(fields["__gfKey"], json!(format!("comfyui|{new}")));
+        // The first server answers late; its list must not replace the one shown.
+        let wait = std::time::Instant::now();
+        while wait.elapsed() < std::time::Duration::from_millis(3200) {
+            t += 0.05;
+            frame_at(&mut app, &ctx, t);
+        }
+        let fields = dialog_fields(&app, d);
+        assert!(!fields["__spec"].as_str().unwrap().contains("old-a"), "{:?}", fields["__spec"]);
+        assert_eq!(fields["model"], "new-b-inpaint.safetensors");
+        assert!(
+            fields["__note"].as_str().unwrap().contains(&new) || fields["__note"].as_str().unwrap().starts_with("2 models found"),
+            "{:?}",
+            fields["__note"]
+        );
+        new_server.join().unwrap();
+        old_server.join().unwrap();
+    }
+
+    /// A model typed before the lookup finishes is kept, not swapped for another one: as typed (in
+    /// the text box) when the server doesn't list it, and selected in the menu when it does.
+    #[test]
+    fn a_typed_model_survives_the_lookup() {
+        let (host, server) = slow_checkpoint_list(&["x.safetensors", "y.safetensors"], 600);
+        let (mut app, ctx, d) = generative_dialog(&host);
+        app.ui.dialog_mut(d).unwrap().fields.insert("model".into(), json!("my-own.safetensors"));
+        frames_until(&mut app, &ctx, "the lookup", |a| !looking(dialog_fields(a, d)));
+        server.join().unwrap();
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "my-own.safetensors", "the user's model stays");
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":text"), "no menu that could not hold it");
+        let note = fields["__note"].as_str().unwrap();
+        assert!(note.starts_with("2 models found") && note.contains("my-own.safetensors isn't one of them"), "{note}");
+
+        // A typed model that the server does list is selected in the menu.
+        let (host, server) = slow_checkpoint_list(&["x.safetensors", "y.safetensors"], 300);
+        let (mut app, ctx, d) = generative_dialog(&host);
+        app.ui.dialog_mut(d).unwrap().fields.insert("model".into(), json!("y.safetensors"));
+        frames_until(&mut app, &ctx, "the lookup", |a| !looking(dialog_fields(a, d)));
+        server.join().unwrap();
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "y.safetensors");
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":\"x.safetensors|y.safetensors\"=\"y.safetensors\""), "{:?}", fields["__spec"]);
+    }
+
+    /// Run frames until the dialog has applied the lookup for `host` (its list is for that server).
+    fn frames_until_listed(app: &mut PhotocraftApp, ctx: &egui::Context, d: u64, host: &str, t: &mut f64) {
+        let want = format!("comfyui|{host}");
+        let started = std::time::Instant::now();
+        while dialog_fields(app, d).get("__gfKey").and_then(Value::as_str) != Some(want.as_str()) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(8), "timed out waiting for {want}: {:?}", dialog_fields(app, d)["__note"]);
+            *t += 0.05;
+            frame_at(app, ctx, *t);
+        }
+    }
+
+    /// The model the dialog chose for one server stands in for "no choice yet": when the server
+    /// changes it is replaced by the new server's default (it isn't kept as if typed, with a stale
+    /// name in a text box). A model the user picked in the menu stays theirs: kept as it is, in
+    /// the menu when the new server lists it and as typed text when it doesn't.
+    #[test]
+    fn an_automatic_model_follows_a_server_change_but_a_picked_one_stays() {
+        // Automatic: the first server's default is replaced by the second server's.
+        let (a, sa) = one_checkpoint_list(&["a1.safetensors", "a2-inpaint.safetensors"]);
+        let (b, sb) = one_checkpoint_list(&["b1.safetensors", "b2-inpaint.safetensors"]);
+        let (mut app, ctx, d) = generative_dialog(&a);
+        let mut t = 0.0;
+        frames_until_listed(&mut app, &ctx, d, &a, &mut t);
+        assert_eq!(dialog_fields(&app, d)["model"], "a2-inpaint.safetensors", "chosen automatically");
+        app.ui.dialog_mut(d).unwrap().fields.insert("host".into(), json!(b));
+        frames_until_listed(&mut app, &ctx, d, &b, &mut t);
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "b2-inpaint.safetensors", "the new server's default, not the old server's name");
+        assert!(
+            fields["__spec"].as_str().unwrap().contains("\"model\":\"b1.safetensors|b2-inpaint.safetensors\"=\"b2-inpaint.safetensors\""),
+            "{:?}",
+            fields["__spec"]
+        );
+        assert!(!fields["__note"].as_str().unwrap().contains("isn't one of them"), "{:?}", fields["__note"]);
+        sa.join().unwrap();
+        sb.join().unwrap();
+
+        // Picked: the user chooses the first server's other model; the second server doesn't list
+        // it, so it stays, as typed, with a note.
+        let (a, sa) = one_checkpoint_list(&["a1.safetensors", "a2-inpaint.safetensors"]);
+        let (b, sb) = one_checkpoint_list(&["b1.safetensors", "b2-inpaint.safetensors"]);
+        let (mut app, ctx, d) = generative_dialog(&a);
+        let mut t = 0.0;
+        frames_until_listed(&mut app, &ctx, d, &a, &mut t);
+        app.ui.dialog_mut(d).unwrap().fields.insert("model".into(), json!("a1.safetensors"));
+        app.ui.dialog_mut(d).unwrap().fields.insert("host".into(), json!(b));
+        frames_until_listed(&mut app, &ctx, d, &b, &mut t);
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "a1.safetensors", "the user's pick is not replaced");
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":text"), "{:?}", fields["__spec"]);
+        assert!(fields["__note"].as_str().unwrap().contains("a1.safetensors isn't one of them"), "{:?}", fields["__note"]);
+        sa.join().unwrap();
+        sb.join().unwrap();
+
+        // Picked and listed by the next server too: it stays, selected in the menu.
+        let (a, sa) = one_checkpoint_list(&["a1.safetensors", "a2-inpaint.safetensors"]);
+        let (c, sc) = one_checkpoint_list(&["c1.safetensors", "a1.safetensors"]);
+        let (mut app, ctx, d) = generative_dialog(&a);
+        let mut t = 0.0;
+        frames_until_listed(&mut app, &ctx, d, &a, &mut t);
+        app.ui.dialog_mut(d).unwrap().fields.insert("model".into(), json!("a1.safetensors"));
+        app.ui.dialog_mut(d).unwrap().fields.insert("host".into(), json!(c));
+        frames_until_listed(&mut app, &ctx, d, &c, &mut t);
+        let fields = dialog_fields(&app, d);
+        assert_eq!(fields["model"], "a1.safetensors");
+        assert!(fields["__spec"].as_str().unwrap().contains("\"model\":\"c1.safetensors|a1.safetensors\"=\"a1.safetensors\""), "{:?}", fields["__spec"]);
+        sa.join().unwrap();
+        sc.join().unwrap();
+    }
+
+    /// Preferences › Integrations offers the server's models too, asked of the server shown there
+    /// (the unsaved backend and host) on a worker thread: when the section is shown, on Refresh, and
+    /// again, after a pause for typing, whenever either changes, so the list never belongs to
+    /// another server. A server that doesn't answer leaves an empty list and the reason.
+    #[test]
+    fn integrations_section_lists_the_servers_models() {
+        let (host, server) = one_checkpoint_list(&["a.safetensors", "b-inpaint.safetensors"]);
+        let (mut app, _) = app_with_store();
+        let ctx = egui::Context::default();
+        let d = open_preferences(&mut app, "integrations");
+        let mut f = app.ui.dialogs.iter().find(|x| x.id == d).unwrap().fields.clone();
+        let models = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<(Vec<String>, String)>(egui::Id::new(GF_MODELS_ID))).unwrap();
+        // A pass at time `t` (the typing pause is measured in egui time).
+        let frame = |ctx: &egui::Context, f: &mut Map<String, Value>, t: f64| {
+            ctx.begin_pass(egui::RawInput { time: Some(t), ..Default::default() });
+            ctx.end_pass().textures_delta.clear();
+            refresh_generative_models(ctx, f);
+        };
+        let settle = |ctx: &egui::Context, f: &mut Map<String, Value>, t: &mut f64| {
+            let started = std::time::Instant::now();
+            while models(ctx).1.starts_with("Looking for models") {
+                assert!(started.elapsed() < std::time::Duration::from_secs(8), "timed out waiting for the lookup");
+                *t += 0.02;
+                frame(ctx, f, *t);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+
+        // Another section: nothing is asked.
+        f.insert("section".into(), json!("general"));
+        frame(&ctx, &mut f, 1.0);
+        assert!(!f.contains_key("__gfWant"));
+        // Integrations, with the host typed but not saved yet: asked at once, and the frame doesn't wait.
+        f.insert("section".into(), json!("integrations"));
+        f["values"]["integrations"]["generativeFillHost"] = json!(host);
+        frame(&ctx, &mut f, 1.0);
+        let (list, note) = models(&ctx);
+        assert!(list.is_empty() && note.starts_with("Looking for models on"), "{note}");
+        let mut t = 1.0;
+        settle(&ctx, &mut f, &mut t);
+        server.join().unwrap();
+        let (list, note) = models(&ctx);
+        assert_eq!(list, ["a.safetensors", "b-inpaint.safetensors"]);
+        assert!(note.starts_with("2 models found"), "{note}");
+        // Drawing again doesn't ask again (the server is gone now).
+        for _ in 0..5 {
+            t += 0.02;
+            frame(&ctx, &mut f, t);
+        }
+        assert_eq!(models(&ctx).0.len(), 2);
+
+        // Typing another host: the old server's models are not offered for it, and nothing is asked
+        // until the typing pauses.
+        let gone = nobody_home();
+        f["values"]["integrations"]["generativeFillHost"] = json!(gone);
+        t += 0.1;
+        frame(&ctx, &mut f, t);
+        assert_eq!(models(&ctx).1, "2 models found on ".to_string() + &host, "no new question yet while typing");
+        t += 1.0;
+        frame(&ctx, &mut f, t);
+        assert!(models(&ctx).0.is_empty() && models(&ctx).1.starts_with("Looking for models on"), "{:?}", models(&ctx));
+        settle(&ctx, &mut f, &mut t);
+        let (list, note) = models(&ctx);
+        assert!(list.is_empty() && note.starts_with("Couldn't list models"), "{note}");
+        // Changing the backend asks about that backend, whatever the host.
+        f["values"]["integrations"]["generativeFillBackend"] = json!("a1111");
+        t += 0.1;
+        frame(&ctx, &mut f, t);
+        t += 1.0;
+        frame(&ctx, &mut f, t);
+        assert!(models(&ctx).1.starts_with("Looking for models on"), "{}", models(&ctx).1);
+        settle(&ctx, &mut f, &mut t);
+        // Refresh asks again at once.
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(GF_REFRESH_ID), true));
+        t += 0.01;
+        frame(&ctx, &mut f, t);
+        assert!(models(&ctx).1.starts_with("Looking for models on"), "{}", models(&ctx).1);
+        settle(&ctx, &mut f, &mut t);
+        // The model is a normal preference: saved with the rest.
+        f["values"]["integrations"]["generativeFillModel"] = json!("b-inpaint.safetensors");
+        confirm(&mut app, &f).unwrap();
+        assert_eq!(app.session.prefs().integrations.generative_fill_model, "b-inpaint.safetensors");
     }
 
     #[test]

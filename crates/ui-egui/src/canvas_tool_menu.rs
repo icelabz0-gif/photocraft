@@ -227,8 +227,8 @@ pub const VIEW_MENU: &[Row] = &[
 /// the view itself.
 pub const FILL_SCREEN: &str = "view.fillScreen";
 
-/// Photoshop's selection-tool context menu with an active selection, in its order. Its Generative
-/// Fill row has no PhotoCraft command and is left out. Rows stay visible and grey out exactly like
+/// Photoshop's selection-tool context menu with an active selection, in its order. Generative Fill
+/// runs a locally hosted inpainting model (`generative_fill_cmds`). Rows stay visible and grey out exactly like
 /// their menu-bar twins.
 pub const SELECTION_MENU: &[Row] = &[
     Some(("Deselect", "select.deselect")),
@@ -248,6 +248,8 @@ pub const SELECTION_MENU: &[Row] = &[
     Some(("Distort", "edit.transform.distort")),
     Some(("Perspective", "edit.transform.perspective")),
     None,
+    Some(("Generative Fill…", "edit.generativeFill")),
+    Some(("Generative Remove", "edit.generativeRemove")),
     Some(("Delete and Fill Selection", "edit.deleteAndFillSelection")),
     Some(("Fill…", "edit.fill")),
     Some(("Stroke…", "edit.stroke")),
@@ -1414,6 +1416,8 @@ mod tests {
                 Some("Distort"),
                 Some("Perspective"),
                 None,
+                Some("Generative Fill…"),
+                Some("Generative Remove"),
                 Some("Delete and Fill Selection"),
                 Some("Fill…"),
                 Some("Stroke…"),
