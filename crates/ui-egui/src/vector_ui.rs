@@ -138,6 +138,19 @@ pub fn shape_bounds(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2],
 
 /// Finish a Shape-tool drag: ⇧ constrains proportions, ⌥ draws from the centre.
 pub fn finish_shape(app: &mut PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
+    if draws_path(&app.ui.tool_options) {
+        // Path mode: the outline joins the work path (one more subpath), and no layer is made.
+        let Some(path) = shape_outline(app, tool, start, end, mods) else { return };
+        let r = app.run("path.set", json!({"name": "work", "op": "combine", "path": photocraft_engine::vector_cmds::path_json(&path)}));
+        match r {
+            Ok(_) => app.ui.selected_path = Some("work".into()),
+            Err(e) => {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
+        }
+        return;
+    }
     let Some(mut p) = shape_geometry(&app.ui.tool_options, tool, start, end, mods) else { return };
     if tool == Tool::CustomShape {
         // ⇧ keeps the shape's proportions (the rect is already squared).
@@ -165,22 +178,29 @@ pub fn create_shape(app: &mut PhotocraftApp, mut geometry: Value) -> Result<Valu
     app.run("shape.create", geometry)
 }
 
-/// The preview and command both use the full float tool colours, including transparent paint.
-fn shape_preview(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<photocraft_doc::ShapeLayer> {
-    let o = &app.ui.tool_options;
-    let geometry = shape_geometry(o, tool, start, end, mods)?;
-    let path = if tool == Tool::CustomShape {
+/// The outline a Shape-tool drag draws, as a path (a custom shape fitted to the drag's box).
+fn shape_outline(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<photocraft_doc::vector::Path> {
+    let geometry = shape_geometry(&app.ui.tool_options, tool, start, end, mods)?;
+    if tool == Tool::CustomShape {
         let rect = geometry.get("rect").and_then(|r| serde_json::from_value::<[f64; 4]>(r.clone()).ok())?;
         let groups = photocraft_engine::presets::shapes::all_groups(&app.session);
         let shape = groups.iter().flat_map(|g| &g.items).find(|s| s.name == app.ui.presets_ui.shape())?;
-        photocraft_engine::presets::shapes::fit(&shape.path, rect, mods.shift)
+        Some(photocraft_engine::presets::shapes::fit(&shape.path, rect, mods.shift))
     } else {
-        photocraft_engine::vector_cmds::shape_path(&geometry).ok()?
-    };
+        photocraft_engine::vector_cmds::shape_path(&geometry).ok()
+    }
+}
+
+/// The preview and command both use the full float tool colours, including transparent paint.
+/// In Path mode only the outline shows, as the drag draws no layer.
+fn shape_preview(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<photocraft_doc::ShapeLayer> {
+    let o = &app.ui.tool_options;
+    let path = shape_outline(app, tool, start, end, mods)?;
+    let paint = !draws_path(o);
     Some(photocraft_doc::ShapeLayer {
         path,
-        fill: o.shape_fill.then(|| solid_paint(app.session.tools.foreground)),
-        stroke: (o.stroke_width > 0.0).then(|| o.shape_stroke.stroke(o.stroke_width, solid_paint(app.session.tools.background))),
+        fill: (paint && o.shape_fill).then(|| solid_paint(app.session.tools.foreground)),
+        stroke: (paint && o.stroke_width > 0.0).then(|| o.shape_stroke.stroke(o.stroke_width, solid_paint(app.session.tools.background))),
         ..Default::default()
     })
 }
@@ -1389,11 +1409,19 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
         }
         return true;
     }
-    let mut mode = "shape".to_string();
-    crate::widgets::dropdown(ui, "shape-mode", &mut mode, &[("shape".to_string(), tl!("Shape"))], 80.0);
+    // Shape draws a shape layer, Path adds the outline to the work path (#9453).
+    let opts = [("shape".to_string(), tl!("Shape")), ("path".to_string(), tl!("Path"))];
+    crate::widgets::dropdown(ui, "shape-mode", &mut app.ui.tool_options.shape_mode, &opts, 80.0);
     crate::widgets::vline(ui, 22.0);
-    crate::shape_options::options_bar(app, ui, tool);
+    // Path mode hides Fill and Stroke (an outline has no paint); the tool's geometry stays.
+    let paint = !draws_path(&app.ui.tool_options);
+    crate::shape_options::options_bar(app, ui, tool, paint);
     true
+}
+
+/// Whether the Shape tools are in Path mode: a drag adds its outline to the work path.
+fn draws_path(o: &ToolOptions) -> bool {
+    o.shape_mode == "path"
 }
 
 /// Whether the active layer supplies the selected-shape options.
@@ -2361,6 +2389,33 @@ mod tests {
         assert!(b.x0.abs_diff(80) <= 1 && b.width().abs_diff(40) <= 1, "alt = from centre: {b:?}");
         finish_shape(&mut app, Tool::Line, [10.0, 150.0], [90.0, 152.0], egui::Modifiers::SHIFT);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), 4);
+    }
+
+    /// #9453: in Path mode a Shape-tool drag adds its outline to the work path, one subpath per
+    /// drag, and makes no layer, as Photoshop's Path tool mode does. Shape stays the default.
+    #[test]
+    fn path_mode_shape_drags_add_to_the_work_path() {
+        let mut app = app();
+        assert_eq!(app.ui.tool_options.shape_mode, "shape", "Shape by default, as in Photoshop");
+        let layers = app.session.active().unwrap().doc.layers.len();
+        app.ui.tool_options.shape_mode = "path".into();
+        finish_shape(&mut app, Tool::EllipseShape, [20.0, 20.0], [70.0, 50.0], egui::Modifiers::NONE);
+        let doc = &app.session.active().unwrap().doc;
+        assert_eq!(doc.layers.len(), layers, "no layer");
+        let work = doc.work_path.as_ref().expect("a work path");
+        assert_eq!(work.subpaths.len(), 1);
+        assert!(work.subpaths[0].closed);
+        let b = work.control_bounds().unwrap();
+        assert!((b.0 - 20.0).abs() < 0.5 && (b.1 - 20.0).abs() < 0.5 && (b.2 - 70.0).abs() < 0.5 && (b.3 - 50.0).abs() < 0.5, "{b:?}");
+        assert_eq!(app.ui.selected_path.as_deref(), Some("work"));
+        finish_shape(&mut app, Tool::Rectangle, [100.0, 100.0], [140.0, 130.0], egui::Modifiers::NONE);
+        let doc = &app.session.active().unwrap().doc;
+        assert_eq!(doc.work_path.as_ref().unwrap().subpaths.len(), 2, "a second drag adds a subpath");
+        assert_eq!(doc.layers.len(), layers);
+        // Back in Shape mode a drag makes a shape layer again.
+        app.ui.tool_options.shape_mode = "shape".into();
+        finish_shape(&mut app, Tool::Rectangle, [10.0, 150.0], [60.0, 180.0], egui::Modifiers::NONE);
+        assert_eq!(app.session.active().unwrap().doc.layers.len(), layers + 1);
     }
 
     #[test]
