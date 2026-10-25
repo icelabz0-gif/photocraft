@@ -1581,11 +1581,11 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
                 // This is a selected, saved Arrow; unlike the tool's defaults, edits update its geometry.
                 ui.horizontal(|ui| {
                     let mut value = *start;
-                    if ui.checkbox(&mut value, "Start").changed() {
+                    if ui.checkbox(&mut value, tl!("Start")).changed() {
                         edit = Some(json!({"arrowStart": value, "coalesce": key("arrow-start")}));
                     }
                     let mut value = *end;
-                    if ui.checkbox(&mut value, "End").changed() {
+                    if ui.checkbox(&mut value, tl!("End")).changed() {
                         edit = Some(json!({"arrowEnd": value, "coalesce": key("arrow-end")}));
                     }
                 });
