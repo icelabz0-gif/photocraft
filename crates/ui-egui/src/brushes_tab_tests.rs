@@ -407,7 +407,7 @@ fn card_tips_never_cover_their_size_number() {
 #[test]
 fn brush_picker_defaults_to_compact_cards() {
     let st = crate::brush_picker::list_state();
-    assert!(st.scale < 1.0, "the default cards are smaller than the standard size: {}", st.scale);
+    assert_eq!(st.scale, 0.7, "the picker default scale must remain 0.7");
     assert!(st.scale <= CARD_COMPACT_SCALE, "the default tips are compact: {}", st.scale);
     assert!(crate::brush_picker::SCALE_RANGE.contains(&st.scale), "the default sits inside the slider's range: {}", st.scale);
 }
