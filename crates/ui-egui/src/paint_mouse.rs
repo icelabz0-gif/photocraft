@@ -136,12 +136,24 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
     // ⌘/Ctrl+right-click lists the layers under the pointer instead (layer_pick_ui.rs, #307).
     let layer_menu = crate::layer_pick_ui::is_gesture(tool, mods);
     let erase = right_erases(app, tool) && !resize_start && !resizing && !layer_menu;
+    // Shift+Alt+right-press opens Photoshop's HUD Color Picker (#6098) instead of the picker.
+    // Tools whose right-click is the canvas tool menu (Quick Selection, #7268) keep that menu.
+    let sticky = crate::workspace_ui::sticky_mods(app, mods);
+    let hud_gesture = right_click_picker(tool) && !layer_menu && !erase && sticky.shift && sticky.alt;
+    let right_press = response.ctx.input(|i| i.pointer.button_pressed(PointerButton::Secondary)) && response.contains_pointer();
+    if hud_gesture
+        && right_press
+        && let Some(p) = response.ctx.input(|i| i.pointer.hover_pos())
+    {
+        crate::color_hud::open(app, [p.x, p.y], true);
+    }
     let right_stroke = erase && app.drag.is_some();
     let right_start = erase && right_started;
     let right_click = response.secondary_clicked();
     if right_click
         && !erase
         && !layer_menu
+        && !crate::color_hud::is_open(&app.ui)
         && right_click_picker(tool)
         && let Some(p) = response.interact_pointer_pos()
     {
@@ -164,6 +176,22 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
 /// the Brush Preset picker at screen point `at`, and nothing paints.
 pub fn pointer_secondary(app: &mut PhotocraftApp, ctx: &egui::Context, down: bool, mods: egui::Modifiers, at: [f32; 2]) -> bool {
     let tool = app.ui.tool;
+    // Shift+Alt+right is Photoshop's HUD Color Picker (#6098): the down opens it, the up closes
+    // it. As on the canvas, the right-erase preference wins over the HUD, and a tool whose
+    // right-click is the canvas tool menu keeps that menu (handled by the caller).
+    let hud_gesture = right_click_picker(tool) && mods.shift && mods.alt && !right_erases(app, tool);
+    // A control-channel request carries one modifier set, so the Up need not repeat the Down's:
+    // the caller may release Shift and Alt first. Any Up therefore closes a non-held HUD that is
+    // still open; `release` leaves a real-mouse (held) one to its button release.
+    let hud_up = !down && app.ui.color_hud.is_some_and(|h| !h.hold);
+    if hud_gesture || hud_up {
+        if down {
+            crate::color_hud::open(app, at, false);
+        } else {
+            crate::color_hud::release(&mut app.ui);
+        }
+        return false;
+    }
     if crate::brush_resize::applies(tool) && (crate::brush_resize::is_right_gesture(mods) || app.brush_resize.is_some_and(|r| r.secondary)) {
         app.brush_resize_armed = down && app.drag.is_none();
         return true;
@@ -548,6 +576,44 @@ mod tests {
         app.run("prefs.set", json!({"path": "tools.rightClickWithPaintingTools", "value": "brushPicker"})).unwrap();
         assert!(!pointer_secondary(&mut app, &egui::Context::default(), true, egui::Modifiers::NONE, [0.0, 0.0]));
         assert!(app.ui.brush_picker.is_some() && !app.secondary_erase);
+    }
+
+    #[test]
+    fn shift_alt_right_through_the_control_channel_respects_the_erase_preference() {
+        // As on the canvas, with the right-erase preference the erase stroke wins over the HUD
+        // for Brush/Eraser; without it, Shift+Alt+right opens the HUD (#6098).
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
+        app.ui.tool = Tool::Brush;
+        let shift_alt = egui::Modifiers { shift: true, alt: true, ..Default::default() };
+        app.run("prefs.set", json!({"path": "tools.rightClickWithPaintingTools", "value": "erase"})).unwrap();
+        assert!(pointer_secondary(&mut app, &egui::Context::default(), true, shift_alt, [10.0, 10.0]), "the events reach the tool");
+        assert!(app.ui.color_hud.is_none(), "no HUD with the erase preference");
+        assert!(app.secondary_erase, "the down arms the erasing stroke");
+        pointer_secondary(&mut app, &egui::Context::default(), false, shift_alt, [10.0, 10.0]);
+        // With the default preference the same gesture opens the HUD instead.
+        app.run("prefs.set", json!({"path": "tools.rightClickWithPaintingTools", "value": "brushPicker"})).unwrap();
+        assert!(!pointer_secondary(&mut app, &egui::Context::default(), true, shift_alt, [10.0, 10.0]));
+        assert!(app.ui.color_hud.is_some_and(|h| !h.hold), "the control-channel HUD opened");
+    }
+
+    #[test]
+    fn a_control_channel_up_closes_the_hud_without_repeating_its_modifiers() {
+        // Each control-channel request carries its own modifiers, so an Up sent after the keys
+        // are released arrives without Shift+Alt: it must still close the HUD it opened, or the
+        // HUD stays up and keeps picking from the hover (#6098 review).
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
+        app.ui.tool = Tool::Brush;
+        let shift_alt = egui::Modifiers { shift: true, alt: true, ..Default::default() };
+        assert!(!pointer_secondary(&mut app, &egui::Context::default(), true, shift_alt, [10.0, 10.0]));
+        assert!(app.ui.color_hud.is_some_and(|h| !h.hold), "the control-channel HUD opened");
+        assert!(!pointer_secondary(&mut app, &egui::Context::default(), false, egui::Modifiers::NONE, [10.0, 10.0]));
+        assert!(app.ui.color_hud.is_none(), "the Up closes it whatever the modifiers say");
+        // A real-mouse HUD belongs to the canvas gesture and waits for its own button release.
+        crate::color_hud::open(&mut app, [10.0, 10.0], true);
+        pointer_secondary(&mut app, &egui::Context::default(), false, egui::Modifiers::NONE, [10.0, 10.0]);
+        assert!(app.ui.color_hud.is_some_and(|h| h.hold), "a held HUD is left to the canvas");
     }
 
     #[test]
