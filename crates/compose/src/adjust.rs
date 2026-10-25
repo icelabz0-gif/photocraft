@@ -81,7 +81,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
 }
 
 /// [`apply_depth`] in a document of colour `mode` (which decides whether float curves extend,
-/// see [`float_tone_extrapolates`]).
+/// see [`float_tone_extrapolates`]). Neutral-range RGB/8 Hue/Saturation at nonpositive hue uses
+/// whole channel levels; other depths, modes, slider domains and colour ranges use the float path.
 fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>, mode: ColorMode) {
     match adj {
         Adjustment::Invert => map_rgb(buf, |c| [1.0 - c[0], 1.0 - c[1], 1.0 - c[2]]),
@@ -153,6 +154,30 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
         }
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
             let table = (!*colorize && ranges.iter().any(|r| !r.is_neutral())).then(|| hue_range_tables(ranges));
+            let rgb8 = mode == ColorMode::Rgb
+                && depth == Some(SampleType::U8)
+                && !*colorize
+                && table.is_none()
+                && hue.is_finite()
+                && (-180.0..=0.0).contains(hue)
+                && saturation.is_finite()
+                && (0.0..=100.0).contains(saturation)
+                && lightness.is_finite()
+                && (0.0..=100.0).contains(lightness);
+            if rgb8 {
+                let sat = (*saturation / 100.0).clamp(0.0, 1.0);
+                let light = (*lightness / 100.0).clamp(0.0, 1.0);
+                if *hue == 0.0 && sat == 0.0 && light == 0.0 {
+                    return;
+                }
+                let steps = ((sat * 254.0 + 1e-4).floor() as i32).clamp(0, 254);
+                let factor = (65280 / (255 - steps)).min(32767);
+                let shift = if *hue == 0.0 { 0 } else { (*hue * 256.0 / 60.0 - 0.5).floor() as i32 };
+                let rotated = *hue != 0.0;
+                let lightness_levels = rgb8_lightness_levels(light);
+                map_rgb(buf, |c| hue_saturation_rgb8(c, factor, shift, rotated, light, &lightness_levels));
+                return;
+            }
             map_rgb(buf, |c| {
                 let (dh, ds, dl) = match &table {
                     Some(t) => {
@@ -165,7 +190,8 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
                     None => (0.0, 0.0, 0.0),
                 };
                 let sat = colorize_saturation((*saturation / 100.0 + ds).clamp(-1.0, 1.0), *lightness / 100.0, *colorize, depth);
-                let out = hue_saturation_in(c, *hue + dh, sat, (*lightness / 100.0).clamp(-1.0, 1.0), *colorize, depth);
+                let light = (*lightness / 100.0).clamp(-1.0, 1.0);
+                let out = hue_saturation_in(c, *hue + dh, sat, light, *colorize, depth);
                 range_lightness(out, dl)
             })
         }
@@ -732,6 +758,69 @@ pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, 
     // (measured in Photoshop 27.11); +100 % saturates any colour that has some.
     let ss = if s > 0.0 { ss / (1.0 - s).max(1.0 / 512.0) } else { ss * (1.0 + s) }.clamp(0.0, 1.0);
     hsl_to_rgb(hh, ss, ll)
+}
+
+/// Evaluates one RGB/8 pixel using whole channel and hue levels for the neutral-range master
+/// adjustment at hue -180..=0 degrees and nonnegative Saturation/Lightness. `factor` is chroma
+/// gain in 1/256 units, `shift` is a 1/256-sector hue offset, and `lightness_levels` contains
+/// the rounded channel levels after Lightness. The 256-step sectors have 255 source positions.
+/// Measured against the clipped Photoshop 26.11.6 RGB/8 source/PSD oracle (`image-1-hs`).
+fn hue_saturation_rgb8(c: [f32; 3], factor: i32, shift: i32, rotated: bool, lightness: f32, lightness_levels: &[i32; 256]) -> [f32; 3] {
+    let rgb = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as i32);
+    let rgb = rgb.map(|v| lightness_levels.get(v as usize).copied().unwrap_or_else(|| (v as f32 + (255 - v) as f32 * lightness).round() as i32));
+    let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+    let (minimum, maximum) = (r.min(g).min(b), r.max(g).max(b));
+    let old_chroma = maximum - minimum;
+    if old_chroma == 0 {
+        return [minimum as f32 / 255.0; 3];
+    }
+    let sum = minimum + maximum;
+    let chroma = ((old_chroma * factor + 127) / 256).min(sum.min(510 - sum));
+    let low = (sum - chroma) / 2;
+    let high = (sum + chroma) / 2;
+
+    // At a shared maximum, choose the next primary around the hue wheel. This puts yellow,
+    // cyan and magenta on the same descending sector edge as Photoshop's RGB/8 oracle.
+    let (base, numerator) = if r > g && r >= b {
+        (0, g - b)
+    } else if g > b && g >= r {
+        (512, b - r)
+    } else {
+        (1024, r - g)
+    };
+    let ratio = rgb8_hue_ratio(numerator, old_chroma);
+    // Half-step bias matches the signed Photoshop slider's discrete hue phase. Hue 0 is an
+    // unrotated path: applying the phase there would change an otherwise identity hue.
+    let initial = (base + ratio + shift).rem_euclid(1536);
+    let phase = if rotated && numerator > 0 && (initial / 256) % 2 == 0 { 2 } else { 0 };
+    let position = (initial + phase).rem_euclid(1536);
+    let sector = position / 256;
+    let offset = position % 256;
+    let rising = low + (chroma * offset + 127) / 256;
+    let falling = low + (chroma * (if rotated { 254 } else { 256 } - offset) + 127).div_euclid(256);
+    let out = match sector {
+        0 => [high, rising, low],
+        1 => [falling, high, low],
+        2 => [low, high, rising],
+        3 => [low, falling, high],
+        4 => [rising, low, high],
+        _ => [high, low, falling],
+    };
+    out.map(|v| v.clamp(0, 255) as f32 / 255.0)
+}
+
+/// Maps each 0..=255 RGB/8 channel level through Lightness once per adjustment. `lightness` is
+/// the slider fraction in 0..=1; each entry preserves the former f32 operation order and rounding.
+fn rgb8_lightness_levels(lightness: f32) -> [i32; 256] {
+    std::array::from_fn(|v| (v as f32 + (255 - v) as f32 * lightness).round() as i32)
+}
+
+/// Rounded position within a 255-step source hue sector. The numerator is at most 65,152,
+/// exactly representable in f32; a nonintegral quotient is at least 1/255 from either integer.
+/// Direct division and floor therefore produce the same quotient as integer division for RGB/8.
+fn rgb8_hue_ratio(numerator: i32, chroma: i32) -> i32 {
+    let rounded_numerator = numerator.abs() * 255 + chroma / 2;
+    numerator.signum() * ((rounded_numerator as f32 / chroma as f32).floor() as i32)
 }
 
 /// The factor 32-bit Hue/Saturation scales chroma by for saturation `s` (-1..1), as Photoshop
@@ -2177,6 +2266,136 @@ mod tone_tests {
                 assert!((got - *w as f32).abs() <= 2.0, "{input:?} h{hue} s{saturation} l{lightness} colorize {colorize}, channel {i}: {got} vs {w}");
             }
         }
+    }
+
+    /// Photoshop 26.11.6 RGB/8 pixels from the clipped Hue/Saturation case
+    /// `image-1-hs` (source PNG and independently exported Photoshop PNG).
+    #[test]
+    fn clipped_hue_saturation_matches_photoshop_rgb8_pixels() {
+        let measured: [([u8; 3], [u8; 3]); 8] = [
+            ([1, 34, 65], [109, 100, 46]),
+            ([1, 83, 133], [169, 136, 39]),
+            ([108, 159, 180], [202, 178, 130]),
+            ([74, 141, 183], [207, 180, 99]),
+            ([84, 138, 166], [192, 169, 110]),
+            ([12, 19, 25], [72, 70, 60]),
+            ([170, 184, 193], [207, 202, 185]),
+            ([143, 178, 198], [214, 199, 159]),
+        ];
+        let adjustment = Adjustment::HueSaturation { hue: -158.0, saturation: 20.0, lightness: 20.0, colorize: false, ranges: HueRange::defaults() };
+        for (input, expected) in measured {
+            let px = input.map(|channel| channel as f32 / 255.0);
+            let mut buffer = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[px[0], px[1], px[2], 1.0]] };
+            apply_depth(&adjustment, &mut buffer, Transfer::Srgb, Some(SampleType::U8));
+            let actual: [u8; 3] = std::array::from_fn(|i| (buffer.px[0][i] * 255.0).round() as u8);
+            assert_eq!(actual, expected, "input {input:?}");
+        }
+    }
+
+    /// Pure secondary RGB/8 colours select the descending hue sector at a shared maximum,
+    /// matching Photoshop's Saturation-only and Lightness-only channel tie outputs.
+    #[test]
+    fn rgb8_hue_saturation_resolves_primary_ties_like_photoshop() {
+        for (saturation, lightness, expected) in [
+            (20.0, 0.0, [[254, 255, 0], [0, 254, 255], [255, 0, 254]]),
+            (0.0, 20.0, [[254, 255, 51], [51, 254, 255], [255, 51, 254]]),
+            (20.0, 20.0, [[254, 255, 51], [51, 254, 255], [255, 51, 254]]),
+        ] {
+            let adjustment = Adjustment::HueSaturation { hue: 0.0, saturation, lightness, colorize: false, ranges: HueRange::defaults() };
+            for (input, want) in [[255, 255, 0], [0, 255, 255], [255, 0, 255]].into_iter().zip(expected) {
+                let rgb = input.map(|v| v as f32 / 255.0);
+                let mut buffer = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
+                apply_depth(&adjustment, &mut buffer, Transfer::Srgb, Some(SampleType::U8));
+                let got: [u8; 3] = std::array::from_fn(|i| (buffer.px[0][i] * 255.0).round() as u8);
+                assert_eq!(got, want, "{input:?}, s{saturation} l{lightness}");
+            }
+        }
+    }
+
+    /// Every 8-bit grey level retains the prior Lightness rounding at whole slider percents;
+    /// hue and chroma are irrelevant for grey, so this exercises the new lookup in isolation.
+    #[test]
+    fn rgb8_lightness_levels_match_scalar_rounding() {
+        let source: Vec<[f32; 4]> = (0..=255).map(|v| [v as f32 / 255.0, v as f32 / 255.0, v as f32 / 255.0, 1.0]).collect();
+        for percent in 0..=100 {
+            let lightness = percent as f32 / 100.0;
+            let adjustment =
+                Adjustment::HueSaturation { hue: -158.0, saturation: 20.0, lightness: percent as f32, colorize: false, ranges: HueRange::defaults() };
+            let mut buffer = Buffer { rect: Rect::new(0, 0, 256, 1), px: source.clone() };
+            apply_depth(&adjustment, &mut buffer, Transfer::Srgb, Some(SampleType::U8));
+            for (v, pixel) in buffer.px.iter().enumerate() {
+                let expected = (v as f32 + (255 - v) as f32 * lightness).round() as u8;
+                let actual: [u8; 3] = std::array::from_fn(|channel| (pixel[channel] * 255.0).round() as u8);
+                assert_eq!(actual, [expected; 3], "lightness {percent}%, level {v}");
+            }
+        }
+    }
+
+    /// A neutral adjustment leaves fractional working pixels untouched, while high depths,
+    /// non-RGB documents and out-of-slider values keep their existing float behavior.
+    #[test]
+    fn rgb8_hue_saturation_branch_preserves_identity_and_other_depths() {
+        let fractional = [0.12345, 0.45678, 0.78901, 0.375];
+        let neutral = Adjustment::HueSaturation { hue: 0.0, saturation: 0.0, lightness: 0.0, colorize: false, ranges: HueRange::defaults() };
+        let mut identity = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![fractional] };
+        apply_depth(&neutral, &mut identity, Transfer::Srgb, Some(SampleType::U8));
+        assert_eq!(identity.px[0], fractional, "neutral adjustment must preserve fractional working pixels");
+
+        let adjusted = Adjustment::HueSaturation { hue: -158.0, saturation: 20.0, lightness: 20.0, colorize: false, ranges: HueRange::defaults() };
+        for depth in [SampleType::U16, SampleType::F32] {
+            let mut buffer = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![fractional] };
+            apply_depth(&adjusted, &mut buffer, Transfer::Srgb, Some(depth));
+            let expected = hue_saturation_in([fractional[0], fractional[1], fractional[2]], -158.0, 0.2, 0.2, false, Some(depth));
+            for (got, want) in buffer.px[0][..3].iter().zip(expected) {
+                assert!((got - want).abs() < 1e-6, "{depth:?}: {got} vs {want}");
+            }
+            assert_eq!(buffer.px[0][3], fractional[3]);
+        }
+        for (mode, saturation, lightness) in [(ColorMode::Rgb, 120.0, 20.0), (ColorMode::Rgb, 20.0, 120.0), (ColorMode::Lab, 20.0, 20.0)] {
+            let adjustment = Adjustment::HueSaturation { hue: -158.0, saturation, lightness, colorize: false, ranges: HueRange::defaults() };
+            let mut buffer = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![fractional] };
+            apply_depth_mode(&adjustment, &mut buffer, Transfer::Srgb, Some(SampleType::U8), mode);
+            let expected = hue_saturation_in(
+                [fractional[0], fractional[1], fractional[2]],
+                -158.0,
+                (saturation / 100.0).clamp(-1.0, 1.0),
+                (lightness / 100.0).clamp(-1.0, 1.0),
+                false,
+                Some(SampleType::U8),
+            );
+            for (got, want) in buffer.px[0][..3].iter().zip(expected) {
+                assert!((got - want).abs() < 1e-6, "{mode:?} s{saturation} l{lightness}: {got} vs {want}");
+            }
+        }
+    }
+
+    /// The bounded RGB/8 float quotient must equal signed integer division for every possible
+    /// source hue numerator and nonzero chroma (32,895 magnitudes, checked in both signs).
+    #[test]
+    fn rgb8_hue_ratio_float_division_matches_integer_for_all_channel_differences() {
+        for chroma in 1..=255 {
+            for numerator in 0..=chroma {
+                let want = (numerator * 255 + chroma / 2) / chroma;
+                assert_eq!(rgb8_hue_ratio(numerator, chroma), want, "chroma {chroma}, numerator {numerator}");
+                assert_eq!(rgb8_hue_ratio(-numerator, chroma), -want, "chroma {chroma}, numerator -{numerator}");
+            }
+        }
+    }
+
+    /// A +40-degree RGB/8 adjustment retains the earlier float path on the measured red ramp
+    /// pixel, where its green result is one level closer to Photoshop than the integer phase.
+    #[test]
+    fn positive_hue_rgb8_keeps_the_existing_float_path() {
+        // Photoshop's +40° ramp sample: the existing float path is one channel level closer
+        // than the new integer path, whose empirically fitted phase is specific to nonpositive hue.
+        let input = [255.0 / 255.0, 1.0 / 255.0, 0.0];
+        let adjustment = Adjustment::HueSaturation { hue: 40.0, saturation: 20.0, lightness: 20.0, colorize: false, ranges: HueRange::defaults() };
+        let mut buffer = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[input[0], input[1], input[2], 1.0]] };
+        apply_depth(&adjustment, &mut buffer, Transfer::Srgb, Some(SampleType::U8));
+        let old = hue_saturation_in(input, 40.0, 0.2, 0.2, false, Some(SampleType::U8));
+        assert_eq!(&buffer.px[0][..3], &old);
+        let actual: [u8; 3] = std::array::from_fn(|i| (buffer.px[0][i] * 255.0).round() as u8);
+        assert_eq!(actual, [255, 188, 51]);
     }
 
     /// Photoshop 27.11, measured: a range's Lightness (Blues ±50) moves towards the brightest or darkest channel.
