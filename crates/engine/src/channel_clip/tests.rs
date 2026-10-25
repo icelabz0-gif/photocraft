@@ -193,7 +193,7 @@ fn channel_copy_allocation_failure_keeps_clipboard_and_document() {
         let clip = s.clipboard.as_ref().unwrap().surface.clone();
         let history = s.active().unwrap().history.entries();
         crate::allocation::fail_next_for_test();
-        let result = copy(&mut s);
+        let result = copy(&mut s, &Value::Null);
         let _ = crate::allocation::capacity::<u8>(0, "reset failpoint");
         assert!(result.is_err());
         assert_eq!(*s.active().unwrap().doc, *before);

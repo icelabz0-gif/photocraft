@@ -158,11 +158,18 @@ pub(crate) fn validate_params(id: &str, params: &Value) -> Result<()> {
             (rule.accepts(value), rule.expected())
         } else {
             match key.as_str() {
-                "layer" => (value.as_u64().is_some(), "an unsigned layer id".into()),
+                "layer" => (value.as_u64().is_some() || value.is_string(), "an unsigned layer id or layer name".into()),
                 "coalesce" => (value.is_string(), "a string".into()),
                 "target" => (
                     value.as_str().is_some_and(|s| matches!(s, "pixels" | "mask" | "quickMask"))
-                        || value.as_object().is_some_and(|o| o.len() == 1 && o.get("channel").and_then(Value::as_u64).is_some()),
+                        || value.as_object().is_some_and(|o| {
+                            o.len() == 1
+                                && (o.get("channel").and_then(Value::as_u64).is_some()
+                                    || o.get("color").and_then(Value::as_u64).is_some()
+                                    || o.get("colors")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|a| !a.is_empty() && a.len() <= 64 && a.iter().all(|v| v.as_u64().is_some())))
+                        }),
                     "pixels, mask, quickMask or {\"channel\":index}".into(),
                 ),
                 _ => return Err(bad(format!("unknown parameter `{key}`"))),
@@ -317,7 +324,7 @@ mod tests {
             let result = s.execute(id, json!({"seed":u32::MAX})).unwrap();
             assert_eq!(result["filter"]["seed"], json!(u32::MAX));
         }
-        for (key, value) in [("layer", json!("2")), ("target", json!("typo")), ("target", json!({"channel":-1})), ("coalesce", json!(false))] {
+        for (key, value) in [("layer", json!(false)), ("target", json!("typo")), ("target", json!({"channel":-1})), ("coalesce", json!(false))] {
             rejected(&mut s, "filter.blur.gaussianBlur", key, value);
         }
     }
@@ -388,7 +395,7 @@ mod tests {
                 }
             }
             for id in STRICT_EXTENDED {
-                for (key, value) in [("radus", json!(3)), ("layer", json!("2")), ("target", json!("typo")), ("coalesce", json!(false))] {
+                for (key, value) in [("radus", json!(3)), ("layer", json!(false)), ("target", json!("typo")), ("coalesce", json!(false))] {
                     rejected(&mut s, id, key, value);
                 }
                 for value in [json!([]), json!(false), json!(3), json!("params")] {

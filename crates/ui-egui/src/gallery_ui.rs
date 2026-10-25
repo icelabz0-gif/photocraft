@@ -72,6 +72,7 @@ pub struct GalleryDialog {
     layer_name: String,
     canvas: Rect,
     src: Surface,
+    target: Value,
     /// Apply order: index 0 runs first (shown at the bottom of the list).
     pub effects: Vec<EffectLayer>,
     pub selected: usize,
@@ -117,7 +118,7 @@ impl GalleryDialog {
 
     /// The command params for the current stack.
     pub fn params(&self) -> Value {
-        json!({"effects": self.effects.iter().map(EffectLayer::to_json).collect::<Vec<_>>(), "foreground": self.foreground, "background": self.background})
+        json!({"effects": self.effects.iter().map(EffectLayer::to_json).collect::<Vec<_>>(), "foreground": self.foreground, "background": self.background, "target":self.target})
     }
 
     /// The progress (`0.0..=1.0`) of a preview still rendering.
@@ -197,7 +198,13 @@ fn render(src: &Surface, params: &Value) -> Surface {
     let effects = photocraft_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
     let b = src.content_bounds().union(&Rect::new(0, 0, 1, 1));
     let b = Rect::new(0, 0, b.x1, b.y1);
-    photocraft_algo::apply_in(src, &FilterParams::FilterGallery { effects }, b, b, None, b)
+    let mut out = photocraft_algo::apply_in(src, &FilterParams::FilterGallery { effects }, b, b, None, b);
+    if let Ok(Some(colors)) = photocraft_engine::color_channels::explicit(params, src.format().mode.color_channels())
+        && photocraft_engine::color_channels::restrict_surface(src, &mut out, colors).is_err()
+    {
+        return src.clone();
+    }
+    out
 }
 
 /// The preview of `vis` at 1/`k` (#2502): the stack runs at full resolution exactly as OK runs it
@@ -209,13 +216,16 @@ fn preview_pixels(src: &Surface, canvas: Rect, params: &Value, vis: Rect, k: u32
     let fp = FilterParams::FilterGallery { effects };
     let content = src.content_bounds();
     let area = photocraft_algo::output_area(&fp, content, canvas, None).intersect(&vis);
-    let full = if area.is_empty() { src.clone() } else { photocraft_algo::apply_in_with(src, &fp, area, canvas, None, canvas.union(&content), ctl)? };
+    let mut full = if area.is_empty() { src.clone() } else { photocraft_algo::apply_in_with(src, &fp, area, canvas, None, canvas.union(&content), ctl)? };
+    if let Some(colors) = photocraft_engine::color_channels::explicit(params, src.format().mode.color_channels()).ok()? {
+        photocraft_engine::color_channels::restrict_region(src, &mut full, colors, area).ok()?;
+    }
     Some(reduce(&full, vis, k))
 }
 
 /// `r` of `surf` scaled down by `k`, each pixel the average of a `k`×`k` block (colour weighted by
 /// alpha), placed at the origin.
-fn reduce(surf: &Surface, r: Rect, k: u32) -> Surface {
+pub(crate) fn reduce(surf: &Surface, r: Rect, k: u32) -> Surface {
     let k = k.clamp(1, 1 << 16) as usize;
     let (bw, bh) = (r.width() as usize, r.height() as usize);
     let (w, h) = (bw.div_ceil(k), bh.div_ceil(k));
@@ -304,7 +314,7 @@ fn colour_param(p: &Value, key: &str) -> Option<[f32; 4]> {
 
 /// Opens the dialog on the active layer, starting from the last gallery stack used.
 pub fn open(app: &mut PhotocraftApp) -> Result<(), String> {
-    let (layer, src, _) = crate::distort_ui::active_pixels(app)?;
+    let (layer, src, _) = crate::distort_ui::active_filter_target(app)?;
     let last = app.session.journal.iter().rev().find(|(id, _)| id == "filter.filterGallery").map(|(_, p)| p.clone());
     let effects = last.as_ref().map(effects_from).unwrap_or_default();
     let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
@@ -355,12 +365,14 @@ fn open_on(
     let sel = effects.len() - 1;
     let open_cats = std::array::from_fn(|i| effects[sel].filter.category() == GALLERY_CATEGORIES[i]);
     let history = EditHistory::new(&effects);
+    let target = if smart_filter.is_some() { json!("pixels") } else { crate::canvas::paint_target(app) };
     app.distort.gallery = Some(GalleryDialog {
         document: st.doc.id,
         layer,
         layer_name,
         canvas,
         src,
+        target,
         effects,
         selected: sel,
         open: open_cats,
@@ -623,7 +635,7 @@ fn update_thumbs(d: &mut GalleryDialog, ctx: &egui::Context, budget: usize) {
             ctx.request_repaint();
             return;
         }
-        let p = json!({"effects": [{"filter": f.key()}], "foreground": d.foreground, "background": d.background});
+        let p = json!({"effects": [{"filter": f.key()}], "foreground": d.foreground, "background": d.background,"target":d.target});
         let out = render(&d.thumb_src, &p);
         let b = d.thumb_src.content_bounds();
         let img = image(&out, b.x1.max(1) as usize, b.y1.max(1) as usize);
@@ -1076,6 +1088,33 @@ mod tests {
         let b = st.doc.layer(d.layer).unwrap().surface().unwrap().read_region(d.canvas);
         let worst = a.read_region(d.canvas).iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
         assert!(worst < 2e-3, "preview differs from the result by {worst}");
+    }
+
+    #[test]
+    fn native_component_gallery_previews_match_commit_and_capture_the_target() {
+        for mode in ["rgb", "cmyk", "lab"] {
+            for depth in [8, 16, 32] {
+                for alpha in [true, false] {
+                    let fixture = crate::distort_ui::component_tests::app(mode, depth);
+                    let mut app = if alpha { fixture } else { crate::distort_ui::component_tests::without_alpha(fixture) };
+                    open(&mut app).unwrap();
+                    let d = app.distort.gallery.as_mut().unwrap();
+                    d.effects = vec![EffectLayer::new(GalleryFilter::Cutout)];
+                    let params = d.params();
+                    let before = d.src.clone();
+                    let bounds = d.canvas;
+                    let layer = d.layer;
+                    let preview = preview_pixels(&before, bounds, &params, bounds, 1, &Interrupt::NONE).unwrap();
+                    crate::distort_ui::component_tests::protected(&before, &preview, bounds);
+                    let thumbnail = render(&before, &params);
+                    crate::distort_ui::component_tests::protected(&before, &thumbnail, bounds);
+                    app.run("channel.target", json!({"channel":{"color":1}})).unwrap();
+                    commit(&mut app).unwrap();
+                    let after = app.session.active().unwrap().doc.layer(layer).unwrap().surface().unwrap();
+                    assert_eq!(after.read_region(bounds), preview.read_region(bounds));
+                }
+            }
+        }
     }
 
     /// A 240×160 layer with gradients, edges and fine detail, so every gallery filter has

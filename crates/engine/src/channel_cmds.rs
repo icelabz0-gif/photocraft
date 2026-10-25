@@ -15,7 +15,7 @@
 use photocraft_algo::selection::{self as sel, SelectionMode};
 use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, blend::blend_channel};
 use photocraft_doc::{AlphaChannel, ColorIndicates, Document, Layer, LayerContent, LayerId};
-use photocraft_geom::{Rect, TileCoord};
+use photocraft_geom::Rect;
 use photocraft_raster::{Surface, from_rgba, to_rgba};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -51,6 +51,8 @@ pub enum ChannelTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelView {
     pub target: ChannelTarget,
+    /// Selected native colour components; empty retains the legacy single target.
+    pub selected_colors: Vec<usize>,
     /// Hidden colour channels (missing entries are visible).
     pub color_hidden: Vec<bool>,
     /// Visible alpha channels (missing entries are hidden).
@@ -61,6 +63,9 @@ pub struct ChannelView {
 }
 
 impl ChannelView {
+    pub fn color_selection(&self, count: usize) -> Option<crate::color_channels::ColorChannels> {
+        crate::color_channels::from_view(self, count)
+    }
     pub fn color_visible(&self, k: usize) -> bool {
         !self.color_hidden.get(k).copied().unwrap_or(false)
     }
@@ -122,6 +127,7 @@ pub(crate) fn fix_view(st: &mut DocState) {
         let v = &mut st.channel_view;
         v.alpha_visible.truncate(n);
         v.color_hidden.truncate(colors);
+        v.selected_colors.retain(|k| *k < colors);
         match v.target {
             ChannelTarget::Alpha(i) if i >= n => v.target = ChannelTarget::Composite,
             ChannelTarget::Color(k) if k >= colors || colors < 2 => v.target = ChannelTarget::Composite,
@@ -132,6 +138,12 @@ pub(crate) fn fix_view(st: &mut DocState) {
                 v.target = ChannelTarget::Composite;
             }
             _ => {}
+        }
+        if v.color_selection(colors).is_some_and(|selected| selected.len() == colors) {
+            v.target = ChannelTarget::Composite;
+        }
+        if !matches!(v.target, ChannelTarget::Color(_)) {
+            v.selected_colors.clear();
         }
     }
     crate::mask_view_cmds::fix(st);
@@ -188,6 +200,8 @@ pub fn composite_name(mode: ColorMode) -> &'static str {
 pub struct IsolatedCurveChannel {
     /// Channels-panel name, including a custom alpha name or "{layer} Mask".
     pub name: String,
+    /// A partial colour selection exposes its combined entry and individual components.
+    pub components: Option<crate::color_channels::ColorChannels>,
     /// Curves param key: empty = composite `points`; otherwise `red`/`green`/…
     pub key: &'static str,
     /// Index into the tone-space histograms (composite = 0 for RGB/CMYK).
@@ -224,38 +238,64 @@ pub fn isolated_curve_channel(st: &DocState) -> Option<IsolatedCurveChannel> {
 /// must give the same Curves dropdown (#5335).
 pub fn isolated_curve_channel_for(st: &DocState, layers_panel_mask: bool) -> Option<IsolatedCurveChannel> {
     let doc = &st.doc;
-    let mode = edit_mode(doc);
+    if matches!(st.channel_view.target, ChannelTarget::Color(_)) && (crate::mask_view_cmds::current(st).is_some() || layers_panel_mask) {
+        return layer_mask_curve_channel(st);
+    }
+    if let Some(colors) = st.channel_view.color_selection(color_count(doc)) {
+        return curve_channel_for_colors(doc, colors);
+    }
     match st.channel_view.target {
-        ChannelTarget::Color(k) => {
-            let names = color_names(mode);
-            let keys = crate::adjust_params::channel_keys(crate::adjust_params::default_space(mode));
-            let name = names.get(k)?.to_string();
-            let key = *keys.get(k)?;
-            let hist = if matches!(mode, ColorMode::Lab) { k } else { k.saturating_add(1) };
-            Some(IsolatedCurveChannel { name, key, hist, tint: true, translate: true, gray: None })
-        }
         ChannelTarget::Alpha(i) => doc.channels.get(i).map(|c| IsolatedCurveChannel {
             name: c.name.clone(),
+            components: None,
             key: "",
             hist: 0,
             tint: false,
             translate: false,
             gray: Some(GraySurface::Alpha(i)),
         }),
-        ChannelTarget::Composite if doc.quick_mask.is_some() => {
-            Some(IsolatedCurveChannel { name: "Quick Mask".into(), key: "", hist: 0, tint: false, translate: true, gray: Some(GraySurface::QuickMask) })
-        }
+        ChannelTarget::Composite if doc.quick_mask.is_some() => Some(IsolatedCurveChannel {
+            name: "Quick Mask".into(),
+            components: None,
+            key: "",
+            hist: 0,
+            tint: false,
+            translate: true,
+            gray: Some(GraySurface::QuickMask),
+        }),
         ChannelTarget::LayerMask => layer_mask_curve_channel(st),
         ChannelTarget::Composite if crate::mask_view_cmds::current(st).is_some() || layers_panel_mask => layer_mask_curve_channel(st),
         _ => None,
     }
 }
 
-fn layer_mask_curve_channel(st: &DocState) -> Option<IsolatedCurveChannel> {
+/// Tone editor descriptor for captured native colour targets, without cloning document history.
+pub fn curve_channel_for_colors(doc: &Document, colors: crate::color_channels::ColorChannels) -> Option<IsolatedCurveChannel> {
+    let mode = edit_mode(doc);
+    let names = color_names(mode);
+    if colors.len() > 1 {
+        let name = colors.indices().filter_map(|i| names.get(i)).filter_map(|n| n.chars().next()).collect();
+        return Some(IsolatedCurveChannel { name, components: Some(colors), key: "", hist: 0, tint: false, translate: false, gray: None });
+    }
+    let k = colors.indices().next()?;
+    let keys = crate::adjust_params::channel_keys(crate::adjust_params::default_space(mode));
+    Some(IsolatedCurveChannel {
+        name: names.get(k)?.to_string(),
+        components: None,
+        key: keys.get(k)?,
+        hist: if mode == ColorMode::Lab { k } else { k.saturating_add(1) },
+        tint: true,
+        translate: true,
+        gray: None,
+    })
+}
+
+/// The active layer mask's tone descriptor, independent of the selected colour rows.
+pub fn layer_mask_curve_channel(st: &DocState) -> Option<IsolatedCurveChannel> {
     let layer = st.active_layer.and_then(|id| st.doc.layer(id))?;
     layer.mask.as_ref()?;
     let name = format!("{} Mask", layer.name);
-    Some(IsolatedCurveChannel { name, key: "", hist: 0, tint: false, translate: false, gray: Some(GraySurface::LayerMask) })
+    Some(IsolatedCurveChannel { name, components: None, key: "", hist: 0, tint: false, translate: false, gray: Some(GraySurface::LayerMask) })
 }
 
 fn edit_mode(doc: &Document) -> ColorMode {
@@ -639,7 +679,8 @@ pub(crate) fn target_surface<'a>(doc: &'a mut Document, layer: Option<LayerId>, 
     }
 }
 
-pub(crate) fn read_target_surface<'a>(doc: &'a Document, layer: Option<LayerId>, p: &Value) -> Result<&'a Surface> {
+/// Read the explicitly targeted layer pixels, layer mask, saved channel or Quick Mask.
+pub fn read_target_surface<'a>(doc: &'a Document, layer: Option<LayerId>, p: &Value) -> Result<&'a Surface> {
     match target_of(p) {
         Target::Alpha(i) => {
             let n = doc.channels.len();
@@ -679,7 +720,7 @@ fn edits_mask(id: &str) -> bool {
         || crate::filters::params_for(id, &Value::Null).is_some()
         || id == "edit.fill"
         // Copying a targeted mask (#2928).
-        || id == "edit.copy"
+        || matches!(id, "edit.copy" | "edit.cut" | "edit.clear")
         || crate::fill_key_cmds::IDS.contains(&id)
 }
 
@@ -702,8 +743,14 @@ pub fn follows_target(id: &str) -> bool {
 
 /// Commands whose target follows the Channels panel.
 pub(crate) fn routed(id: &str) -> bool {
+    if matches!(id, "paint.setSymmetry" | "paint.symmetryFromPath" | "paint.symmetryDisable") {
+        return false;
+    }
     id.starts_with("filter.")
+        || id.starts_with("paint.")
+        || id == "edit.stroke"
         || id == "plugin.run"
+        || matches!(id, "paint.magicEraser" | "paint.backgroundEraser" | "paint.colorReplacement" | "shape.paint" | "path.fill" | "path.stroke" | "edit.clear" | "edit.cut")
         || id.starts_with("image.adjustments.")
         || matches!(id, "paint.stroke" | "paint.pencil" | "paint.bucket" | "paint.gradient" | "paint.mixerBrush" | "edit.fill" | "image.applyImage")
         || crate::fill_key_cmds::IDS.contains(&id)
@@ -746,6 +793,11 @@ pub(crate) fn inject_target(s: &Session, id: &str, params: Value) -> Value {
         ChannelTarget::Alpha(i) if i < st.doc.channels.len() => json!({ "channel": i }),
         ChannelTarget::Composite if st.doc.quick_mask.is_some() => json!("quickMask"),
         ChannelTarget::LayerMask => json!("mask"),
+        ChannelTarget::Color(_) if crate::mask_view_cmds::current(st).is_some() => json!("mask"),
+        ChannelTarget::Color(_) => match crate::color_channels::selected(s).filter(|c| c.len() > 1) {
+            Some(c) => c.params(),
+            None => return params,
+        },
         // Viewing the active layer's mask (⌥-click): pixel commands edit the mask.
         ChannelTarget::Composite if crate::mask_view_cmds::current(st).is_some() => json!("mask"),
         _ => return params,
@@ -760,49 +812,29 @@ pub(crate) fn inject_target(s: &Session, id: &str, params: Value) -> Value {
 }
 
 /// The colour channel pixel commands are limited to, if a single colour channel is targeted.
-pub(crate) fn color_restriction(s: &Session, id: &str, params: &Value) -> Option<usize> {
+pub(crate) fn color_restriction(s: &Session, id: &str, params: &Value) -> Option<crate::color_channels::Restriction> {
     if !routed(id) || is_channel_target(params) || crate::commands::is_mask_target(params) {
         return None;
     }
-    match s.active()?.channel_view.target {
-        ChannelTarget::Color(k) => Some(k),
-        _ => None,
+    // Native plane implementations already write only the selected encoded samples. Avoid a
+    // second full-layer restore pass after these commands (painting still needs the guard).
+    if id.strip_prefix("image.adjustments.").is_some_and(|kind| crate::adjust_params::default_for(kind, ColorMode::Rgb).is_ok())
+        || crate::filters::params_for(id, params).is_some()
+    {
+        return None;
     }
+    let colors = crate::color_channels::target(s, params).ok().flatten()?;
+    let layer = crate::commands::layer_param(s, params).ok()?;
+    Some(crate::color_channels::Restriction { colors, layer })
 }
 
 /// After a pixel edit with colour channel `k` targeted, put the other channels (and the layer's
 /// transparency) of layer `id` back as they were. Only changed tiles are touched.
-pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: LayerId, k: usize) {
-    let Some(old) = before.layer(id).and_then(Layer::surface) else { return };
-    let Some(new) = after.layer_mut(id).and_then(Layer::surface_mut) else { return };
-    if old.format() != new.format() {
-        return;
-    }
-    let mut coords: Vec<TileCoord> = new.tiles().filter(|(c, t)| old.tile(**c).is_none_or(|o| !std::sync::Arc::ptr_eq(o, t))).map(|(c, _)| *c).collect();
-    coords.extend(old.tiles().filter(|(c, _)| new.tile(**c).is_none()).map(|(c, _)| *c));
-    let n = new.channels();
-    for c in coords {
-        let r = c.rect();
-        let o = old.read_region(r);
-        let mut v = new.read_region(r);
-        for (pn, po) in v.chunks_exact_mut(n).zip(o.chunks_exact(n)) {
-            for ch in 0..n {
-                if ch != k {
-                    pn[ch] = po[ch];
-                }
-            }
-        }
-        new.write_region(r, &v);
-    }
-    new.prune();
-}
-
-/// The colour channel Clear is limited to: the Channels panel targets a single one.
-pub(crate) fn targeted_color(s: &Session) -> Option<usize> {
-    match s.active()?.channel_view.target {
-        ChannelTarget::Color(k) => Some(k),
-        _ => None,
-    }
+pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: LayerId, colors: crate::color_channels::ColorChannels) -> Result<()> {
+    let Some(old) = before.layer(id).and_then(Layer::surface) else { return Ok(()) };
+    let Some(new) = after.layer_mut(id).and_then(Layer::surface_mut) else { return Ok(()) };
+    let extent = before.bounds().union(&old.content_bounds()).union(&new.content_bounds());
+    crate::color_channels::restrict_surface_in(old, new, colors, extent)
 }
 
 /// Clear (Delete) with colour channel `k` of layer `id` targeted (#2720): fill the selected area
@@ -1319,14 +1351,17 @@ fn target(s: &mut Session, t: ChannelTarget) {
         let n = st.doc.channels.len();
         let v = &mut st.channel_view;
         v.target = t;
+        v.selected_colors.clear();
         match t {
             // Like clicking RGB in Photoshop: the alpha overlays go away with their eyes.
             ChannelTarget::Composite => {
+                v.layer_mask = None;
                 v.color_hidden.clear();
                 v.alpha_visible.clear();
             }
             ChannelTarget::LayerMask | ChannelTarget::VectorMask => v.color_hidden.clear(),
             ChannelTarget::Color(k) => {
+                v.layer_mask = None;
                 v.color_hidden = (0..colors).map(|c| c != k).collect();
                 v.alpha_visible.clear();
             }
@@ -1365,8 +1400,46 @@ fn parse_target(s: &Session, p: &Value, cmd: &str) -> Result<ChannelTarget> {
 }
 
 fn target_cmd(s: &mut Session, p: &Value) -> Result<Value> {
-    let t = parse_target(s, p, "channel.target")?;
-    target(s, t);
+    let count = s.active().map_or(0, |st| color_count(&st.doc));
+    let colors = p.get("colors").or_else(|| p.get("channel").and_then(|c| c.get("colors")));
+    let extend = match p.get("extend") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("channel.target", "extend must be a boolean"))?,
+    };
+    let selected = if let Some(indices) = colors {
+        crate::color_channels::explicit(&json!({"target":{"colors":indices}}), count)?
+    } else {
+        let t = parse_target(s, p, "channel.target")?;
+        if extend {
+            let ChannelTarget::Color(k) = t else { return Err(bad("channel.target", "only colour channels can be selected together")) };
+            let mut indices: Vec<_> = crate::color_channels::selected(s).map(|c| c.indices().collect()).unwrap_or_else(|| {
+                if s.active().is_some_and(|st| st.channel_view.target == ChannelTarget::Composite) { (0..count).collect() } else { Vec::new() }
+            });
+            if indices.contains(&k) {
+                if indices.len() > 1 {
+                    indices.retain(|i| *i != k);
+                }
+            } else {
+                indices.push(k);
+            }
+            Some(crate::color_channels::ColorChannels::from_indices(indices, count)?)
+        } else {
+            target(s, t);
+            return Ok(list(s));
+        }
+    };
+    if let Some(colors) = selected {
+        if colors.len() == count {
+            target(s, ChannelTarget::Composite);
+        } else if let Some(first) = colors.indices().next() {
+            target(s, ChannelTarget::Color(first));
+            if let Some(st) = s.active_mut() {
+                st.channel_view.selected_colors = colors.indices().collect();
+                st.channel_view.color_hidden = (0..count).map(|i| !colors.contains(i)).collect();
+                touch(st);
+            }
+        }
+    }
     Ok(list(s))
 }
 
@@ -1817,6 +1890,7 @@ pub fn channels_json(st: &DocState) -> Value {
         })).collect::<Vec<_>>(),
         "quickMask": doc.quick_mask.as_ref().map(|q| json!({ "visible": !v.quick_mask_hidden, "color": q.color.to_rgb(), "opacity": q.opacity, "indicates": q.indicates })),
         "target": v.target,
+        "selectedColors": v.color_selection(colors).map(|c| c.indices().collect::<Vec<_>>()),
         "compositeVisible": v.visible_colors(colors) == colors,
         "layerMaskView": crate::mask_view_cmds::view_json(st),
     })
@@ -1909,7 +1983,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Target Channel",
             [],
             None,
-            r##"{"channel":"composite"|"mask"|"vectorMask"|"red|green|blue|…"|index|name="composite"}"##,
+            r##"{"channel":"composite"|"mask"|"vectorMask"|"red|green|blue|…"|index|name="composite","colors":[index,…]?,"extend":bool=false} (colors selects native colour components only; extend toggles one colour channel, as Shift-click; all components select the composite)"##,
             has_doc,
             target_cmd
         ),

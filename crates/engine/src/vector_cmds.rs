@@ -110,10 +110,7 @@ fn paste_shape_stroke(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(crate) fn layer_id(s: &Session, p: &Value) -> Result<LayerId> {
-    match p.get("layer").and_then(Value::as_u64) {
-        Some(id) => Ok(LayerId(id)),
-        None => s.active().and_then(|d| d.active_layer).ok_or(EngineError::Other("no active layer".into())),
-    }
+    crate::commands::layer_param(s, p)
 }
 
 fn f64p(p: &Value, k: &str) -> Option<f64> {
@@ -1378,6 +1375,7 @@ fn path_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let lines = vector::flatten_path(&path, 0.1);
     let id = layer_id(s, p)?;
     let bg = s.tools.background;
+    let channels = crate::color_channels::target(s, p)?.is_some();
     let dmg = s.edit("Stroke Path", |doc, _| {
         let sel = doc.selection.clone();
         let locks = doc.effective_locks(id);
@@ -1389,7 +1387,7 @@ fn path_stroke(s: &mut Session, p: &Value) -> Result<Value> {
         let lock = locks.transparency;
         let surf = l.surface_mut().ok_or_else(|| EngineError::Other("Stroke Path needs a pixel layer".into()))?;
         let mut brush = brush.clone();
-        if brush.erase && lock {
+        if brush.erase && (lock || channels) {
             // Locked transparency (e.g. the Background): the Eraser paints the background colour (#76).
             brush.erase = false;
             brush.color = bg;

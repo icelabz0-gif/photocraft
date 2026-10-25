@@ -193,6 +193,9 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     if let Some((params, path)) = crate::vector_ui::free_transform_path(app) {
         return begin_path(app, ctx, params, path);
     }
+    if crate::canvas::multiple_color_target(app) {
+        return Err("Move and transforms on several colour channels are not implemented yet".into());
+    }
     if app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some()) {
         app.run("select.drop", json!({}))?;
     }
@@ -1286,6 +1289,12 @@ pub(crate) const SAVE_FOR_WEB: &str = "file.export.saveForWebLegacy";
 /// While transforming, Undo and Redo apply to the box: `Some(enabled)` for those commands (and
 /// Toggle Last State, which would change the document under the box), `None` for the rest.
 pub fn is_enabled(app: &PhotocraftApp, id: &str) -> Option<bool> {
+    if (matches!(id, "edit.freeTransform" | "edit.freeTransformCopy") || id.starts_with("edit.transform."))
+        && crate::vector_ui::free_transform_path(app).is_none()
+        && crate::canvas::multiple_color_target(app)
+    {
+        return Some(false);
+    }
     let t = app.ui.transform.as_ref()?;
     if committing(app).is_some() {
         return box_command(id).then_some(false);
@@ -6145,6 +6154,38 @@ mod tests {
         begin(&mut app, &ctx).unwrap();
         enter_warp(&mut app, &egui::Context::default());
         assert!(app.ui.transform.as_ref().unwrap().warp.is_none());
+    }
+
+    #[test]
+    fn mask_view_keeps_move_and_transform_available_behind_a_colour_set() {
+        for view in ["gray", "overlay"] {
+            let mut app = masked_app(false);
+            app.run("channel.target", json!({"colors":[0,2]})).unwrap();
+            app.run("view.layerMask", json!({"mode":view})).unwrap();
+            assert!(crate::menus::is_enabled(&app, "edit.freeTransform"));
+            let st = app.session.active().unwrap();
+            let layer = st.active_layer.unwrap();
+            let original = st.doc.layer(layer).unwrap().surface().unwrap().clone();
+            begin(&mut app, &egui::Context::default()).unwrap();
+            let transform = app.ui.transform.as_mut().unwrap();
+            assert_eq!(transform.target, Some(json!("mask")));
+            transform.quad = transform.quad.map(|[x, y]| [x + 20.0, y]);
+            commit(&mut app);
+            assert!(!app.ui.status_error, "{}", app.ui.status);
+            app.ui.tool = crate::state::Tool::Move;
+            app.ui.tool_options.move_auto_select = false;
+            app.ui.extras.snap = false;
+            app.ui.view.show.smart_guides = false;
+            let mods = egui::Modifiers::NONE;
+            crate::canvas::tool_event(&mut app, crate::canvas::ToolEvent::Down { x: 28.0, y: 30.0, pressure: 1.0 }, mods);
+            crate::canvas::tool_event(&mut app, crate::canvas::ToolEvent::Move { x: 38.0, y: 30.0, pressure: 1.0 }, mods);
+            crate::canvas::tool_event(&mut app, crate::canvas::ToolEvent::Up { x: 38.0, y: 30.0 }, mods);
+            assert!(!app.ui.status_error, "{}", app.ui.status);
+            let actual = app.session.active().unwrap().doc.layer(layer).unwrap();
+            assert_eq!(actual.surface().unwrap(), &original);
+            let mask = &actual.mask.as_ref().unwrap().surface;
+            assert!(mask.sample_channel(24, 30, 0) > 0.99 && mask.sample_channel(40, 30, 0) < 0.01, "only the mask moved");
+        }
     }
 
     #[test]

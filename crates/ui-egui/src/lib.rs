@@ -2620,6 +2620,11 @@ impl PhotocraftApp {
         let layer_mask = st.channel_view.target == photocraft_engine::channel_cmds::ChannelTarget::LayerMask;
         let composite = (st.channel_view.target == photocraft_engine::channel_cmds::ChannelTarget::Composite || layer_mask) && st.doc.quick_mask.is_none();
         let has_mask = st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.mask.is_some());
+        if matches!(st.channel_view.target, photocraft_engine::channel_cmds::ChannelTarget::Color(_))
+            && photocraft_engine::mask_view_cmds::current(st).is_some()
+        {
+            return true;
+        }
         if !composite || !has_mask {
             return false;
         }
@@ -3207,7 +3212,8 @@ impl PhotocraftApp {
         let r = photocraft_geom::Rect::new(0, 0, w as i32, h as i32);
         let mut surface = photocraft_raster::Surface::from_interleaved(photocraft_color::PixelFormat::RGBA8, r, &bytes);
         surface.prune();
-        self.session.clipboard = Some(photocraft_engine::edit_cmds::Clip { surface, bounds: r, layers: None, resolution: None, source: None });
+        self.session.clipboard =
+            Some(photocraft_engine::edit_cmds::Clip { components: None, surface, bounds: r, layers: None, resolution: None, source: None });
         self.os_clip_sig = Some(sig);
         self.clip_external = true;
         self.clip_unmirrored = false;

@@ -26,6 +26,7 @@ mod canvas_geom;
 mod channel_clip;
 pub mod channel_cmds;
 mod clip_group;
+pub mod color_channels;
 pub mod color_cmds;
 pub mod color_to_alpha_cmds;
 pub mod commands;
@@ -492,7 +493,7 @@ pub struct Session {
     /// Quick Mask Options (colour, opacity, colour indicates) used when entering Quick Mask.
     pub quick_mask_options: channel_cmds::QuickMaskOptions,
     /// Colour channel the running command may change (a single colour channel is targeted).
-    color_restrict: Option<usize>,
+    color_restrict: Option<color_channels::Restriction>,
     /// Edit › Preferences, keyboard shortcuts, menu and toolbar customisation (see `prefs`).
     pub prefs: prefs::PrefsStore,
     /// Release checks use an injected platform transport; no network I/O in the engine.
@@ -765,6 +766,9 @@ impl Session {
     /// may run.
     pub(crate) fn admit(&mut self, id: &str, spec: &commands::CommandSpec, params: &Value) -> Result<Value> {
         let run_params = channel_cmds::inject_target(self, id, commands::inject_kind(id, params.clone()));
+        if let Some(why) = color_channels::refusal(self, id, &run_params) {
+            return Err(EngineError::Disabled(id.into(), why));
+        }
         if let Err(why) = self.explicit_layer_enabled(spec, params).unwrap_or_else(|| self.precondition(spec, &run_params)) {
             return Err(EngineError::Disabled(id.to_string(), why));
         }
@@ -803,6 +807,9 @@ impl Session {
 
     /// The command's own precondition for a call with `params` (their target filled in).
     fn precondition(&self, spec: &commands::CommandSpec, params: &Value) -> std::result::Result<(), String> {
+        if let Some(why) = color_channels::refusal(self, spec.id, params) {
+            return Err(why);
+        }
         if self.names_existing_layer(spec.id, params) {
             return Ok(());
         }
@@ -857,8 +864,8 @@ impl Session {
         let mut doc = (*before).clone();
         let mut active = st.active_layer;
         let r = f(&mut doc, &mut active)?;
-        if let (Some(k), Some(id)) = (restrict, active) {
-            channel_cmds::restrict_to_color(&before, &mut doc, id, k);
+        if let Some(restrict) = restrict {
+            channel_cmds::restrict_to_color(&before, &mut doc, restrict.layer, restrict.colors)?;
         }
         st.doc = Arc::new(doc);
         st.active_layer = active;
