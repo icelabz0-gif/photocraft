@@ -314,6 +314,17 @@ impl GpuCanvas {
         }
     }
 
+    /// Whether the budget given to [`GpuCanvas::set_memory_budget`] is GPU Memory set by hand
+    /// (Preferences › Performance) rather than Automatic. Set by hand, it keeps today's behaviour
+    /// where the GPU shares system memory too: uploads stage in the usual batches, and a lowered
+    /// budget frees pages only when a render needs the room (see [`apply_budget`]).
+    pub fn set_gpu_memory_by_hand(&self, by_hand: bool) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            res.gpu_memory_by_hand = by_hand;
+        }
+    }
+
     /// The compositor's memory budget (`None` until [`GpuCanvas::set_memory_budget`]).
     pub fn memory_budget(&self) -> Option<u64> {
         let r = self.rs.renderer.read();
@@ -376,7 +387,7 @@ impl GpuCanvas {
         let mut r = self.rs.renderer.write();
         let res = r.callback_resources.get_mut::<Resources>()?;
         let budget = res.compositor_budget;
-        let shared = res.shared_memory;
+        let shared = res.shared_memory && !res.gpu_memory_by_hand;
         let comp = res.compositor.as_mut()?;
         if let Some(b) = budget {
             apply_budget(comp, b, shared);
@@ -544,7 +555,7 @@ impl GpuCanvas {
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
         if let Some(b) = res.compositor_budget {
-            apply_budget(&mut comp, b, res.shared_memory);
+            apply_budget(&mut comp, b, res.shared_memory && !res.gpu_memory_by_hand);
         }
         if let Some(b) = res.compositor_cache_budget {
             comp.set_composite_cache_budget(b);
@@ -1552,20 +1563,19 @@ pub fn compositor_budget(
     shared_memory_budget(budget, pixels, gpu_bytes(), ram)
 }
 
-/// Give `comp` the memory budget `bytes`. Where the GPU shares system memory (`shared`) its
-/// uploads also stage in batches of at most [`SHARED_STAGING_LIMIT`], and a lowered budget frees
-/// at once the pages and effect maps it no longer covers: the refresh it lowers may go to the CPU
-/// compositor, which renders nothing on the GPU that would evict them (switching from a small
-/// document to a large one). A graphics card's own memory keeps its pages until a render needs
-/// the room.
+/// Give `comp` the memory budget `bytes`. Where the GPU shares system memory and GPU Memory is
+/// Automatic (`shared`) its uploads also stage in batches of at most [`SHARED_STAGING_LIMIT`], and
+/// a lowered budget frees at once the pages and effect maps it no longer covers: the refresh it
+/// lowers may go to the CPU compositor, which renders nothing on the GPU that would evict them
+/// (switching from a small document to a large one). A graphics card's own memory, and GPU Memory
+/// set by hand, keep today's behaviour: the usual batches, and pages kept until a render needs the
+/// room. The staging limit is set either way, so it never outlives the reason for it.
 fn apply_budget(comp: &mut photocraft_gpu::Compositor, bytes: u64, shared: bool) {
     let before = comp.memory_budget();
     comp.set_memory_budget(bytes);
-    if shared {
-        comp.set_staging_limit(Some(SHARED_STAGING_LIMIT));
-        if bytes < before {
-            comp.trim();
-        }
+    comp.set_staging_limit(shared.then_some(SHARED_STAGING_LIMIT));
+    if shared && bytes < before {
+        comp.trim();
     }
 }
 
@@ -1743,6 +1753,8 @@ struct Resources {
     health: photocraft_gpu::DeviceHealth,
     /// The adapter shares system memory ([`shares_system_memory`]): see [`apply_budget`].
     shared_memory: bool,
+    /// The budget is GPU Memory set by hand ([`GpuCanvas::set_gpu_memory_by_hand`]).
+    gpu_memory_by_hand: bool,
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
     /// view shows; applied before every composite.
     compositor_budget: Option<u64>,
@@ -2075,6 +2087,7 @@ impl Resources {
             compositor_failed: None,
             health: photocraft_gpu::DeviceHealth::new(),
             shared_memory: false,
+            gpu_memory_by_hand: false,
             compositor_budget: None,
             layer_fit: None,
             compositor_cache_budget: None,

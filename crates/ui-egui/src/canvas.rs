@@ -2146,6 +2146,7 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     let Some(st) = app.session.documents().get(idx) else { return };
     let pixels = st.memory_bytes() as u64;
     let budget = gpu.budget_for(&st.doc, allowance.0, pixels, allowance.1);
+    gpu.set_gpu_memory_by_hand(allowance.1 > 0);
     gpu.set_memory_budget(budget);
     app.perf.gpu_budget_mb = budget >> 20;
     app.perf.gpu_budget_allowance = allowance;

@@ -112,6 +112,36 @@ fn a_lowered_budget_frees_pages_at_once_only_where_the_gpu_shares_memory() {
     g.release();
 }
 
+/// GPU Memory set by hand keeps today's behaviour where memory is shared too: a lowered budget
+/// leaves the pages resident until a render needs the room, as on a card with its own memory.
+#[test]
+fn gpu_memory_set_by_hand_keeps_todays_behaviour_on_shared_memory() {
+    let _gpu = gpu_lock();
+    let Some(rs) = render_state() else { return };
+    let g = GpuCanvas::new(&rs);
+    let small = noise_doc(600, 400, 4);
+    let large = noise_doc(900, 700, 6);
+    let (roomy, tight) = (1u64 << 30, 1u64 << 20);
+    let priced = g.layer_working_set(&small);
+    g.set_shares_system_memory(true);
+    g.set_gpu_memory_by_hand(true);
+    g.set_memory_budget(roomy);
+    assert_eq!(g.refresh(small.id.0, &small, None, None).kind, "gpu-full");
+    assert_eq!(resident(&g), priced);
+    g.set_memory_budget(tight);
+    let r = g.refresh(large.id.0, &large, None, None);
+    assert_eq!((r.kind, r.fallback.as_deref()), ("full", Some(gpu_canvas::OVER_BUDGET)));
+    assert_eq!(resident(&g), priced, "GPU Memory set by hand keeps its pages until a render needs the room");
+    // Automatic again: the next lowered budget frees them at once.
+    g.set_gpu_memory_by_hand(false);
+    g.set_memory_budget(roomy);
+    assert_eq!(g.refresh(small.id.0, &small, None, None).kind, "gpu-full");
+    g.set_memory_budget(tight);
+    assert_eq!(g.refresh(large.id.0, &large, None, None).kind, "full");
+    assert!(resident(&g) <= tight, "{} bytes of pages left over a {tight}-byte budget", resident(&g));
+    g.release();
+}
+
 /// The app's budget (`budget_for`) is today's on a card with its own memory, and where memory is
 /// shared, a small document keeps it too; only one too large to copy gets the edit budget
 /// (`compositor_budget` covers the thresholds).
