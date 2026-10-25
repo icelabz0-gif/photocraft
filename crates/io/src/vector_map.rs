@@ -489,7 +489,7 @@ pub fn vogk_bytes(s: &LiveShape, dpi: f32) -> Option<Vec<u8>> {
                 .with("keyOriginLineArrowEnd", Value::Boolean(*end))
                 .with("keyOriginLineArrWdth", Value::Double(*width))
                 .with("keyOriginLineArrLngth", Value::Double(*length))
-                .with("keyOriginLineArrConc", Value::Double(*concavity))
+                .with("keyOriginLineArrConc", Value::Integer(concavity.round() as i32))
         }
         LiveShape::Polygon { .. } => return None,
     };
