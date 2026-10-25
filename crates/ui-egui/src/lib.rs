@@ -2374,7 +2374,10 @@ impl eframe::App for PhotocraftApp {
         if let Some(menu) = self.services.native_menu.as_mut() {
             menu.raw_input(raw_input);
         }
-        shortcuts::clipboard_keys(ctx, ctx.text_edit_focused() || self.ui.text_edit.is_some(), raw_input);
+        // While a text field of a floating panel's own window has the keyboard, the dock area
+        // hands it the text keys in this input, and that window pastes.
+        let typing = craft_ui::docking::typing_window(ctx).is_none() && (ctx.text_edit_focused() || self.ui.text_edit.is_some());
+        shortcuts::clipboard_keys(ctx, typing, raw_input);
         // Windows precision touchpads and some Linux Wayland compositors send pinches
         // as fractional Ctrl + wheel rather than a native Zoom event (#4566).
         // Leave Ctrl+whole-notch mouse scrolling alone, and honour the pinch preference.
@@ -2465,15 +2468,18 @@ impl eframe::App for PhotocraftApp {
         if (chrome && self.ui.panels.toolbar) || tabbed_in {
             panels::toolbar(self, ui);
         }
-        if (chrome && self.ui.panels.dock) || tabbed_in {
-            panels::right_dock(self, ui);
+        // craft-ui's layout holds the canvas as its protected `canvas` panel.
+        let docking = (chrome && self.ui.panels.dock) || tabbed_in;
+        if docking {
+            panels::dock_area(self, ui);
+        } else {
+            let t = theme::Tokens::get(&ctx);
+            let backdrop = if chrome { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(backdrop)).show(ui, |ui| {
+                canvas::document_area(self, ui);
+            });
+            panels::properties_window(self, &ctx);
         }
-        let t = theme::Tokens::get(&ctx);
-        let backdrop = if chrome { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(backdrop)).show(ui, |ui| {
-            canvas::document_area(self, ui);
-        });
-        panels::properties_window(self, &ctx);
         brush_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         gradient_ui::editor_window(self, &ctx);
