@@ -88,6 +88,22 @@ impl AuthorizedWorkspace {
         let relative = request_path(path, self.write.as_ref())?;
         let root = self.write.as_ref().ok_or_else(|| AutomationError::BadRequest(format!("{DENIED}: write authority is absent")))?;
         let leaf = relative.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // The bytes are an image or document whatever the name says (`format` picks them), so
+        // only a file of a kind PhotoCraft writes is replaced: never source, settings or notes
+        // that share the root (`src/main.rs`, `.env`; #9439). A new file may have any name, and
+        // an image saved under one (`out` with `format: png`) can be saved over again.
+        let exists = root.dir.symlink_metadata(&relative).is_ok();
+        // Only a regular file is ever opened below (its head here, its attributes on Unix): a
+        // FIFO would block that open until a writer appears, and with it every other request.
+        // Links are followed for this check; a dangling one falls through to the name rule.
+        if exists && root.dir.metadata(&relative).is_ok_and(|m| !m.is_file()) {
+            return Err(AutomationError::BadRequest(format!("automation write refused: `{path}` already exists and is not a regular file")));
+        }
+        if exists && !written_kind(&leaf) && !holds_image(&root.dir, &relative) {
+            return Err(AutomationError::BadRequest(format!(
+                "automation write refused: `{path}` already exists and is not an image or document file PhotoCraft writes; save to a new name"
+            )));
+        }
         let parent = relative.parent().map(Path::to_path_buf).unwrap_or_default();
         let tmp = parent.join(photocraft_format::atomic::temp_name(&leaf));
         let mut options = OpenOptions::new();
@@ -122,6 +138,23 @@ impl AuthorizedWorkspace {
         }
         Ok(())
     }
+}
+
+/// Whether `name`'s extension is one of the formats PhotoCraft saves or exports.
+fn written_kind(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else { return false };
+    let ext = ext.to_ascii_lowercase();
+    ["psd", "psb", "ora", "pdf", photocraft_format::EXTENSION].contains(&ext.as_str()) || photocraft_codecs::from_extension(&ext).is_some()
+}
+
+/// Whether the file at `relative` starts like an image PhotoCraft reads (PSD/PSB or a codec's
+/// magic). Containers that also hold other things (zip, PDF) are judged by name only.
+fn holds_image(dir: &Dir, relative: &Path) -> bool {
+    let mut head = [0u8; 64];
+    let Ok(mut file) = dir.open(relative) else { return false };
+    let Ok(n) = file.read(&mut head) else { return false };
+    let head = &head[..n];
+    head.starts_with(b"8BPS") || photocraft_codecs::detect(head).is_some()
 }
 
 fn read_to_observed_length(reader: &mut impl Read, observed_length: u64) -> Result<Vec<u8>, AutomationError> {
@@ -605,6 +638,46 @@ mod tests {
         std::fs::create_dir_all(inside.join("adir")).unwrap();
         assert!(workspace.write("adir", b"x").is_err());
         assert!(inside.join("adir").is_dir());
+        assert!(temp_files(&inside).is_empty());
+    }
+
+    /// A directory at the target is refused before anything is opened, even under an image name.
+    #[test]
+    fn write_refuses_a_directory_target_before_opening_it() {
+        let (inside, _, workspace) = roots("dir-target");
+        for name in ["adir", "adir.png"] {
+            std::fs::create_dir_all(inside.join(name)).unwrap();
+            let error = workspace.write(name, b"x").unwrap_err().to_string();
+            assert!(error.contains("is not a regular file"), "{name}: {error}");
+            assert!(inside.join(name).is_dir());
+        }
+        assert!(temp_files(&inside).is_empty());
+    }
+
+    /// A FIFO at the target is refused at once: opening it to sniff its head or copy its
+    /// attributes would block until a writer appears, stalling every other request.
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_fifo_target_without_blocking() {
+        let (inside, _, workspace) = roots("fifo-target");
+        for name in ["pipe", "out.png"] {
+            let made = std::process::Command::new("mkfifo").arg(inside.join(name)).status();
+            if !made.is_ok_and(|s| s.success()) {
+                return; // no mkfifo on this system: nothing to assert
+            }
+        }
+        std::os::unix::fs::symlink("pipe", inside.join("link")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for name in ["pipe", "out.png", "link"] {
+                let _ = tx.send((name, workspace.write(name, b"x").map_err(|e| e.to_string())));
+            }
+        });
+        for _ in 0..3 {
+            let (name, result) = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("write blocked on a FIFO");
+            let error = result.unwrap_err();
+            assert!(error.contains("is not a regular file"), "{name}: {error}");
+        }
         assert!(temp_files(&inside).is_empty());
     }
 
