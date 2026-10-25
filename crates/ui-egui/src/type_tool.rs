@@ -1756,6 +1756,8 @@ fn font_picker(ui: &mut egui::Ui, current: &mut String, width: f32, preview: pho
 
 /// Maximum height of the font menu.
 const FONT_MENU_HEIGHT: f32 = 460.0;
+/// Width of a font row; the menu is this plus its scroll bar, or the field's width when wider.
+const FONT_ROW_WIDTH: f32 = 330.0;
 
 /// [`font_picker`] over a given family list (tests pass their own).
 #[cfg(test)]
@@ -1867,8 +1869,15 @@ pub(crate) fn family_picker_in(
 
         // Wrap the font rows in a ScrollArea so only the list scrolls: the search field above
         // stays fixed at the top of the popup.
+        // egui sizes the menu to its rows every frame and rounds the list's rect to whole
+        // pixels: at a fractional display scale (1.2 on a 115 dpi desktop) that reached up to
+        // half a pixel past the menu's edge, the rows filled it, the menu grew to its rows, and
+        // the list widened by a pixel every frame (#9290). The rows take the width of the field
+        // or of a row, never the list's measured one.
+        let row_width = FONT_ROW_WIDTH.max(width - ui.spacing().scroll.allocated_width());
         let mut hovered: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.set_max_width(row_width);
             for (i, (f, label)) in rows.into_iter().enumerate() {
                 if i == n_recent && n_recent > 0 {
                     ui.separator();
@@ -1883,7 +1892,7 @@ pub(crate) fn family_picker_in(
                     button = button
                         .right_text(egui::Atom::custom(ui.id().with(("font-sample", f)), egui::vec2(crate::font_preview::slot_width(ui.ctx(), f, size), h)));
                 }
-                let response = ui.add_sized([330.0, row_h], button);
+                let response = ui.add_sized([row_width, row_h], button);
                 if stepped == Some(i) {
                     response.scroll_to_me(Some(egui::Align::Center));
                 }
