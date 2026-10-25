@@ -435,7 +435,8 @@ mod tests {
         h.run_steps(2);
         let menus = popups.0.borrow().0.clone();
         assert_eq!(menus.len(), 1, "one native menu, on the press: {menus:?}");
-        let labels: Vec<String> = menus[0].1.iter().filter_map(|n| if let crate::native_menu::Node::Item(it) = n { Some(it.label.clone()) } else { None }).collect();
+        let labels: Vec<String> =
+            menus[0].1.iter().filter_map(|n| if let crate::native_menu::Node::Item(it) = n { Some(it.label.clone()) } else { None }).collect();
         assert_eq!(labels, ["Undo", "Cut", "Copy", "Paste", "Delete", "Select All"]);
         assert!(item(&h, "Copy").is_none(), "no egui menu");
         assert!(h.state().ui.canvas_tool_menu.is_none(), "nor the canvas menu");

@@ -561,7 +561,9 @@ mod tests {
         nodes
             .iter()
             .map(|n| match n {
-                Node::Item(it) => format!("{}:{}{}{}", it.id, it.label, if it.enabled { "" } else { " (off)" }, if it.checked == Some(true) { " ✓" } else { "" }),
+                Node::Item(it) => {
+                    format!("{}:{}{}{}", it.id, it.label, if it.enabled { "" } else { " (off)" }, if it.checked == Some(true) { " ✓" } else { "" })
+                }
                 Node::Separator => "---".into(),
                 Node::Submenu { label, children, .. } => format!("[{label}: {}]", ids(children).join(", ")),
                 Node::Standard(s) => format!("<{s:?}>"),
@@ -574,7 +576,11 @@ mod tests {
         let mut out = Vec::new();
         let nodes = record(|m| menu(m, &mut out)).unwrap();
         assert!(out.is_empty(), "recording ran a click: {out:?}");
-        assert_eq!(ids(&nodes), ["0:Rename…", "---", "1:Merge Down (off)", "2:Snap ✓", "[Color: 3:Pick one (off), 4:Red, 5:Blue]"], "the trailing separator goes");
+        assert_eq!(
+            ids(&nodes),
+            ["0:Rename…", "---", "1:Merge Down (off)", "2:Snap ✓", "[Color: 3:Pick one (off), 4:Red, 5:Blue]"],
+            "the trailing separator goes"
+        );
     }
 
     #[test]
@@ -599,13 +605,15 @@ mod tests {
 
     #[test]
     fn egui_only_content_or_an_empty_menu_stays_an_egui_popup() {
-        assert!(record(|m| {
-            m.item("Reset");
-            m.egui_only(|ui| {
-                ui.label("a slider");
-            });
-        })
-        .is_none());
+        assert!(
+            record(|m| {
+                m.item("Reset");
+                m.egui_only(|ui| {
+                    ui.label("a slider");
+                });
+            })
+            .is_none()
+        );
         assert!(record(|m| m.separator()).is_none());
         assert!(record(|m| m.label("nothing to choose")).is_some(), "a greyed row still shows");
     }
@@ -785,7 +793,8 @@ mod tests {
             .drop_without_applying_deltas();
         };
         frame(egui::RawInput::default(), &mut out);
-        let left = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let left =
+            |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         let mut press = MenuPress::default();
         let on = egui::pos2(15.0, 15.0);
         let mut events = vec![egui::Event::PointerMoved(on), left(on, true)];

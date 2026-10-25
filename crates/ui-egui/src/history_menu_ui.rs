@@ -84,7 +84,9 @@ mod tests {
     }
 
     fn harness(app: PhotocraftApp) -> Harness<'static, PhotocraftApp> {
-        let mut h = Harness::builder().with_size(egui::vec2(260.0, 420.0)).build_ui_state(|ui, app: &mut PhotocraftApp| panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui)), app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(260.0, 420.0))
+            .build_ui_state(|ui, app: &mut PhotocraftApp| panel_menu(app, &ui.ctx().clone(), &mut crate::context_menu::MenuUi::egui(ui)), app);
         h.run_steps(2);
         h
     }

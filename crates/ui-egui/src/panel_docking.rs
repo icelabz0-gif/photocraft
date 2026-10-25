@@ -872,9 +872,10 @@ fn tab_menu_id() -> egui::Id {
 pub(crate) fn take_tab_right_click(app: &PhotocraftApp, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
     let Some(layout) = app.ui.docking.as_ref().filter(|_| crate::context_menu::native(ctx)) else { return };
     let tab_at = |pos: egui::Pos2| {
-        layout.panels().into_iter().find(|panel| {
-            ctx.read_response(tab_id(panel)).is_some_and(|r| r.rect.contains(pos) && ctx.layer_id_at(pos) == Some(r.layer_id))
-        })
+        layout
+            .panels()
+            .into_iter()
+            .find(|panel| ctx.read_response(tab_id(panel)).is_some_and(|r| r.rect.contains(pos) && ctx.layer_id_at(pos) == Some(r.layer_id)))
     };
     let mut taken = None;
     events.retain(|e| match e {

@@ -1024,8 +1024,12 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
                 let on = key > 0;
                 let command_label = if cfg!(target_os = "macos") { tl!("Command") } else { tl!("Ctrl") };
-                let mut toggled = m.toggle(&mut shift, crate::context_menu::Row::new(tl!("Shift")).enabled(on), |ui, v| ui.add_enabled(on, egui::Checkbox::new(v, tl!("Shift"))));
-                toggled |= m.toggle(&mut command, crate::context_menu::Row::new(command_label).enabled(on), |ui, v| ui.add_enabled(on, egui::Checkbox::new(v, command_label)));
+                let mut toggled = m.toggle(&mut shift, crate::context_menu::Row::new(tl!("Shift")).enabled(on), |ui, v| {
+                    ui.add_enabled(on, egui::Checkbox::new(v, tl!("Shift")))
+                });
+                toggled |= m.toggle(&mut command, crate::context_menu::Row::new(command_label).enabled(on), |ui, v| {
+                    ui.add_enabled(on, egui::Checkbox::new(v, command_label))
+                });
                 if toggled {
                     let _ = assign_shortcut(app, name, &photocraft_engine::atn_cmds::function_key_name(key, shift, command));
                 }
@@ -1195,7 +1199,8 @@ mod tests {
         use egui_kittest::{Harness, kittest::Queryable};
         let mut empty_app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         empty_app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
-        let mut empty = Harness::builder().with_size(vec2(240.0, 280.0)).build_ui_state(|ui, app| panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui)), empty_app);
+        let mut empty =
+            Harness::builder().with_size(vec2(240.0, 280.0)).build_ui_state(|ui, app| panel_menu(app, &mut crate::context_menu::MenuUi::egui(ui)), empty_app);
         empty.run_steps(2);
         assert!(empty.query_all_by_label("Load Actions…").count() > 0);
         assert!(empty.query_all_by_label("New Action…").count() > 0);

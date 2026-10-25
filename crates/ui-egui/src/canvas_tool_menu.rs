@@ -961,7 +961,8 @@ fn menu_rows(app: &PhotocraftApp, menu: &CanvasToolMenu, m: &mut crate::context_
             continue;
         };
         let (label, checked, enabled) = (tl!(label), mode_checked(app, menu, command), entry_enabled(app, menu, command));
-        if m.row_open(Row::new(label).enabled(enabled).checked(checked), |ui| ui.add_enabled(enabled, egui::Button::selectable(checked, label).min_size(size))) {
+        if m.row_open(Row::new(label).enabled(enabled).checked(checked), |ui| ui.add_enabled(enabled, egui::Button::selectable(checked, label).min_size(size)))
+        {
             *selected = Some(command.to_string());
         }
     }
