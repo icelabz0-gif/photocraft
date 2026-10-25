@@ -399,6 +399,13 @@ fn native_pixels(doc: &Document, layer: Option<LayerId>) -> Result<(Vec<f32>, us
             Ok((raw.chunks_exact(sf.channels()).flat_map(|p| from_rgba(&fmt, to_rgba(&sf, p))).collect(), n))
         }
         None => {
+            // A CMYK composite's channels are its inks: mixed on ink values where the stack
+            // allows, since a trip through RGB moves them by a few levels (#9236).
+            if fmt.mode == ColorMode::Cmyk
+                && let Some(buf) = photocraft_compose::cmyk::render_cmyk(doc, r)
+            {
+                return Ok((buf.px.iter().flat_map(|p| p.iter().copied().take(n)).collect(), n));
+            }
             let buf = photocraft_compose::render(doc, r);
             Ok((buf.px.iter().flat_map(|p| from_rgba(&fmt, *p)).collect(), n))
         }
@@ -1585,9 +1592,11 @@ fn split(s: &mut Session, p: &Value) -> Result<Value> {
     let mode = edit_mode(&doc);
     let names = color_names(mode);
     let short = |name: &str| name.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_default();
+    // CMYK planes hold ink; a split channel shows ink dark, as the Channels panel does (#9236).
+    let ink = mode == ColorMode::Cmyk;
     let mut docs: Vec<Document> = Vec::new();
     for (c, name) in names.iter().enumerate() {
-        let plane: Vec<f32> = px.chunks_exact(n).map(|p| p[c]).collect();
+        let plane: Vec<f32> = px.chunks_exact(n).map(|p| if ink { 1.0 - p[c] } else { p[c] }).collect();
         docs.push(gray_document(&format!("{}_{}", doc.name, short(name)), &doc, &plane));
     }
     for ch in &doc.channels {
@@ -1652,9 +1661,12 @@ fn merge(s: &mut Session, p: &Value) -> Result<Value> {
     let cc = mode.color_channels();
     let npx = planes[0].len();
     let mut data = Vec::with_capacity(npx * fmt.channels());
+    // The inverse of Split Channels: dark grey is ink in a CMYK document.
+    let ink = mode == ColorMode::Cmyk;
     for i in 0..npx {
         for pl in &planes[..cc] {
-            data.push(pl[i].clamp(0.0, 1.0));
+            let v = pl[i].clamp(0.0, 1.0);
+            data.push(if ink { 1.0 - v } else { v });
         }
         data.push(1.0);
     }
