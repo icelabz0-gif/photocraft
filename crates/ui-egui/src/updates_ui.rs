@@ -107,7 +107,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                             }
                         };
                         let last = || Ok(());
-                        if let Err(e) = craft_update::self_update::update(
+                        match craft_update::self_update::update(
                             &craft_update::suite::PHOTOCRAFT,
                             &install,
                             &release,
@@ -119,7 +119,12 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                             &last,
                             Some(photocraft_engine::build_info::VERSION),
                         ) {
-                            log::warn!("PhotoCraft self-update failed: {e}");
+                            Ok(()) => {
+                                std::process::exit(0);
+                            }
+                            Err(e) => {
+                                log::warn!("PhotoCraft self-update failed: {e}");
+                            }
                         }
                     });
                 } else {
@@ -172,7 +177,26 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 }
                 Status::Available { release } => {
                     ui.label(crate::i18n::fmt(crate::i18n::t("PhotoCraft {version} is available."), &[("version", &release.version)]));
-                    ui.label(tl!("Open the release page to choose an installer for your system."));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if crate::widgets::primary_button(ui, tl!("Update and Restart"), 180.0).clicked() {
+                            let update_rel = craft_update::Release {
+                                tag: format!("v{}", release.version),
+                                version: craft_update::parse_version(&release.version),
+                                name: format!("PhotoCraft {}", release.version),
+                                html_url: release.url.clone(),
+                                ..Default::default()
+                            };
+                            let mut prompt =
+                                craft_update::StartupPrompt::new(&craft_update::suite::PHOTOCRAFT, update_rel, photocraft_engine::build_info::VERSION);
+                            prompt.open = true;
+                            app.updates_rt.prompt = Some(prompt);
+                        }
+                        if ui.button(tl!("Release Notes")).clicked() {
+                            download = Some(release.url.clone());
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
                     if crate::widgets::primary_button(ui, tl!("Open Download Page"), 160.0).clicked() {
                         download = Some(release.url.clone());
                     }
@@ -325,10 +349,7 @@ mod tests {
             .unwrap()
             .as_ref()
             .unwrap()
-            .send(Ok(Some(Release {
-                version: "99.0.0".into(),
-                url: "https://github.com/storytold/photocraft/releases/tag/v99.0.0".into(),
-            })))
+            .send(Ok(Some(Release { version: "99.0.0".into(), url: "https://github.com/storytold/photocraft/releases/tag/v99.0.0".into() })))
             .unwrap();
         at(&mut app, &ctx, 1.0);
         assert!(app.updates_rt.prompt.is_some(), "startup prompt initialized on available release");
