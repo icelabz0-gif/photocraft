@@ -36,7 +36,7 @@ pub(crate) fn picker_supported(mode: photocraft_doc::ColorMode, eyedropper: phot
 /// The kind of an adjustment dialog with Set Black/Neutral Gray/White Point eyedroppers (Levels,
 /// Curves), if `fields` are one.
 fn picker_kind(fields: &Map<String, Value>) -> Option<&str> {
-    fields.get("__adjust").and_then(Value::as_str).filter(|k| matches!(*k, "levels" | "curves"))
+    fields.get("__adjust").and_then(Value::as_str).filter(|k| matches!(*k, "levels" | "curves" | "exposure"))
 }
 
 /// Whether the top modal has a supported Levels or Curves eyedropper armed.
@@ -325,7 +325,7 @@ fn curve_mode(app: &PhotocraftApp, kind: &str) -> photocraft_doc::ColorMode {
 pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String, Value>) {
     let kind = fields.get("__adjust").and_then(Value::as_str).unwrap_or_default().to_string();
     let mode = curve_mode(app, &kind);
-    if matches!(kind.as_str(), "levels" | "curves") {
+    if matches!(kind.as_str(), "levels" | "curves" | "exposure") {
         picker_controls(ui, fields, mode);
         ui.add_space(4.0);
     }
@@ -782,6 +782,35 @@ mod tests {
         assert_eq!(map[20].as_f64(), Some(20.0), "outside the stroke the map is untouched");
         crate::dialogs::confirm(h.state_mut(), id).unwrap();
         assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1);
+    }
+
+    /// #9266: Image › Adjustments › Exposure has the Set Black/Gray/White Point eyedroppers; on a
+    /// 200-gray image White Point gives Photoshop's +0.3505 stops, Gray Point −0.4796 on 64.
+    #[test]
+    fn exposure_dialog_eyedroppers_match_photoshop() {
+        use egui_kittest::kittest::Queryable;
+        let mut s = photocraft_engine::Session::new();
+        s.execute("file.new", json!({"width": 40, "height": 20})).unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 20})).unwrap();
+        s.execute("edit.fill", json!({"color": "#404040"})).unwrap();
+        s.execute("select.inverse", json!({})).unwrap();
+        s.execute("edit.fill", json!({"color": "#c8c8c8"})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        let app = PhotocraftApp::new(s, crate::Services::default());
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        let id = open(h.state_mut(), "image.adjustments.exposure").unwrap();
+        h.run_steps(4);
+        for (label, x, want) in [("Set White Point", 30.0, 0.35052), ("Set Neutral Gray Point", 5.0, -0.47956)] {
+            h.get_by_label(label).click();
+            h.run_steps(2);
+            assert!(picker_armed(h.state()), "{label} armed");
+            assert!(sample_at(h.state_mut(), x, 10.0));
+            h.run_steps(2);
+            let e = h.state().ui.dialogs[0].fields["exposure"].as_f64().unwrap();
+            assert!((e - want).abs() < 1e-3, "{label}: {e}");
+        }
+        crate::dialogs::confirm(h.state_mut(), id).unwrap();
     }
 
     #[test]
