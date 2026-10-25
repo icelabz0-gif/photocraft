@@ -1344,6 +1344,7 @@ dependencies = [
 [[package]]
 name = "craft-update"
 version = "0.1.0"
+source = "git+https://github.com/dylanmtaylor/craft-libs?branch=feat%2Fcraft-update#62299a5d84bdf92d98377d165ceccba44c0f9975"
 dependencies = [
  "chrono",
  "dirs",

@@ -178,5 +178,5 @@ opt-level = "z"
 opt-level = 3
 
 [patch."https://github.com/storytold/craft-libs"]
-craft-update = { path = "../craft-libs-update/crates/update" }
+craft-update = { git = "https://github.com/dylanmtaylor/craft-libs", branch = "feat/craft-update" }
 
