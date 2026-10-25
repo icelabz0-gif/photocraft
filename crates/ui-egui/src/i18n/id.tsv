@@ -434,6 +434,7 @@
 	Intersect Shape Areas	Irisan Area Bentuk
 	Exclude Overlapping Shapes	Kecualikan Bentuk yang Tumpang Tindih
 	Merge Shape Components	Gabungkan Komponen Bentuk
+	Path operations	Operasi path
 	Align	Rata
 	Top Edges	Tepi Atas
 	Vertical Centers	Tengah Vertikal
@@ -3435,3 +3436,7 @@ curves	Smooth	Haluskan
 	Grayscale Ramp	Gradasi Grayscale
 	Current Colors	Warna Saat Ini
 	Make Ramp Web Safe	Jadikan Gradasi Aman untuk Web
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Path dipertahankan sebagai Work Path
+	The path was discarded	Path dibuang

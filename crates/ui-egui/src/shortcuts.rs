@@ -568,8 +568,13 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
     }
     // Pen path in progress: ↩ and Esc both end it as an open path and keep it, as in Photoshop (#1769).
-    if app.ui.pen.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Escape)) {
+    // When the document refuses it, ↩ keeps the draft to commit again; Esc keeps it as the Work Path.
+    if app.ui.pen.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         crate::vector_ui::pen_commit(app, false);
+        return;
+    }
+    if app.ui.pen.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        crate::vector_ui::pen_end(app);
         return;
     }
     // A finished work path shown by the Pen or Path Selection: ⌫/Delete deletes it, as in
@@ -775,7 +780,9 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
     // 1–0 set opacity, ⇧1–0 flow or fill (`opacity_keys`).
     crate::opacity_keys::handle(app, ctx);
-    // ⇧+ / ⇧− step the blend mode (`blend_keys`).
+    // + / − pick a Path Operation with the Pen tools and Path Selection (`path_components`)…
+    crate::path_components::handle_keys(app, ctx);
+    // … and otherwise ⇧+ / ⇧− step the blend mode (`blend_keys`).
     crate::blend_keys::handle(app, ctx);
 }
 

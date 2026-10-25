@@ -452,6 +452,7 @@
 	Intersect Shape Areas	シェイプの重なりを抽出
 	Exclude Overlapping Shapes	シェイプの重なりを除外
 	Merge Shape Components	シェイプの構成要素を結合
+	Path operations	パスの操作
 	Align	整列
 	Top Edges	上端
 	Vertical Centers	垂直方向の中央
@@ -4099,3 +4100,7 @@ curves	Smooth	スムーズ
 	Grayscale Ramp	グレースケールランプ
 	Current Colors	現在のカラー
 	Make Ramp Web Safe	ランプを Web セーフにする
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	パスは作業用パスとして保持されました
+	The path was discarded	パスは破棄されました

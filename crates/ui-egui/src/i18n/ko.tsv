@@ -438,6 +438,7 @@
 	Intersect Shape Areas	모양 영역 교차
 	Exclude Overlapping Shapes	겹치는 모양 제외
 	Merge Shape Components	모양 구성 요소 병합
+	Path operations	패스 작업
 	Align	정렬
 	Top Edges	위쪽 가장자리
 	Vertical Centers	세로 중앙
@@ -3631,3 +3632,7 @@ curves	Smooth	매끄럽게
 	Grayscale Ramp	회색 음영 램프
 	Current Colors	현재 색상
 	Make Ramp Web Safe	램프를 웹 안전 색상으로 만들기
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	패스가 작업 패스로 유지되었습니다
+	The path was discarded	패스가 삭제되었습니다

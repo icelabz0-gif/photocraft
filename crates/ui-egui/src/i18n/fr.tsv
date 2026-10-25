@@ -441,6 +441,7 @@
 	Intersect Shape Areas	Intersection des zones de formes
 	Exclude Overlapping Shapes	Exclure les formes superposées
 	Merge Shape Components	Fusionner les composants de forme
+	Path operations	Opérations sur les tracés
 	Align	Aligner
 	Top Edges	Bords supérieurs
 	Vertical Centers	Centres verticaux
@@ -4462,3 +4463,7 @@ shape	Appearance	Apparence
 	Grayscale Ramp	Barre de niveaux de gris
 	Current Colors	Couleurs actuelles
 	Make Ramp Web Safe	Limiter la barre aux couleurs Web
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Le tracé a été conservé comme tracé de travail
+	The path was discarded	Le tracé a été supprimé

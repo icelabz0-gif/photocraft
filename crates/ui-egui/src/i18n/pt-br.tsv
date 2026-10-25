@@ -436,6 +436,7 @@
 	Intersect Shape Areas	Fazer interseção das áreas de formas
 	Exclude Overlapping Shapes	Excluir formas sobrepostas
 	Merge Shape Components	Mesclar componentes de formas
+	Path operations	Operações de demarcador
 	Align	Alinhar
 	Top Edges	Bordas superiores
 	Vertical Centers	Centros verticais
@@ -4350,3 +4351,7 @@ layerLabel	No Color	Sem cor
 	Grayscale Ramp	Rampa de tons de cinza
 	Current Colors	Cores atuais
 	Make Ramp Web Safe	Tornar rampa segura para a Web
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	O demarcador foi mantido como demarcador de trabalho
+	The path was discarded	O demarcador foi descartado

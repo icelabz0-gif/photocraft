@@ -357,6 +357,7 @@
 	Median	Medián
 	Merge Layers	Rétegek egyesítése
 	Merge Shape Components	Alakzatösszetevők egyesítése
+	Path operations	Útvonalműveletek
 	Merge Visible	Láthatók egyesítése
 	Modify	Módosítás
 	New Adjustment Layer	Új korrekciós réteg
@@ -4335,3 +4336,7 @@ cameraRaw	Yellow	Sárga
 	Grayscale Ramp	Szürkeárnyalatos sáv
 	Current Colors	Aktuális színek
 	Make Ramp Web Safe	Sáv korlátozása webes színekre
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Az útvonal munkaútvonalként megmaradt
+	The path was discarded	Az útvonal el lett vetve

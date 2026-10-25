@@ -1972,6 +1972,7 @@
 	Merge Group	Объединить группу
 	Merge Layers	Объединить слои
 	Merge Shape Components	Объединить компоненты фигуры
+	Path operations	Операции с контурами
 	Merge Visible	Свести видимые
 	Stamp Visible	Штамп видимых
 	Select Layer Above	Выбрать слой выше
@@ -4623,3 +4624,7 @@ shape	Appearance	Оформление
 	Grayscale Ramp	Шкала градаций серого
 	Current Colors	Текущие цвета
 	Make Ramp Web Safe	Сделать шкалу безопасной для web
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Контур сохранён как рабочий контур
+	The path was discarded	Контур удалён

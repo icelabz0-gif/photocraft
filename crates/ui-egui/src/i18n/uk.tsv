@@ -1947,6 +1947,7 @@
 	Merge Group	Об'єднати групу
 	Merge Layers	Об'єднати шари
 	Merge Shape Components	Об'єднати компоненти фігури
+	Path operations	Операції з контурами
 	Merge Visible	Об'єднати видимі
 	Stamp Visible	Створити об'єднану копію видимих
 	Select Layer Above	Вибрати шар вище
@@ -4130,3 +4131,7 @@ curves	Smooth	Згладити
 	Grayscale Ramp	Шкала градацій сірого
 	Current Colors	Поточні кольори
 	Make Ramp Web Safe	Зробити шкалу безпечною для вебу
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Контур збережено як робочий контур
+	The path was discarded	Контур видалено

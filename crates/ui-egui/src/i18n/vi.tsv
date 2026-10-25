@@ -334,6 +334,7 @@
 	Median	Trung vị
 	Merge Layers	Gộp lớp
 	Merge Shape Components	Gộp thành phần hình
+	Path operations	Thao tác đường dẫn
 	Merge Visible	Gộp các lớp hiển thị
 	Minimum	Cực tiểu
 	Mode	Chế độ
@@ -3913,3 +3914,7 @@ curves	Smooth	Làm mượt
 	Grayscale Ramp	Dải thang xám
 	Current Colors	Màu hiện tại
 	Make Ramp Web Safe	Giới hạn dải màu ở màu web
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Đường dẫn được giữ lại làm Đường dẫn làm việc
+	The path was discarded	Đường dẫn đã bị loại bỏ

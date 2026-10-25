@@ -1925,6 +1925,7 @@
 	Intersect Shape Areas	Τομή περιοχών σχημάτων
 	Exclude Overlapping Shapes	Εξαίρεση επικαλυπτόμενων σχημάτων
 	Merge Shape Components	Συγχώνευση συστατικών σχήματος
+	Path operations	Λειτουργίες διαδρομών
 	Top Edges	Επάνω ακμές
 	Vertical Centers	Κατακόρυφα κέντρα
 	Bottom Edges	Κάτω ακμές
@@ -4120,3 +4121,7 @@ curves	Smooth	Εξομάλυνση
 	Grayscale Ramp	Διαβάθμιση του γκρι
 	Current Colors	Τρέχοντα χρώματα
 	Make Ramp Web Safe	Μόνο χρώματα ιστού στη διαβάθμιση
+
+# Pen draft after a refused commit (#7648)
+	The path was kept as the Work Path	Η διαδρομή διατηρήθηκε ως διαδρομή εργασίας
+	The path was discarded	Η διαδρομή απορρίφθηκε
