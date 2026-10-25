@@ -1,7 +1,7 @@
 //! Capability-based filesystem policy for untrusted automation paths.
 
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Components, Path, PathBuf, Prefix};
 use std::sync::Arc;
 
 use cap_std::ambient_authority;
@@ -16,16 +16,18 @@ const DENIED: &str = "automation filesystem access is not granted";
 #[derive(Clone)]
 struct RootCapability {
     dir: Arc<Dir>,
-    /// The root as an absolute path (trusted launch configuration), to recognise absolute request
+    /// The canonical root path (trusted launch configuration), to recognise absolute request
     /// paths that name a file beneath it.
     path: PathBuf,
+    /// The trusted launch spelling also names the same held capability, even through a link.
+    configured_path: PathBuf,
 }
 
 /// Separate directory capabilities for automation reads and writes.
 ///
 /// Root paths are trusted launch-time configuration. Request paths are always
 /// untrusted, forward-slash relative paths resolved by `cap-std` beneath the
-/// held directory handle, or absolute paths whose text lies beneath the root
+/// held directory handle, or absolute paths beneath the canonical or configured root spelling
 /// (translated to relative ones, see [`request_path`]). Parent traversal,
 /// alternate separators, Windows prefixes and empty components are rejected
 /// before I/O.
@@ -157,35 +159,60 @@ fn open_root(path: Option<&Path>, authority: &str) -> Result<Option<RootCapabili
     if path.as_os_str().is_empty() {
         return Err(AutomationError::BadRequest(format!("automation {authority} root is empty")));
     }
-    let dir = Dir::open_ambient_dir(path, ambient_authority())
-        .map_err(|e| AutomationError::Io(format!("cannot open automation {authority} root `{}`: {e}", path.display())))?;
-    // Textual (no link resolution), like the request paths it is compared with.
+    // Windows absolute() removes parent components. Keep an absolute launch spelling intact:
+    // only that trusted prefix is exempt from request traversal checks, never its suffix.
+    let configured_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path).map_err(|e| AutomationError::Io(format!("cannot resolve automation {authority} root `{}`: {e}", path.display())))?
+    };
+    // Resolve trusted configuration once, before opening that exact directory as a capability.
     let absolute =
-        std::path::absolute(path).map_err(|e| AutomationError::Io(format!("cannot resolve automation {authority} root `{}`: {e}", path.display())))?;
-    Ok(Some(RootCapability { dir: Arc::new(dir), path: absolute }))
+        std::fs::canonicalize(path).map_err(|e| AutomationError::Io(format!("cannot resolve automation {authority} root `{}`: {e}", path.display())))?;
+    let dir = Dir::open_ambient_dir(&absolute, ambient_authority())
+        .map_err(|e| AutomationError::Io(format!("cannot open automation {authority} root `{}`: {e}", path.display())))?;
+    Ok(Some(RootCapability { dir: Arc::new(dir), path: absolute, configured_path }))
 }
 
-/// A request path as the relative path the root's capability resolves. An absolute path is
-/// accepted only when its text names a file beneath `root`: the root's components are
-/// stripped (the drive letter compared without case) and the rest must pass
-/// [`relative_path`], so `..`, prefixes and device names are refused as before. Nothing is
-/// resolved on the filesystem; the held directory handle still does all the opening, so
-/// links cannot escape the root.
+/// Both root spellings refer to the capability opened at startup. Do not resolve an untrusted
+/// absolute request using ambient filesystem access: strip a known root first and let cap-std
+/// resolve the remaining name. New targets and nested export directories need not exist yet.
 fn request_path(raw: &str, root: Option<&RootCapability>) -> Result<PathBuf, AutomationError> {
-    let Some(root) = root.filter(|_| Path::new(raw).is_absolute()) else { return relative_path(raw) };
-    let mut request = Path::new(raw).components();
-    for want in root.path.components() {
-        let same = match (request.next(), want) {
-            (Some(Component::Prefix(a)), Component::Prefix(b)) => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
-            (Some(got), want) => got == want,
-            (None, _) => false,
+    let path = Path::new(raw);
+    let Some(root) = root.filter(|_| path.is_absolute()) else { return relative_path(raw) };
+    // Prefer the trusted launch spelling: it can itself contain `..`. Only that
+    // exact granted prefix is exempt; traversal in the remaining request still fails below.
+    let request = path_beneath_root(path, &root.configured_path)
+        .or_else(|| path_beneath_root(path, &root.path))
+        .ok_or_else(|| path_error(raw, "absolute paths must be inside the automation root"))?;
+    let rest = request.map(|c| c.as_os_str().to_str().ok_or_else(|| path_error(raw, "path is not UTF-8"))).collect::<Result<Vec<_>, _>>()?;
+    relative_path(&rest.join("/"))
+}
+
+/// Strip a granted root prefix without resolving the client path with ambient authority.
+/// Windows ASCII case variants name the same grant; the unstripped suffix keeps its case.
+fn path_beneath_root<'a>(path: &'a Path, root: &Path) -> Option<Components<'a>> {
+    let mut request = path.components();
+    for want in root.components() {
+        let same = match (request.next()?, want) {
+            (Component::Prefix(a), Component::Prefix(b)) => match (a.kind(), b.kind()) {
+                // std::fs::canonicalize uses verbatim paths on Windows. Accept their ordinary
+                // drive/UNC spelling too, without treating a device prefix as a disk prefix.
+                (Prefix::Disk(a) | Prefix::VerbatimDisk(a), Prefix::Disk(b) | Prefix::VerbatimDisk(b)) => a.eq_ignore_ascii_case(&b),
+                (Prefix::UNC(a, b) | Prefix::VerbatimUNC(a, b), Prefix::UNC(c, d) | Prefix::VerbatimUNC(c, d)) => {
+                    a.eq_ignore_ascii_case(c) && b.eq_ignore_ascii_case(d)
+                }
+                _ => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+            },
+            #[cfg(windows)]
+            (Component::Normal(a), Component::Normal(b)) => a.eq_ignore_ascii_case(b),
+            (got, want) => got == want,
         };
         if !same {
-            return Err(path_error(raw, "absolute paths must be inside the automation root"));
+            return None;
         }
     }
-    let rest: Vec<&str> = request.map(|c| c.as_os_str().to_str().unwrap_or("\u{FFFD}")).collect();
-    relative_path(&rest.join("/"))
+    Some(request)
 }
 
 fn relative_path(raw: &str) -> Result<PathBuf, AutomationError> {
@@ -1064,6 +1091,212 @@ mod tests {
         assert!(!outside.join("escape.bin").exists());
         assert!(!outside.join("traversal.bin").exists());
         assert_eq!(std::fs::read(inside.join("a.bin")).unwrap(), b"one");
+    }
+
+    /// Equivalent drive, UNC and ASCII-case root spellings need no ambient path resolution.
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_prefixes_match_without_ambient_resolution() {
+        for (request, root) in [
+            (r"c:\root\new.bin", r"\\?\C:\root"),
+            (r"\\?\C:\root\new.bin", r"C:\root"),
+            (r"\\server\share\root\new.bin", r"\\?\UNC\SERVER\SHARE\root"),
+            (r"c:\ROOT\new.bin", r"\\?\C:\root"),
+            (r"\\?\C:\ROOT\new.bin", r"c:\root"),
+            (r"\\server\share\ROOT\new.bin", r"\\?\UNC\SERVER\SHARE\root"),
+        ] {
+            let remaining = path_beneath_root(Path::new(request), Path::new(root)).unwrap();
+            assert_eq!(remaining.as_path(), Path::new("new.bin"));
+        }
+        for request in [r"C:\root-sibling\new.bin", r"D:\root\new.bin", r"\\.\C:\root\new.bin", r"\\other\share\root\new.bin"] {
+            assert!(path_beneath_root(Path::new(request), Path::new(r"\\?\C:\root")).is_none());
+        }
+    }
+
+    /// Case variants of the granted Windows prefix still use its held directory capability.
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_case_variants_keep_io_inside_the_grant() {
+        let (inside, outside, workspace) = roots("root-case");
+        let configured = PathBuf::from(inside.to_string_lossy().to_ascii_uppercase());
+        let canonical = PathBuf::from(std::fs::canonicalize(&inside).unwrap().to_string_lossy().to_ascii_uppercase());
+        for spelling in [&configured, &canonical] {
+            let path = spelling.join("new.bin");
+            workspace.write(&path.to_string_lossy(), b"inside").unwrap();
+            assert_eq!(workspace.read(&path.to_string_lossy()).unwrap(), b"inside");
+            assert!(workspace.write(&spelling.join("..").join("outside").join("blocked.bin").to_string_lossy(), b"no").is_err());
+        }
+        assert_eq!(std::fs::read(inside.join("new.bin")).unwrap(), b"inside");
+        assert!(workspace.write(&configured.with_file_name("INSIDE-SIBLING").join("blocked.bin").to_string_lossy(), b"no").is_err());
+        assert!(!outside.join("blocked.bin").exists());
+    }
+
+    /// Unix roots with different case must not become aliases of the granted prefix.
+    #[cfg(unix)]
+    #[test]
+    fn unix_root_prefixes_remain_case_sensitive() {
+        assert!(path_beneath_root(Path::new("/Root/new.bin"), Path::new("/root")).is_none());
+    }
+
+    #[test]
+    fn configured_parent_components_accept_resolved_absolute_paths() {
+        let (inside, outside, _) = roots("resolved-parent-root");
+        let configured = inside.join("..").join("inside");
+        let workspace = AuthorizedWorkspace::new(Some(&configured), Some(&configured)).unwrap();
+        let resolved = std::fs::canonicalize(&inside).unwrap();
+        workspace.write(&resolved.join("new.bin").to_string_lossy(), b"new").unwrap();
+        assert_eq!(workspace.read(&resolved.join("new.bin").to_string_lossy()).unwrap(), b"new");
+        workspace.write(&configured.join("launch-spelling.bin").to_string_lossy(), b"trusted prefix").unwrap();
+        assert_eq!(workspace.read(&configured.join("launch-spelling.bin").to_string_lossy()).unwrap(), b"trusted prefix");
+        assert_eq!(workspace.read(&resolved.join("launch-spelling.bin").to_string_lossy()).unwrap(), b"trusted prefix");
+        assert!(workspace.write(&configured.join("..").join("outside/escaped.bin").to_string_lossy(), b"no").is_err());
+        assert!(!outside.join("escaped.bin").exists());
+        assert!(workspace.write(&outside.join("blocked.bin").to_string_lossy(), b"no").is_err());
+        assert!(!outside.join("blocked.bin").exists());
+    }
+
+    #[test]
+    fn relative_configured_root_accepts_resolved_absolute_paths() {
+        let relative = PathBuf::from("target").join(format!("automation-relative-root-{}", std::process::id()));
+        std::fs::create_dir_all(&relative).unwrap();
+        let workspace = AuthorizedWorkspace::new(Some(&relative), Some(&relative)).unwrap();
+        let resolved = std::fs::canonicalize(&relative).unwrap();
+        workspace.write(&resolved.join("new.bin").to_string_lossy(), b"relative").unwrap();
+        assert_eq!(workspace.read(&resolved.join("new.bin").to_string_lossy()).unwrap(), b"relative");
+        std::fs::remove_file(resolved.join("new.bin")).unwrap();
+        drop(workspace);
+        std::fs::remove_dir(resolved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_root_names_are_not_validated_as_relative_request_names() {
+        let (inside, outside, _) = roots("trusted-root-names");
+        let root = inside.join("aux");
+        std::fs::create_dir(&root).unwrap();
+        let alias = outside.join("CON");
+        link_directory(&root, &alias);
+        let workspace = AuthorizedWorkspace::new(Some(&alias), Some(&alias)).unwrap();
+        for spelling in [&root, &alias] {
+            workspace.write(&spelling.join("new.bin").to_string_lossy(), b"trusted").unwrap();
+            assert_eq!(workspace.read(&spelling.join("new.bin").to_string_lossy()).unwrap(), b"trusted");
+            assert!(workspace.write(&spelling.join("NUL").to_string_lossy(), b"no").is_err());
+        }
+        assert!(!root.join("NUL").exists());
+        remove_directory_link(&alias);
+    }
+
+    // Windows junctions exercise the same root alias without requiring Developer Mode.
+    #[cfg(any(unix, windows))]
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe").args(["/D", "/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap().status.success());
+    }
+
+    #[cfg(any(unix, windows))]
+    fn remove_directory_link(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(link).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn linked_root_accepts_both_spellings_and_new_nested_exports() {
+        let (inside, outside, _) = roots("linked-root");
+        let link = outside.join("root-link");
+        link_directory(&inside, &link);
+        let workspace = AuthorizedWorkspace::new(Some(&link), Some(&link)).unwrap();
+        let resolved = std::fs::canonicalize(&inside).unwrap();
+        for (i, spelling) in [resolved, link.clone()].iter().enumerate() {
+            let name = format!("new-{i}.bin");
+            workspace.write(&spelling.join(&name).to_string_lossy(), b"new").unwrap();
+            assert_eq!(workspace.read(&spelling.join(&name).to_string_lossy()).unwrap(), b"new");
+            assert_eq!(workspace.read(&name).unwrap(), b"new");
+            let mut export = workspace.export_sequence(&spelling.join(format!("frames-{i}")).join("nested").to_string_lossy()).unwrap();
+            export.write("frame.png", b"frame").unwrap();
+            export.commit();
+            assert_eq!(std::fs::read(inside.join(format!("frames-{i}/nested/frame.png"))).unwrap(), b"frame");
+        }
+        remove_directory_link(&link);
+    }
+
+    /// TEMP can name the same directory differently from canonicalize (8.3 on Windows).
+    /// A junction makes that mismatch deterministic even when 8.3 names are disabled.
+    #[cfg(windows)]
+    #[test]
+    fn root_alias_tests_work_with_an_aliased_windows_temp() {
+        let (inside, outside, _) = roots("aliased-temp");
+        let temp_alias = outside.join("temp-alias");
+        link_directory(&inside, &temp_alias);
+        let exe = std::env::current_exe().unwrap();
+        for test in [
+            "workspace::tests::ungranted_absolute_aliases_and_link_escapes_are_refused",
+            "workspace::tests::retargeting_root_alias_does_not_regrant_the_held_authority",
+        ] {
+            // Set TEMP only in the child; changing the process environment races other tests.
+            let output =
+                std::process::Command::new(&exe).args(["--exact", test, "--nocapture"]).env("TEMP", &temp_alias).env("TMP", &temp_alias).output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{test}: {stdout}\n{stderr}");
+            assert!(stdout.contains("1 passed;"), "child must run the requested test: {stdout}");
+        }
+        remove_directory_link(&temp_alias);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn ungranted_absolute_aliases_and_link_escapes_are_refused() {
+        let (inside, outside, workspace) = roots("request-alias");
+        // TEMP may use an 8.3 name or a junction. A grant through `alias` below recognises
+        // that configured alias and the canonical target, not every other name for `inside`.
+        let resolved_inside = std::fs::canonicalize(&inside).unwrap();
+        let alias = outside.join("inside-alias");
+        link_directory(&inside, &alias);
+        workspace.write("new.bin", b"inside").unwrap();
+        assert!(workspace.read(&alias.join("new.bin").to_string_lossy()).is_err());
+        assert!(workspace.write(&alias.join("ungranted.bin").to_string_lossy(), b"no").is_err());
+        assert!(!inside.join("ungranted.bin").exists());
+        std::fs::write(outside.join("secret.bin"), b"outside").unwrap();
+        let escape = inside.join("escape");
+        link_directory(&outside, &escape);
+        assert!(workspace.read(&escape.join("secret.bin").to_string_lossy()).is_err());
+        assert!(workspace.write(&escape.join("blocked.bin").to_string_lossy(), b"no").is_err());
+        assert!(workspace.export_sequence(&escape.join("frames").join("nested").to_string_lossy()).is_err());
+        assert!(!outside.join("blocked.bin").exists());
+        assert!(!outside.join("frames").exists());
+        assert_eq!(std::fs::read(outside.join("secret.bin")).unwrap(), b"outside");
+        let read_only = AuthorizedWorkspace::new(Some(&alias), Some(&outside)).unwrap();
+        assert_eq!(read_only.read(&resolved_inside.join("new.bin").to_string_lossy()).unwrap(), b"inside");
+        assert!(read_only.write(&alias.join("denied.bin").to_string_lossy(), b"no").is_err());
+        assert!(!inside.join("denied.bin").exists());
+        remove_directory_link(&escape);
+        remove_directory_link(&alias);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn retargeting_root_alias_does_not_regrant_the_held_authority() {
+        let (inside, outside, _) = roots("retargeted-root");
+        let resolved_inside = std::fs::canonicalize(&inside).unwrap();
+        let alias = outside.join("root-alias");
+        link_directory(&inside, &alias);
+        let workspace = AuthorizedWorkspace::new(Some(&alias), Some(&alias)).unwrap();
+        remove_directory_link(&alias);
+        link_directory(&outside, &alias);
+        std::fs::write(outside.join("secret.bin"), b"secret").unwrap();
+        workspace.write("held.bin", b"held").unwrap();
+        assert_eq!(workspace.read(&resolved_inside.join("held.bin").to_string_lossy()).unwrap(), b"held");
+        assert!(workspace.read(&alias.join("secret.bin").to_string_lossy()).is_err());
+        workspace.write(&alias.join("held-alias.bin").to_string_lossy(), b"original grant").unwrap();
+        assert_eq!(std::fs::read(inside.join("held-alias.bin")).unwrap(), b"original grant");
+        assert!(!outside.join("held-alias.bin").exists());
+        assert_eq!(std::fs::read(outside.join("secret.bin")).unwrap(), b"secret");
+        remove_directory_link(&alias);
     }
 
     /// Each authority is checked against its own root, and none granted refuses absolute paths.
