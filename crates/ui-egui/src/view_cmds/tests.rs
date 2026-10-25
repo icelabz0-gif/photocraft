@@ -778,3 +778,41 @@ fn form_keys_orders_by_order_then_catalogue() {
     let f = json!({"zeta": "", "alpha": ""}).as_object().unwrap().clone();
     assert_eq!(form_keys(&f).iter().map(String::as_str).collect::<Vec<_>>(), ["alpha", "zeta"]);
 }
+
+/// #9349: Full Screen Mode shows a document. Photoshop refuses it with none open, so the start
+/// screen never sits on the full screen pasteboard; closing the last document in a full screen
+/// mode goes back to Standard.
+#[test]
+fn full_screen_modes_need_a_document() {
+    let (mut app, ctx) = app_with(0);
+    for id in ["view.screenMode.fullScreen", "view.screenMode.fullScreenWithMenuBar", "view.screenMode.cycle"] {
+        assert_eq!(is_enabled(&app, id), Some(false), "{id} without a document");
+    }
+    // #9354 review: run anyway (the toolbar list, automation), they are refused and Standard stays.
+    for id in ["view.screenMode.fullScreen", "view.screenMode.fullScreenWithMenuBar"] {
+        assert!(menu(&mut app, &ctx, id, json!({})).is_err(), "{id} is refused without a document");
+        assert_eq!(app.ui.view.screen_mode, "standard", "{id}");
+    }
+    assert_eq!(is_enabled(&app, "view.screenMode.standard"), Some(true));
+    let (mut with_doc, _) = app_with(1);
+    for id in ["view.screenMode.fullScreen", "view.screenMode.fullScreenWithMenuBar", "view.screenMode.cycle"] {
+        assert_eq!(is_enabled(&with_doc, id), Some(true), "{id} with a document");
+    }
+    // The last document closed in Full Screen Mode: back to Standard.
+    menu(&mut with_doc, &ctx, "view.screenMode.fullScreen", json!({})).unwrap();
+    leave_full_screen_without_document(&mut with_doc, &ctx);
+    assert_eq!(with_doc.ui.view.screen_mode, "fullScreen", "a document is still open");
+    with_doc.run("file.close", json!({"save": false})).unwrap();
+    assert!(with_doc.session.documents().is_empty());
+    leave_full_screen_without_document(&mut with_doc, &ctx);
+    assert_eq!(with_doc.ui.view.screen_mode, "standard");
+    // A full screen mode reached anyway (automation) with no document drops back the same way.
+    app.ui.view.screen_mode = "fullScreenWithMenuBar".into();
+    assert_eq!(is_enabled(&app, "view.screenMode.cycle"), Some(true), "Cycle can still leave it");
+    // #9354 review: and Cycle itself goes straight back to Standard, not on to Full Screen.
+    menu(&mut app, &ctx, "view.screenMode.cycle", json!({})).unwrap();
+    assert_eq!(app.ui.view.screen_mode, "standard", "Cycle without a document returns to Standard");
+    app.ui.view.screen_mode = "fullScreenWithMenuBar".into();
+    leave_full_screen_without_document(&mut app, &ctx);
+    assert_eq!(app.ui.view.screen_mode, "standard");
+}

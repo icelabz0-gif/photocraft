@@ -336,7 +336,14 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 {
                     let _ = crate::menus::invoke(app, &ctx, "select.editInQuickMaskMode", json!({}));
                 }
-                let sm = icons::button_with_icon_size_tip(ui, "app-window", bx, (bx * 0.52).round(), false, tl!("Change Screen Mode  (F)"), tool_tips);
+                // Greyed out while Cycle is unavailable (no document in Standard, #9349): its
+                // list would offer nothing else either.
+                let cycle_enabled = crate::view_cmds::is_enabled(app, "view.screenMode.cycle").unwrap_or(true);
+                let sm = ui
+                    .add_enabled_ui(cycle_enabled, |ui| {
+                        icons::button_with_icon_size_tip(ui, "app-window", bx, (bx * 0.52).round(), false, tl!("Change Screen Mode  (F)"), tool_tips)
+                    })
+                    .inner;
                 paint_toolbar_flyout_indicator(ui, &t, &sm);
 
                 // Right-click, or click and hold like the tool flyouts (#4444), lists the modes,
@@ -376,7 +383,8 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ("view.screenMode.fullScreen", tl!("Full Screen Mode")),
                     ] {
                         let on = crate::view_cmds::checked(app, id).unwrap_or(false);
-                        if ui.add(egui::Button::selectable(on, label)).clicked() {
+                        let enabled = crate::view_cmds::is_enabled(app, id).unwrap_or(true);
+                        if ui.add_enabled(enabled, egui::Button::selectable(on, label)).clicked() {
                             let _ = crate::menus::invoke(app, &ctx, id, json!({}));
                             ui.close();
                         }
@@ -6048,11 +6056,54 @@ mod type_flyout_tests {
         assert!(ctx.data(|d| d.get_temp::<(egui::Id, Rect)>(egui::Id::new("tool-flyout"))).is_none());
     }
 
+    /// #9354 review: with no document in Standard Screen Mode, Cycle is unavailable (#9349), so
+    /// Change Screen Mode is greyed out: a click sends no viewport command.
+    #[test]
+    fn screen_mode_button_is_inert_without_a_document() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", serde_json::json!({"width": 64, "height": 48})).unwrap();
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let bx = if Tokens::get(&ctx).pro { 30.0 } else { 36.0 };
+        // Found while a document makes it clickable: the toolbar's last button.
+        let at = ctx
+            .viewport(|v| {
+                v.prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, w)| w.iter())
+                    .filter(|w| w.rect.size() == egui::Vec2::splat(bx) && w.sense.senses_click())
+                    .map(|w| w.rect)
+                    .max_by(|a, b| a.top().total_cmp(&b.top()).then(a.left().total_cmp(&b.left())))
+            })
+            .unwrap()
+            .center();
+        app.run("file.close", serde_json::json!({"save": false})).unwrap();
+        frame(&mut app, &ctx, 1.0, vec![]);
+        assert_eq!(crate::view_cmds::is_enabled(&app, "view.screenMode.cycle"), Some(false));
+        let pointer = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let mut sent = Vec::new();
+        for (t, events) in [(2.0, vec![egui::Event::PointerMoved(at), pointer(true)]), (2.1, vec![pointer(false)]), (2.15, vec![])] {
+            let mut out = ctx.run_ui(
+                egui::RawInput { time: Some(t), events, screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 1800.0))), ..Default::default() },
+                |ui| toolbar(&mut app, ui),
+            );
+            out.textures_delta.clear();
+            sent.extend(out.viewport_output.values().flat_map(|v| v.commands.clone()));
+        }
+        assert!(!sent.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(_))), "no screen mode change was sent: {sent:?}");
+        assert_eq!(app.ui.view.screen_mode, "standard");
+    }
+
     /// #4444: click and hold on Change Screen Mode opens its list like the tool flyouts, without
     /// cycling the mode on release; a plain click still cycles, and right-click still opens it.
     #[test]
     fn long_press_screen_mode_opens_the_modes_without_cycling() {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        // A document open: Full Screen Mode needs one (#9349), so without it a click can't cycle.
+        app.run("file.new", serde_json::json!({"width": 64, "height": 48})).unwrap();
         let ctx = egui::Context::default();
         PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         frame(&mut app, &ctx, 0.0, vec![]);
