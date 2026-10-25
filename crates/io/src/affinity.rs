@@ -37,17 +37,23 @@ pub fn has_extension(name: &str) -> bool {
     name.rsplit(['/', '\\']).next().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, ext)| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
-pub(crate) fn import(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
+pub(crate) fn import(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt) -> Result<ImportResult, IoError> {
     match photocraft_affinity::read(bytes, photocraft_affinity::Limits::default()) {
         Ok(d) => {
             let mut b = Builder::new(name, &d)?;
+            b.ctl = *ctl;
             b.document(&d)?;
+            ctl.check().map_err(|_| IoError::Cancelled)?;
             let mut warnings: Vec<String> = d.warnings.iter().map(|w| format!("Affinity: not imported or approximated: {w}.")).collect();
             warnings.extend(b.warnings.iter().map(|w| format!("Affinity: {w}.")));
             // Type layers draw from their model, within the import's raster bound: the sizes and
-            // frames come from an untrusted file.
+            // frames come from an untrusted file. They share what the images and shapes left of
+            // the pixel budget, so a file with thousands of type layers can't allocate without end.
             let mut document = b.doc;
-            crate::text_import::prepare(&mut document, None);
+            let unrendered = crate::text_import::prepare_within(&mut document, None, &mut b.pixel_budget, ctl).map_err(|_| IoError::Cancelled)?;
+            if unrendered > 0 {
+                warnings.push(format!("Affinity: {unrendered} type layers beyond the import's memory limit were left without pixels until they are edited."));
+            }
             // Save never writes back over the Affinity file.
             Ok(ImportResult { document, warnings, source_read_only: true, preview_only: false })
         }
@@ -80,7 +86,7 @@ fn preview(name: &str, bytes: &[u8], native: &photocraft_affinity::Error) -> Res
     Ok(r)
 }
 
-struct Builder {
+struct Builder<'a> {
     doc: Document,
     warnings: Vec<String>,
     /// Document pixels (in the canvas) per Affinity document pixel: always 1; spreads are offset.
@@ -88,6 +94,8 @@ struct Builder {
     canvas: Rect,
     /// Decoded pixel bytes left for embedded images and their resampled surfaces.
     pixel_budget: u64,
+    /// Checked per layer: a cancelled import stops building.
+    ctl: photocraft_raster::Interrupt<'a>,
 }
 
 /// Deduct `cost` bytes from a decoded-pixel budget; `false` (leaving the budget alone) when it
@@ -110,7 +118,7 @@ fn point(p: af::Point) -> Point {
     Point::new(p.x, p.y)
 }
 
-impl Builder {
+impl Builder<'_> {
     fn new(name: &str, d: &af::Document) -> Result<Self, IoError> {
         // Spreads (Publisher pages) side by side, 64 px apart.
         let mut w: f64 = 0.0;
@@ -126,7 +134,7 @@ impl Builder {
         let mut doc = Document::new(name, size, ColorMode::Rgb, SampleType::U8);
         doc.resolution_dpi = d.dpi as f32;
         let canvas = Rect::new(0, 0, size.width as i32, size.height as i32);
-        Ok(Self { doc, warnings: Vec::new(), format: PixelFormat::RGBA8, canvas, pixel_budget: MAX_PIXEL_BYTES })
+        Ok(Self { doc, warnings: Vec::new(), format: PixelFormat::RGBA8, canvas, pixel_budget: MAX_PIXEL_BYTES, ctl: photocraft_raster::Interrupt::NONE })
     }
 
     fn warn(&mut self, w: &str) {
@@ -249,6 +257,9 @@ impl Builder {
 
     /// One Affinity node and its subtree; `to_doc` maps Affinity document pixels to the canvas.
     fn layer(&mut self, n: &af::Node, to_doc: Affine, top: bool) -> Option<Layer> {
+        if self.ctl.cancelled() {
+            return None;
+        }
         let children: Vec<Layer> = n.children.iter().filter_map(|c| self.layer(c, to_doc, false)).collect();
         let mut l = match &n.kind {
             Kind::Layer | Kind::Group => self.group(n, children),
@@ -448,7 +459,8 @@ impl Builder {
         // geometry across a 300000 px canvas would otherwise be rasterized for every shape.
         let reach = sh.stroke.as_ref().map_or(0, |s| (s.width.ceil() as i32).saturating_add(1));
         let area = frame.inflate(reach).intersect(&self.canvas);
-        let cost = u64::from(area.width()).saturating_mul(u64::from(area.height())).saturating_mul(self.format.bytes_per_pixel() as u64);
+        // Whole tiles: even a 2x2 px shape keeps one, which 50 000 small shapes add up to gigabytes.
+        let cost = crate::text_import::cache_bytes(area, self.format.bytes_per_pixel());
         if charge(&mut self.pixel_budget, cost) {
             sh.cache = Some(photocraft_vector::render_shape(&sh, self.format, self.canvas));
         } else {
@@ -725,5 +737,98 @@ mod tests {
         ok.pixel_budget = 8 * 8 * 4 * 2;
         ok.document(&d).unwrap();
         assert_eq!(ok.doc.layers.len(), 1, "within the budget the image imports as a smart object");
+    }
+
+    fn node(kind: Kind) -> af::Node {
+        af::Node {
+            class: photocraft_affinity::synth::tag(b"ImgN"),
+            name: "n".into(),
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            kind,
+            mask: None,
+            pixel_mask: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn page(nodes: Vec<af::Node>) -> af::Document {
+        af::Document {
+            dpi: 72.0,
+            spreads: vec![af::Spread { bounds: af::Rect { x0: 0.0, y0: 0.0, x1: 64.0, y1: 64.0 }, pages: Vec::new(), transparent: true, nodes }],
+            saved_by: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A 2×2 px solid rectangle.
+    fn tiny_shape(i: usize) -> af::Node {
+        let p = |x: f64, y: f64| af::Point { x, y };
+        let (x, y) = ((i % 30) as f64, (i / 30 % 30) as f64);
+        let corners = [p(x, y), p(x + 2.0, y), p(x + 2.0, y + 2.0), p(x, y + 2.0)];
+        let sub = af::SubPath { start: corners[0], segments: (1..=4).map(|k| [corners[k % 4]; 3]).collect(), closed: true };
+        node(Kind::Shape {
+            path: af::Path { subpaths: vec![sub] },
+            fills: vec![ap::Paint::Solid(ap::Color::Rgb { r: 1.0, g: 0.0, b: 0.0, a: 1.0 })],
+            strokes: Vec::new(),
+            even_odd: false,
+        })
+    }
+
+    #[test]
+    fn small_shapes_are_charged_a_whole_tile_each() {
+        // Surfaces keep whole tiles, so 2×2 px shapes cost a tile each: 50 000 of them were
+        // 7 GB. A budget of three tiles keeps the pixel cache of the first three only.
+        let d = page((0..10).map(tiny_shape).collect());
+        let mut b = Builder::new("shapes", &d).unwrap();
+        b.pixel_budget = 3 * 256 * 256 * 4;
+        b.document(&d).unwrap();
+        let cached = |l: &Layer| matches!(&l.content, LayerContent::Shape(s) if s.cache.is_some());
+        assert_eq!(b.doc.layers.iter().filter(|l| cached(l)).count(), 3);
+        assert_eq!(b.doc.layers.iter().filter(|l| matches!(l.content, LayerContent::Shape(_))).count(), 10, "every shape still imports");
+        assert!(b.warnings.iter().any(|w| w.contains("pixel cache")), "{:?}", b.warnings);
+        assert_eq!(b.pixel_budget, 0);
+    }
+
+    #[test]
+    fn a_cancelled_import_stops_building_layers() {
+        let d = page((0..10).map(tiny_shape).collect());
+        let mut b = Builder::new("cancel", &d).unwrap();
+        let cancel = || true;
+        b.ctl = photocraft_raster::Interrupt::cancel_only(&cancel);
+        b.document(&d).unwrap();
+        assert!(b.doc.layers.is_empty(), "no layer is built once cancelled");
+        let mut doc = Document::new("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+        let mut budget = u64::MAX;
+        doc.layers.push(Layer::new("t", LayerContent::Text(TextLayer { text: "x".into(), ..TextLayer::default() })));
+        assert!(crate::text_import::prepare_within(&mut doc, None, &mut budget, &b.ctl).is_err());
+    }
+
+    #[test]
+    fn type_layers_share_the_pixel_budget_and_keep_going_without_pixels() {
+        // Each layer's ink is charged to the budget; one that doesn't fit keeps an empty cache and
+        // is counted, instead of every layer of a 2000-layer file drawing its own raster.
+        let mut doc = Document::new("t", Size::new(64, 64), ColorMode::Rgb, SampleType::U8);
+        for i in 0..20 {
+            let text = "Budget".to_string();
+            let mut t = TextLayer { text, font_family: "sans-serif".into(), size_pt: 24.0, ..TextLayer::default() };
+            t.runs = vec![TextRun { len: t.text.len(), style: CharStyle { size_pt: 24.0, ..CharStyle::default() } }];
+            doc.layers.push(Layer::new(format!("t{i}"), LayerContent::Text(t)));
+        }
+        // What one layer costs, then room for two and a half.
+        let mut probe = u64::MAX;
+        let mut one = doc.clone();
+        one.layers.truncate(1);
+        crate::text_import::prepare_within(&mut one, None, &mut probe, &photocraft_raster::Interrupt::NONE).unwrap();
+        let cost = u64::MAX - probe;
+        assert!(cost > 0);
+        let mut budget = cost * 5 / 2;
+        let skipped = crate::text_import::prepare_within(&mut doc, None, &mut budget, &photocraft_raster::Interrupt::NONE).unwrap();
+        let drawn = doc.layers.iter().filter(|l| matches!(&l.content, LayerContent::Text(t) if t.cache.as_ref().is_some_and(|c| c.tile_count() > 0))).count();
+        assert_eq!((drawn, skipped), (2, 18));
+        assert!(drawn + skipped == 20, "drawn {drawn} skipped {skipped}");
+        assert!(doc.layers.iter().all(|l| matches!(&l.content, LayerContent::Text(t) if t.cache.is_some())), "every layer has a cache, empty or not");
     }
 }

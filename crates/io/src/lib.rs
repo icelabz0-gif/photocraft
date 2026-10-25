@@ -407,7 +407,7 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
         return import_psd(name, bytes, ctl, damaged);
     }
     if affinity::is_affinity(bytes) || affinity::has_extension(name) {
-        return affinity::import(name, bytes);
+        return affinity::import(name, bytes, ctl);
     }
     if ora::is_ora(bytes) || has_extension(name, "ora") {
         return ora::import(name, bytes, ctl);
