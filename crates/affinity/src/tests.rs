@@ -734,3 +734,115 @@ mod spot_colours {
         assert!(warned(&doc, "spot colours nested deeper than 4 levels"), "{:?}", doc.warnings);
     }
 }
+
+/// The raster fast paths against the code they replaced.
+mod raster_identity {
+    use crate::raster::{copy, interleave};
+
+    /// Deterministic filler (xorshift).
+    fn bytes(n: usize, mut x: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// The per-pixel `f64` conversion `decode` used before the tables.
+    fn reference(planes: &[Vec<u8>], channels: usize, bps: usize, n: usize) -> Vec<u8> {
+        let sample = |p: &Vec<u8>, i: usize| -> f64 {
+            if bps == 2 {
+                f64::from(u16::from_le_bytes([p.get(2 * i).copied().unwrap_or(0), p.get(2 * i + 1).copied().unwrap_or(0)])) / 65535.0
+            } else {
+                f64::from(p.get(i).copied().unwrap_or(0)) / 255.0
+            }
+        };
+        let mut rgba = vec![0u8; n * 4];
+        for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let v: Vec<f64> = planes.iter().map(|p| sample(p, i)).collect();
+            let (r, g, b, a) = if channels == 1 {
+                (v[0], v[0], v[0], 1.0)
+            } else if channels == 5 {
+                let k = 1.0 - v[3];
+                ((1.0 - v[0]) * k, (1.0 - v[1]) * k, (1.0 - v[2]) * k, v[4])
+            } else {
+                (v[0], v[1], v[2], v[3])
+            };
+            px.copy_from_slice(&[r, g, b, a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
+        }
+        rgba
+    }
+
+    #[test]
+    fn eight_bit_samples_round_trip() {
+        // Every byte through every position of the 4-channel and the grey path.
+        let ramp: Vec<u8> = (0..=255).collect();
+        let planes = vec![ramp.clone(), ramp.iter().rev().copied().collect(), ramp.clone(), ramp.iter().rev().copied().collect()];
+        assert_eq!(interleave(&planes, 4, 1, 256), reference(&planes, 4, 1, 256));
+        assert_eq!(interleave(&planes[..1], 1, 1, 256), reference(&planes[..1], 1, 1, 256));
+    }
+
+    #[test]
+    fn sixteen_bit_samples_are_exhaustive() {
+        // All 65536 values in each channel position (rotated so the channels differ).
+        let all: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
+        let rot = |k: usize| -> Vec<u8> { (0..=u16::MAX).flat_map(|v| v.wrapping_add((k * 4099) as u16).to_le_bytes()).collect() };
+        let planes = vec![all, rot(1), rot(2), rot(3)];
+        assert_eq!(interleave(&planes, 4, 2, 65536), reference(&planes, 4, 2, 65536));
+        assert_eq!(interleave(&planes[..1], 1, 2, 65536), reference(&planes[..1], 1, 2, 65536));
+    }
+
+    #[test]
+    fn cmyk_is_exhaustive_over_colour_and_black() {
+        // Every (c, k) pair in each of the c, m and y positions; alpha is arbitrary.
+        let n = 256 * 256;
+        let k: Vec<u8> = (0..n).map(|i| (i >> 8) as u8).collect();
+        let c: Vec<u8> = (0..n).map(|i| i as u8).collect();
+        let m: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(7).wrapping_add(3)).collect();
+        let y: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(13).wrapping_add(250)).collect();
+        let planes = vec![c, m, y, k, bytes(n, 9)];
+        assert_eq!(interleave(&planes, 5, 1, n), reference(&planes, 5, 1, n));
+    }
+
+    #[test]
+    fn random_planes_match_for_every_format() {
+        for (channels, bps) in [(1, 1), (1, 2), (4, 1), (4, 2), (5, 1)] {
+            let n = 5000;
+            let planes: Vec<Vec<u8>> = (0..channels).map(|c| bytes(n * bps, 1 + c as u64)).collect();
+            assert_eq!(interleave(&planes, channels, bps, n), reference(&planes, channels, bps, n), "{channels}x{bps}");
+        }
+    }
+
+    /// The per-byte closure copy `plane` used before the row copies.
+    fn copy_reference(out: &mut [u8], row: usize, (bx0, py0, bx1, py1): (usize, usize, usize, usize), (ox, oy): (usize, usize), at: impl Fn(usize, usize) -> u8) {
+        for y in oy.max(py0)..(oy + 256).min(py1) {
+            for x in ox.max(bx0)..(ox + 256).min(bx1) {
+                if let Some(b) = out.get_mut((y - py0) * row + (x - bx0)) {
+                    *b = at(x - ox, y - oy);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tile_copy_matches_the_byte_loop_for_every_crop() {
+        let tile = bytes(256 * 256, 77);
+        // Crops that cut the tile on each side, sit inside it, and miss it.
+        for &(bx0, bx1, py0, py1) in &[(0, 600, 0, 600), (10, 300, 20, 200), (100, 150, 100, 130), (256, 512, 0, 256), (0, 256, 300, 400), (255, 257, 255, 257), (300, 301, 0, 1)] {
+            for &(ox, oy) in &[(0, 0), (256, 0), (0, 256), (256, 256), (512, 256)] {
+                let row = bx1 - bx0;
+                let mut old = vec![0xAAu8; row * (py1 - py0)];
+                let mut new = old.clone();
+                copy_reference(&mut old, row, (bx0, py0, bx1, py1), (ox, oy), |x, y| tile[y * 256 + x]);
+                copy(&mut new, row, (bx0, py0, bx1, py1), (ox, oy), Some(&tile), 0);
+                assert_eq!(old, new, "tile {ox},{oy} crop {bx0}..{bx1} x {py0}..{py1}");
+                copy_reference(&mut old, row, (bx0, py0, bx1, py1), (ox, oy), |_, _| 0xFF);
+                copy(&mut new, row, (bx0, py0, bx1, py1), (ox, oy), None, 0xFF);
+                assert_eq!(old, new, "fill {ox},{oy} crop {bx0}..{bx1} x {py0}..{py1}");
+            }
+        }
+    }
+}

@@ -127,29 +127,72 @@ fn decode(r: &mut Reader, bitmap: ObjId, crop: (u32, u32, u32, u32), world: Affi
     for c in 1..=channels {
         planes.push(plane(r, bitmap, c, bps, (x0, y0, w, h), &mut cache)?);
     }
-    let n = (w as usize) * (h as usize);
-    let mut rgba = vec![0u8; n * 4];
-    let sample = |p: &Vec<u8>, i: usize| -> f64 {
-        if bps == 2 {
-            f64::from(u16::from_le_bytes([p.get(2 * i).copied().unwrap_or(0), p.get(2 * i + 1).copied().unwrap_or(0)])) / 65535.0
-        } else {
-            f64::from(p.get(i).copied().unwrap_or(0)) / 255.0
-        }
-    };
-    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let v: Vec<f64> = planes.iter().map(|p| sample(p, i)).collect();
-        let (r2, g, b, a) = if channels == 1 {
-            (v[0], v[0], v[0], 1.0)
-        } else if channels == 5 {
-            let k = 1.0 - v[3];
-            ((1.0 - v[0]) * k, (1.0 - v[1]) * k, (1.0 - v[2]) * k, v[4])
-        } else {
-            (v[0], v[1], v[2], v[3])
-        };
-        px.copy_from_slice(&[r2, g, b, a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
-    }
+    let rgba = interleave(&planes, channels, bps, pixels);
     let transform = Affine([1.0, 0.0, 0.0, 1.0, f64::from(x0), f64::from(y0)]).then(world);
     Ok(Some(Image { width: w, height: h, pixels: Pixels::Rgba8(rgba), transform }))
+}
+
+/// Quantize a unit-range sample to a byte: the one conversion every format goes through.
+fn quant(v: f64) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Interleave the decoded planes (`n` samples of `bps` bytes each) into RGBA8.
+///
+/// The samples used to be widened to `f64` one pixel at a time. The tables below hold the same
+/// expressions evaluated once per input value, so the bytes are identical: an 8-bit sample
+/// `x / 255 * 255` rounds back to `x`, a 16-bit one goes through a 64 Ki table, and CMYK's
+/// `(1 - c)(1 - k)` through a table over the 256 x 256 `(c, k)` pairs.
+pub(crate) fn interleave(planes: &[Vec<u8>], channels: usize, bps: usize, n: usize) -> Vec<u8> {
+    let mut rgba = vec![0u8; n * 4];
+    let out = rgba.as_chunks_mut::<4>().0.iter_mut();
+    let p = |c: usize| planes.get(c).map_or(&[][..], Vec::as_slice);
+    match (channels, bps) {
+        (1, 1) => {
+            for (o, &v) in out.zip(p(0)) {
+                *o = [v, v, v, 255];
+            }
+        }
+        (4, 1) => {
+            let (r, g, b, a) = (p(0), p(1), p(2), p(3));
+            for ((((o, &r), &g), &b), &a) in out.zip(r).zip(g).zip(b).zip(a) {
+                *o = [r, g, b, a];
+            }
+        }
+        (5, 1) => {
+            let lut = cmyk_table();
+            let (c, m, y, k, a) = (p(0), p(1), p(2), p(3), p(4));
+            for (((((o, &c), &m), &y), &k), &a) in out.zip(c).zip(m).zip(y).zip(k).zip(a) {
+                let k = usize::from(k) << 8;
+                *o = [lut[k | usize::from(c)], lut[k | usize::from(m)], lut[k | usize::from(y)], a];
+            }
+        }
+        (_, _) => {
+            let lut: Vec<u8> = (0..=u16::MAX).map(|v| quant(f64::from(v) / 65535.0)).collect();
+            let s16 = |c: usize| p(c).as_chunks::<2>().0.iter().map(|b| lut[usize::from(u16::from_le_bytes(*b))]);
+            if channels == 1 {
+                for (o, g) in out.zip(s16(0)) {
+                    *o = [g, g, g, 255];
+                }
+            } else {
+                for ((((o, r), g), b), a) in out.zip(s16(0)).zip(s16(1)).zip(s16(2)).zip(s16(3)) {
+                    *o = [r, g, b, a];
+                }
+            }
+        }
+    }
+    rgba
+}
+
+/// `(1 - c)(1 - k)` quantized, indexed by `k << 8 | c`.
+fn cmyk_table() -> Vec<u8> {
+    let mut lut = Vec::with_capacity(256 * 256);
+    for k in 0..=255u8 {
+        for c in 0..=255u8 {
+            lut.push(quant((1.0 - f64::from(c) / 255.0) * (1.0 - f64::from(k) / 255.0)));
+        }
+    }
+    lut
 }
 
 /// The original image file: entry `c/N` is a stream whose root (`Blck`) holds it as `Data`.
@@ -224,7 +267,7 @@ fn plane(
                     cache.insert(name.clone(), data);
                 }
                 let tile = cache.get(&name).ok_or(Error::Malformed("pixel tile"))?;
-                copy(&mut out, row, (bx0, py0, bx1, py1), (ox, oy), |x, y| tile.get(y * TILE + x).copied().unwrap_or(0));
+                copy(&mut out, row, (bx0, py0, bx1, py1), (ox, oy), Some(tile), 0);
                 continue;
             }
             3 => {
@@ -238,19 +281,25 @@ fn plane(
             _ => return Err(Error::Malformed("unknown pixel tile state")),
         };
         if let Some(v) = fill {
-            copy(&mut out, row, (bx0, py0, bx1, py1), (tx * TILE, ty * TILE), |_, _| v);
+            copy(&mut out, row, (bx0, py0, bx1, py1), (tx * TILE, ty * TILE), None, v);
         }
     }
     Ok(out)
 }
 
-/// Copy the overlap of a tile at byte column `ox`, row `oy` into the cropped plane.
-fn copy(out: &mut [u8], row: usize, (bx0, py0, bx1, py1): (usize, usize, usize, usize), (ox, oy): (usize, usize), at: impl Fn(usize, usize) -> u8) {
+/// Copy the overlap of a tile at byte column `ox`, row `oy` into the cropped plane. `tile` is
+/// the tile's bytes, or `None` to fill the overlap with `fill`.
+pub(crate) fn copy(out: &mut [u8], row: usize, (bx0, py0, bx1, py1): (usize, usize, usize, usize), (ox, oy): (usize, usize), tile: Option<&[u8]>, fill: u8) {
+    let (xa, xb) = (ox.max(bx0), (ox + TILE).min(bx1));
+    if xa >= xb {
+        return;
+    }
     for y in oy.max(py0)..(oy + TILE).min(py1) {
-        for x in ox.max(bx0)..(ox + TILE).min(bx1) {
-            if let Some(b) = out.get_mut((y - py0) * row + (x - bx0)) {
-                *b = at(x - ox, y - oy);
-            }
+        let start = (y - py0) * row + (xa - bx0);
+        let Some(dst) = out.get_mut(start..start + (xb - xa)) else { continue };
+        match tile.and_then(|t| t.get((y - oy) * TILE + (xa - ox)..(y - oy) * TILE + (xb - ox))) {
+            Some(src) => dst.copy_from_slice(src),
+            None => dst.fill(if tile.is_some() { 0 } else { fill }),
         }
     }
 }
