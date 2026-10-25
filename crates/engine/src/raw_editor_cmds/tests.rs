@@ -125,3 +125,26 @@ fn a_failed_develop_opens_nothing() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A stuck editor is stopped at the deadline, and at once when the job is cancelled; both errors
+/// name the editor.
+#[cfg(unix)]
+#[test]
+fn a_stuck_editor_is_stopped() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmp("stuck");
+    let cli = dir.join("darktable-cli");
+    std::fs::write(&cli, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = cli.to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    let ctx = crate::jobs::JobCtx::new();
+    let e = run("darktable", &program, &[], &dir, &ctx, std::time::Duration::from_millis(300)).unwrap_err().to_string();
+    assert!(e.contains("darktable was stopped") && e.contains("longer than"), "{e}");
+    let ctx = crate::jobs::JobCtx::new();
+    ctx.cancel();
+    let e = run("darktable", &program, &[], &dir, &ctx, std::time::Duration::from_secs(600)).unwrap_err().to_string();
+    assert!(e.contains("cancelled"), "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}

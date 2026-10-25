@@ -158,9 +158,11 @@ what an agent can't finish alone.
   (AGENTS.md forbids JS in the app).
 
 ### G14. Camera Raw depth
-- **Missing:** CR3 (detected, unsupported), compressed RAF, lossy DNG (FILE-215-11), .xmp
-  sidecars, masking and calibration in the Camera Raw dialog, per-camera colour for non-DNG
-  cameras, lens profiles.
+- **Missing:** CR3 (detected, unsupported), compressed RAF, masking and calibration in the
+  Camera Raw dialog, per-camera colour for non-DNG cameras, lens profiles.
+- **Partial:** lossy DNG decodes (FILE-215-11); `.xmp` sidecars load the supported settings in
+  the open-time Camera Raw dialog, while highlight modes, absolute Temperature/Tint and opens
+  without the dialog remain unsupported.
 - **Evidence:** `crates/raw/src/lib.rs:228` (CR3), scorecard FILE-215-11/12, #50.
 - **Progress (2026-10-25):** the open-time Camera Raw dialog starts from the settings in the
   raw's Camera Raw sidecar (`IMG_0001.xmp`), so Open develops with them; an open without the

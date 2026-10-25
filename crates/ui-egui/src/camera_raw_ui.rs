@@ -418,6 +418,11 @@ fn open_raw(app: &mut PhotocraftApp, ctx: &egui::Context, raw: RawOpen) -> Resul
         d.detail.raw_curve = curve.clone();
         d.raw_curve = curve;
         d.raw_open = Some(raw);
+        // `open_pixels` rendered before the curve was known: sidecar Shadows or Highlights
+        // preview on the raw retone path only from here, as Open applies them.
+        if sidecar.is_some() {
+            d.render(ctx);
+        }
     }
     Ok(())
 }
@@ -435,6 +440,10 @@ fn sidecar_settings(path: &str) -> Option<(String, CameraRaw, photocraft_io::cam
         let bytes = std::fs::read(&sidecar).ok().filter(|b| b.len() as u64 == meta.len())?;
         let mut params = CameraRaw::default();
         let report = load(&mut params, &bytes).ok()?;
+        // Only `crs:Version` or `HasSettings="False"`: nothing saved here, look at the next one.
+        if report.applied == 0 && report.ignored.is_empty() {
+            return None;
+        }
         params.validate_changes(&CameraRaw::default()).ok()?;
         Some((crate::file_open::display_name(&sidecar), params, report))
     })
@@ -1960,6 +1969,31 @@ mod tests {
             app.camera_raw.as_ref().unwrap().params,
             CameraRaw { encoding_gamma: app.camera_raw.as_ref().unwrap().params.encoding_gamma, ..CameraRaw::default() }
         );
+
+        // A sidecar that saves nothing (`HasSettings="False"`) is passed over for the next one,
+        // and sidecar Shadows preview on the raw retone path from the first frame, as a later
+        // render (and Open) shows them.
+        let crs = |attrs: &str| {
+            format!(
+                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" {attrs}/></rdf:RDF></x:xmpmeta>"#
+            )
+        };
+        std::fs::write(dir.join("IMG_0004.xmp"), crs(r#"crs:Version="16.0" crs:HasSettings="False""#)).unwrap();
+        std::fs::write(dir.join("IMG_0004.XMP"), crs(r#"crs:Shadows2012="+60""#)).unwrap();
+        // On a case-insensitive volume the two names are one file: nothing to pass over then.
+        let distinct = std::fs::read(dir.join("IMG_0004.xmp")).unwrap() != std::fs::read(dir.join("IMG_0004.XMP")).unwrap();
+        app.open_bytes("IMG_0004.dng", &dng).unwrap();
+        let mut raw = app.pending_raw_open.take().unwrap();
+        raw.path = Some(raw_path.to_string_lossy().into_owned());
+        open_raw(&mut app, &ctx, raw).unwrap();
+        let d = app.camera_raw.as_mut().unwrap();
+        if distinct {
+            assert_eq!(d.params.shadows, 60.0);
+            assert!(app.ui.status.contains("IMG_0004.XMP"), "{}", app.ui.status);
+        }
+        let first = d.processed.clone();
+        d.render(&ctx);
+        assert_eq!(d.processed, first, "the first preview already used the raw's tone curve");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

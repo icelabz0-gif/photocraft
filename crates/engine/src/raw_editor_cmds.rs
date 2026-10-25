@@ -156,35 +156,46 @@ fn develop(s: &mut Session, p: &Value) -> Result<Value> {
     if !Path::new(&raw).is_file() {
         return Err(EngineError::Other(format!("{raw}: no such file")));
     }
-    let dir = scratch_dir()?;
-    let out = dir.join(format!("{}.tif", crate::file_cmds::sanitize(&stem)));
-    let out_s = out.to_string_lossy().into_owned();
-    let (program, args) = develop_command(&e, &raw, &out_s);
-    let developed = run(&program, &args).and_then(|()| {
-        let bytes = crate::file_cmds::read_file(&out_s).map_err(|_| EngineError::Other(format!("{} wrote no image ({out_s} is missing)", e.editor.name())))?;
-        crate::file_cmds::import_opened(s, &format!("{stem}.tif"), &bytes)
-    });
-    let _ = std::fs::remove_dir_all(&dir);
-    let mut doc = developed?;
-    doc.name = format!("{stem}.tif");
-    // Untitled: Save asks where, so nothing is written into the scratch folder or over the raw.
-    let (index, report) = s.open_document(doc, None);
-    Ok(json!({"editor": e.editor.name(), "document": index, "name": format!("{stem}.tif"), "profile": report}))
+    develop_file(s, e, raw, stem)
 }
 
-/// A new, empty folder for one develop's output.
+/// How long an editor may take to develop one raw before it is stopped.
 #[cfg(not(target_arch = "wasm32"))]
-fn scratch_dir() -> Result<PathBuf> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("photocraft-raw-editor-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
-    Ok(dir)
+const DEVELOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Develops `raw` as a background job, so a slow or stuck editor never holds up the app: the job
+/// can be cancelled, and the editor is stopped after [`DEVELOP_DEADLINE`]. The TIFF goes to a new
+/// private folder with a random name, removed when the job ends.
+#[cfg(not(target_arch = "wasm32"))]
+fn develop_file(s: &mut Session, e: EditorPaths, raw: String, stem: String) -> Result<Value> {
+    let editor = e.editor.name();
+    let name = format!("{stem}.tif");
+    let work_name = name.clone();
+    crate::jobs::run(
+        s,
+        "Develop in Raw Editor",
+        false,
+        move |ctx| {
+            ctx.progress(0.0, "Develop in Raw Editor");
+            let dir = tempfile::Builder::new().prefix("photocraft-raw-editor-").tempdir().map_err(|e| EngineError::Other(format!("scratch folder: {e}")))?;
+            let out = dir.path().join(format!("{}.tif", crate::file_cmds::sanitize(&stem)));
+            let out_s = out.to_string_lossy().into_owned();
+            let (program, args) = develop_command(&e, &raw, &out_s);
+            run(editor, &program, &args, dir.path(), ctx, DEVELOP_DEADLINE)?;
+            let bytes = crate::file_cmds::read_file(&out_s).map_err(|_| EngineError::Other(format!("{editor} wrote no image ({out_s} is missing)")))?;
+            crate::file_cmds::import(&work_name, &bytes)
+        },
+        move |s, mut doc| {
+            doc.name = name.clone();
+            // Untitled: Save asks where, so nothing is written into the scratch folder or over the raw.
+            let (index, report) = s.open_document(doc, None);
+            Ok(json!({"editor": editor, "document": index, "name": name, "profile": report}))
+        },
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
-fn scratch_dir() -> Result<PathBuf> {
+fn develop_file(_: &mut Session, _: EditorPaths, _: String, _: String) -> Result<Value> {
     Err(EngineError::Other("a raw editor needs the desktop app".into()))
 }
 
@@ -193,25 +204,56 @@ fn spawn(program: &str, args: &[String]) -> Result<()> {
     std::process::Command::new(program).args(args).spawn().map(|_| ()).map_err(|e| EngineError::Other(format!("{program}: {e}")))
 }
 
-/// Runs `program` to the end; a failure carries the end of what it printed.
+/// Runs `program` to the end, its messages into a file in `dir` (a pipe nobody reads could fill
+/// and stall it). Cancelling the job, or `deadline` passing, stops it; a failure names `editor`
+/// and carries the end of what it printed.
 #[cfg(not(target_arch = "wasm32"))]
-fn run(program: &str, args: &[String]) -> Result<()> {
-    let out = std::process::Command::new(program).args(args).output().map_err(|e| EngineError::Other(format!("{program}: {e}")))?;
-    if out.status.success() {
+fn run(editor: &str, program: &str, args: &[String], dir: &Path, ctx: &crate::jobs::JobCtx, deadline: std::time::Duration) -> Result<()> {
+    let log = dir.join("editor.log");
+    let file = std::fs::File::create(&log).map_err(|e| EngineError::Other(format!("{}: {e}", log.display())))?;
+    let err = file.try_clone().map_err(|e| EngineError::Other(format!("{}: {e}", log.display())))?;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(file)
+        .stderr(err)
+        .spawn()
+        .map_err(|e| EngineError::Other(format!("{editor} ({program}): {e}")))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(EngineError::Other(format!("{editor}: {e}")));
+            }
+        }
+        let stop = if ctx.cancelled() {
+            Some(format!("{editor} was stopped: the develop was cancelled"))
+        } else if started.elapsed() > deadline {
+            Some(format!("{editor} was stopped: it took longer than {} s", deadline.as_secs()))
+        } else {
+            None
+        };
+        if let Some(why) = stop {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(EngineError::Other(why));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    if status.success() {
         return Ok(());
     }
-    let text = String::from_utf8_lossy(if out.stderr.is_empty() { &out.stdout } else { &out.stderr }).trim().to_string();
+    let text = std::fs::read(&log).map(|b| String::from_utf8_lossy(&b).trim().to_string()).unwrap_or_default();
     let tail: String = text.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
-    Err(EngineError::Other(format!("{program} failed ({}): {tail}", out.status)))
+    Err(EngineError::Other(format!("{editor} failed ({status}): {tail}")))
 }
 
 #[cfg(target_arch = "wasm32")]
 fn spawn(_: &str, _: &[String]) -> Result<()> {
-    Err(EngineError::Other("a raw editor needs the desktop app".into()))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run(_: &str, _: &[String]) -> Result<()> {
     Err(EngineError::Other("a raw editor needs the desktop app".into()))
 }
 
