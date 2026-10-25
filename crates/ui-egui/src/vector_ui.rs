@@ -86,6 +86,41 @@ fn stroke_param(app: &PhotocraftApp) -> Value {
     p
 }
 
+/// A Line-tool drag snapped as Photoshop's Align Edges (on by default) does: the ends on whole
+/// pixels, and a horizontal or vertical line's sides on pixel edges, each side moved down to the
+/// edge at or before it (a 1 px line drawn at y 23 fills row 22, as in Photoshop), so a 1 px line
+/// fills one pixel row instead of half of two (#9486). Diagonal lines keep their exact sides, and a
+/// 45° one its angle. None when the ends meet.
+fn align_line_edges(a: [f64; 2], b: [f64; 2], weight: f64) -> Option<([f64; 2], [f64; 2], f64)> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (mut a, mut b) = (a.map(f64::round), b.map(f64::round));
+    // A 45° line (⇧) keeps its angle: one whole-pixel step along both axes, not each end rounded
+    // on its own (which can turn a short diagonal into a 1 × 2 step).
+    if (d[0].abs() - d[1].abs()).abs() <= 1e-9 * d[0].abs().max(1.0) {
+        let step = d[0].abs().round();
+        b = [a[0] + step.copysign(d[0]), a[1] + step.copysign(d[1])];
+    }
+    if a == b {
+        return None;
+    }
+    let mut weight = weight;
+    // The axis across a horizontal (1) or vertical (0) line.
+    let across = if a[1] == b[1] {
+        Some(1)
+    } else if a[0] == b[0] {
+        Some(0)
+    } else {
+        None
+    };
+    if let Some(i) = across {
+        let (lo, hi) = ((a[i] - weight / 2.0).floor(), (a[i] + weight / 2.0).floor());
+        if hi - lo >= 1.0 {
+            (a[i], b[i], weight) = ((lo + hi) / 2.0, (lo + hi) / 2.0, hi - lo);
+        }
+    }
+    Some((a, b, weight))
+}
+
 /// Geometry of a Shape-tool drag as `shape.create` params, without fill and stroke (None when too
 /// small): ⇧ constrains proportions, ⌥ draws from the centre. Custom shapes give their box as a `rect`.
 fn shape_geometry(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<Value> {
@@ -100,7 +135,8 @@ fn shape_geometry(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2], m
         if dx.hypot(dy) < 1.0 {
             return None;
         }
-        json!({"kind": "line", "from": start, "to": [start[0] + dx, start[1] + dy], "weight": o.line_weight.max(1.0)})
+        let (from, to, weight) = align_line_edges(start, [start[0] + dx, start[1] + dy], f64::from(o.line_weight.max(1.0)))?;
+        json!({"kind": "line", "from": from, "to": to, "weight": weight})
     } else {
         let (mut w, mut h) = (end[0] - start[0], end[1] - start[1]);
         if mods.shift {
@@ -2361,6 +2397,52 @@ mod tests {
         assert!(b.x0.abs_diff(80) <= 1 && b.width().abs_diff(40) <= 1, "alt = from centre: {b:?}");
         finish_shape(&mut app, Tool::Line, [10.0, 150.0], [90.0, 152.0], egui::Modifiers::SHIFT);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), 4);
+    }
+
+    /// #9486: a 1 px Line-tool drag fills one pixel row or column, opaque, as Photoshop's Align
+    /// Edges draws it (a drag at y 23.2 or x 33.4 rounds its ends to 23 or 33 and fills row 22 or
+    /// column 32), instead of half of two.
+    #[test]
+    fn one_pixel_line_fills_one_pixel_row() {
+        use crate::canvas::{ToolEvent, tool_event};
+        for ((x0, y0), (x1, y1), want) in
+            [((10.4, 23.2), (70.3, 23.2), photocraft_geom::Rect::new(10, 22, 70, 23)), ((33.4, 8.6), (33.4, 50.2), photocraft_geom::Rect::new(32, 9, 33, 50))]
+        {
+            let mut app = app();
+            app.ui.tool = Tool::Line;
+            app.ui.tool_options.line_weight = 1.0;
+            let none = egui::Modifiers::NONE;
+            tool_event(&mut app, ToolEvent::Down { x: x0, y: y0, pressure: 1.0 }, none);
+            tool_event(&mut app, ToolEvent::Move { x: x1, y: y1, pressure: 1.0 }, none);
+            tool_event(&mut app, ToolEvent::Up { x: x1, y: y1 }, none);
+            let st = app.session.active().unwrap();
+            let l = st.doc.layer(st.active_layer.unwrap()).unwrap();
+            assert!(matches!(l.content, LayerContent::Shape(_)), "a shape layer");
+            let s = l.surface().unwrap();
+            assert_eq!(s.content_bounds(), want, "one pixel across");
+            let mid = s.read_region(photocraft_geom::Rect::new(
+                (want.x0 + want.x1) / 2,
+                (want.y0 + want.y1) / 2,
+                (want.x0 + want.x1) / 2 + 1,
+                (want.y0 + want.y1) / 2 + 1,
+            ));
+            assert!(mid[3] > 0.999, "opaque: {mid:?}");
+        }
+    }
+
+    /// CodeRabbit on #9506: a ⇧-drag line stays at 45° when its ends snap to whole pixels, even a
+    /// short one (rounding each end on its own turned 10.1,10.49 → 11.3,11.69 into a 1 × 2 step).
+    #[test]
+    fn a_short_shift_drag_line_keeps_its_45_degrees() {
+        let o = app().ui.tool_options.clone();
+        for (start, end) in [([10.1, 10.49], [11.3, 11.69]), ([20.4, 5.6], [17.1, 8.9]), ([3.3, 40.2], [9.8, 33.1]), ([50.5, 50.5], [44.2, 44.0])] {
+            let g = shape_geometry(&o, Tool::Line, start, end, egui::Modifiers::SHIFT).expect("a line");
+            let p = |k: &str| [g[k][0].as_f64().unwrap(), g[k][1].as_f64().unwrap()];
+            let (from, to) = (p("from"), p("to"));
+            assert!(from.iter().chain(&to).all(|v| v.fract() == 0.0), "whole pixels: {g}");
+            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+            assert!(dx != 0.0 && dx.abs() == dy.abs(), "{start:?} → {end:?}: still 45°: {g}");
+        }
     }
 
     #[test]
