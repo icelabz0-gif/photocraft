@@ -131,7 +131,7 @@ fn answer(code: u32, results: &HashMap<String, OwnedValue>) -> Result<Option<Sav
 }
 
 /// `file:///home/me/A%20b.psd` → `/home/me/A b.psd`; `None` for other schemes.
-fn file_uri_path(uri: &str) -> Option<PathBuf> {
+pub(crate) fn file_uri_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // Only local files: `file:///…` or `file://localhost/…`.
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);

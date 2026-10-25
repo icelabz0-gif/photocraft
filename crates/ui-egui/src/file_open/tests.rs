@@ -430,6 +430,26 @@ fn dropped_files_open_with_path_and_recent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Drags the desktop shell receives itself (X11 browsers' drags) join each frame's input as egui's
+/// own hovered and dropped files, so they land where winit's do.
+#[test]
+fn shell_received_drops_join_the_frame_input() {
+    let (mut app, _) = app_with(Vec::new());
+    let hovering = egui::HoveredFile { path: None, mime: "application/octet-stream".into() };
+    let shown = hovering.clone();
+    app.services.file_drops = Some(Box::new(move |raw: &mut egui::RawInput| {
+        raw.hovered_files.push(shown.clone());
+        raw.dropped_files.push(dropped("web product.png", Ok(png_bytes(8, 8))));
+    }));
+    let mut raw = egui::RawInput::default();
+    eframe::App::raw_input_hook(&mut app, &egui::Context::default(), &mut raw);
+    assert_eq!(raw.hovered_files, vec![hovering]);
+    assert_eq!(raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect::<Vec<_>>(), vec![std::path::PathBuf::from("web product.png")]);
+    app.open_dropped(&egui::Context::default(), raw.dropped_files, None);
+    assert_eq!(doc_names(&app), vec!["web product.png"]);
+    assert_eq!(app.session.documents()[0].path, None, "data without a file opens unsaved");
+}
+
 /// PNG bytes of a white `w`×`h` image.
 fn png_bytes(w: u32, h: u32) -> Vec<u8> {
     let mut s = photocraft_engine::Session::new();

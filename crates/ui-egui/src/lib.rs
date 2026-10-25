@@ -547,6 +547,9 @@ pub type OsEventsFn = Box<dyn FnMut() -> Vec<OsEvent>>;
 pub type QuitFn = Box<dyn FnMut()>;
 /// Where the OS pointer is now, in egui points within the window; `None` when unknown.
 pub type CursorPosFn = Box<dyn FnMut(&egui::Context) -> Option<egui::Pos2>>;
+/// Adds the files dragged over the window now and those dropped since the last call to a frame's
+/// input, for drags the windowing library doesn't deliver ([`Services::file_drops`]).
+pub type FileDropsFn = Box<dyn FnMut(&mut egui::RawInput)>;
 /// Whether Caps Lock is toggled on, read from the OS. `None` where the platform cannot
 /// report it (native Wayland): the cursor then follows the cursor preference (#1758).
 pub type CapsLockFn = Box<dyn FnMut() -> bool>;
@@ -653,6 +656,9 @@ pub struct Services {
     /// file drops carry none, and the window gets no pointer events during an OS drag (see
     /// `file_open::DropTarget`).
     pub cursor_pos: Option<CursorPosFn>,
+    /// Drags and drops the desktop shell receives itself (X11, where winit's drop target turns
+    /// browsers away), as egui's hovered and dropped files: they land like winit's own.
+    pub file_drops: Option<FileDropsFn>,
     /// Caps Lock toggled on (desktop; `None` on Wayland and the web). Read once per frame, so
     /// the canvas can show the precise crosshair for painting tools, whatever the preference.
     pub caps_lock: Option<CapsLockFn>,
@@ -2380,6 +2386,9 @@ impl eframe::App for PhotocraftApp {
         // Leave Ctrl+whole-notch mouse scrolling alone, and honour the pinch preference.
         if cfg!(any(target_os = "windows", target_os = "linux")) && self.session.prefs().enhanced_controls.zoom_with_trackpad_pinch {
             wheel_nav::fold_legacy_pinch(ctx, raw_input);
+        }
+        if let Some(file_drops) = self.services.file_drops.as_mut() {
+            file_drops(raw_input);
         }
         raw_input.events.extend(self.take_synthetic_step());
         // After the control channel's own events (`ui.type`) join the OS's, before any widget.

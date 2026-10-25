@@ -71,6 +71,9 @@ mod tablet;
 mod ui_state;
 mod updates;
 mod window_frame;
+// Drops on X11, browsers' included (winit's own target turns Chrome away).
+#[cfg(target_os = "linux")]
+mod xdnd;
 
 use photocraft_engine::Session;
 use photocraft_ui_egui::PhotocraftApp;
@@ -528,6 +531,10 @@ fn main() -> eframe::Result {
             }
             // Where file drags and drops are (winit 0.30 doesn't say).
             app.services.cursor_pos = cursor::service(cc);
+            #[cfg(target_os = "linux")]
+            {
+                app.services.file_drops = xdnd::service(cc);
+            }
             // The custom title bar's undecorated window must stay borderless, or its caption and
             // border offset the content and the pointer on some Windows systems (#2246).
             app.services.window_frame = window_frame::service(cc, custom_titlebar);
