@@ -227,8 +227,8 @@ pub fn arrow_line(a: (f64, f64), b: (f64, f64), weight: f64, start: bool, end: b
     }
     let (ux, uy) = (dx / distance, dy / distance);
     let (vx, vy) = (-uy, ux);
-    let size = length.clamp(1.0, 4096.0).min(distance * if start && end { 0.49 } else { 0.9 });
-    let half = width.clamp(1.0, 4096.0) / 2.0;
+    let size = (if length.is_finite() { length.max(1.0) } else { 1.0 }).min(distance * if start && end { 0.49 } else { 0.9 });
+    let half = (if width.is_finite() { width.max(1.0) } else { 1.0 }) / 2.0;
     let requested_notch = concavity.clamp(0.0, 100.0) / 100.0;
     // Preserve 0..50%. Beyond that compress the usable range so the head never collapses.
     let max_notch = 0.75;
@@ -257,6 +257,11 @@ pub fn arrow_line(a: (f64, f64), b: (f64, f64), weight: f64, start: bool, end: b
     if end {
         head(b, -1.0);
     }
+    // Never return non-finite arrow geometry.
+    // Large but valid scaled arrowheads remain unchanged.
+    if pieces.iter().flat_map(|sp| &sp.knots).any(|k| !k.anchor.x.is_finite() || !k.anchor.y.is_finite()) {
+        return Path::default();
+    }
     Path::new(pieces)
 }
 
@@ -278,6 +283,20 @@ pub fn live_path(s: &LiveShape) -> Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_non_finite_arrowhead_coordinates() {
+        let path = arrow_line((1.5e308, 0.0), (1.5e308, 200.0), 8.0, false, true, f64::MAX, 50.0, 0.0);
+        assert!(path.subpaths.is_empty());
+    }
+
+    #[test]
+    fn preserves_scaled_head_dimensions_above_ui_limit() {
+        let path = arrow_line((0.0, 0.0), (20000.0, 0.0), 8.0, false, true, 5200.0, 5200.0, 0.0);
+        let head = &path.subpaths[1].knots;
+        assert!((head[1].anchor.x - 14800.0).abs() < 1e-6);
+        assert!((head[1].anchor.y - 2600.0).abs() < 1e-6);
+    }
 
     #[test]
     fn live_arrow_can_be_regenerated_after_edit() {
