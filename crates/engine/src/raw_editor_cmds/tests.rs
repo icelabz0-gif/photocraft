@@ -73,27 +73,32 @@ fn a_relative_raw_is_made_absolute() {
     assert!(std::path::Path::new(raw).is_absolute() && !raw.starts_with('-'), "{raw}");
 }
 
+/// A stand-in `darktable-cli` in `dir`: a link to `/bin/sh`, which runs the "raw" (its first
+/// argument) as a script, with the output path as `$1`. No test executes a file it just wrote:
+/// another test thread's fork could still hold it open for writing (ETXTBSY).
+#[cfg(unix)]
+fn stand_in_darktable(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", bin.join("darktable-cli")).unwrap();
+    bin.join("darktable")
+}
+
 /// A stand-in `darktable-cli` writes a TIFF where it is told; Develop opens it as a new, untitled
 /// document named after the raw.
 #[cfg(unix)]
 #[test]
 fn develop_opens_what_the_editor_writes() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tmp("develop");
     let tif = dir.join("made.tif");
     let mut src = Session::new();
     src.execute("file.new", json!({"width": 6, "height": 4, "background": "#336699"})).unwrap();
     crate::file_cmds::save_doc(&src.active().unwrap().doc, &tif.to_string_lossy(), None).unwrap();
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    // Arguments: raw, output, options. Records them, then writes the output.
-    let script = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncp '{}' \"$2\"\n", dir.join("args.txt").display(), tif.display());
-    let cli = bin.join("darktable-cli");
-    std::fs::write(&cli, script).unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Arguments after the raw: output, options. Records them, then writes the output.
+    let script = format!("printf '%s\\n' \"$@\" > '{}'\ncp '{}' \"$1\"\n", dir.join("args.txt").display(), tif.display());
     let raw = dir.join("IMG_0001.CR2");
-    std::fs::write(&raw, b"not really a raw").unwrap();
-    let mut s = with_editor(&bin.join("darktable").to_string_lossy());
+    std::fs::write(&raw, script).unwrap();
+    let mut s = with_editor(&stand_in_darktable(&dir).to_string_lossy());
     let r = s.execute(DEVELOP, json!({"path": raw.to_string_lossy()})).unwrap();
     assert_eq!(r["name"], "IMG_0001.tif");
     let d = s.active().unwrap();
@@ -101,7 +106,7 @@ fn develop_opens_what_the_editor_writes() {
     assert_eq!(d.doc.name, "IMG_0001.tif");
     assert_eq!(d.path, None, "a save asks where, not into the scratch folder");
     let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
-    assert!(args.starts_with(&format!("{}\n", raw.display())), "{args}");
+    assert!(args.starts_with("/") && args.contains("IMG_0001.tif\n--apply-custom-presets\n"), "{args}");
     assert!(args.contains("plugins/imageio/format/tiff/bpp=16"), "{args}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -110,15 +115,12 @@ fn develop_opens_what_the_editor_writes() {
 #[cfg(unix)]
 #[test]
 fn a_failed_develop_opens_nothing() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tmp("fail");
     let raw = dir.join("a.nef");
-    std::fs::write(&raw, b"x").unwrap();
+    let editor = stand_in_darktable(&dir);
     for (body, want) in [("echo 'cannot read file' >&2\nexit 3", "cannot read file"), ("exit 0", "wrote no image")] {
-        let cli = dir.join("RapidRAW");
-        std::fs::write(&cli, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut s = with_editor(&cli.to_string_lossy());
+        std::fs::write(&raw, format!("{body}\n")).unwrap();
+        let mut s = with_editor(&editor.to_string_lossy());
         let e = s.execute(DEVELOP, json!({"path": raw.to_string_lossy()})).unwrap_err().to_string();
         assert!(e.contains(want), "{e}");
         assert!(s.documents().is_empty());
@@ -131,19 +133,17 @@ fn a_failed_develop_opens_nothing() {
 #[cfg(unix)]
 #[test]
 fn a_stuck_editor_is_stopped() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tmp("stuck");
-    let cli = dir.join("darktable-cli");
-    std::fs::write(&cli, "#!/bin/sh\nsleep 30\n").unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let program = cli.to_string_lossy().into_owned();
+    // `exec`: the kill stops `sleep` itself, not a shell that leaves it running.
+    let program = "/bin/sh";
+    let args = ["-c".to_string(), "exec sleep 30".to_string()];
     let started = std::time::Instant::now();
     let ctx = crate::jobs::JobCtx::new();
-    let e = run("darktable", &program, &[], &dir, &ctx, std::time::Duration::from_millis(300)).unwrap_err().to_string();
+    let e = run("darktable", program, &args, &dir, &ctx, std::time::Duration::from_millis(300)).unwrap_err().to_string();
     assert!(e.contains("darktable was stopped") && e.contains("longer than"), "{e}");
     let ctx = crate::jobs::JobCtx::new();
     ctx.cancel();
-    let e = run("darktable", &program, &[], &dir, &ctx, std::time::Duration::from_secs(600)).unwrap_err().to_string();
+    let e = run("darktable", program, &args, &dir, &ctx, std::time::Duration::from_secs(600)).unwrap_err().to_string();
     assert!(e.contains("cancelled"), "{e}");
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     let _ = std::fs::remove_dir_all(&dir);
