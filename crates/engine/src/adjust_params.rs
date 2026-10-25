@@ -798,14 +798,44 @@ pub fn levels_eyedropper(base: &Value, picker: CurvesEyedropper, sample: [f32; 3
     Ok(adjustment)
 }
 
-/// The eyedropper of adjustment `kind` ("levels" or "curves"): [`levels_eyedropper`] or
-/// [`curves_eyedropper`].
+/// The eyedropper of adjustment `kind` ("levels", "curves" or "exposure"): [`levels_eyedropper`],
+/// [`curves_eyedropper`] or [`exposure_eyedropper`].
 pub fn adjustment_eyedropper(kind: &str, base: &Value, picker: CurvesEyedropper, sample: [f32; 3], mode: ColorMode) -> Result<Adjustment> {
     match kind {
         "levels" => levels_eyedropper(base, picker, sample, mode),
         "curves" => curves_eyedropper(base, picker, sample, mode),
-        _ => Err(bad(EYEDROPPER, "`eyedropper` applies to Levels and Curves only")),
+        "exposure" => exposure_eyedropper(base, picker, sample, mode),
+        _ => Err(bad(EYEDROPPER, "`eyedropper` applies to Levels, Curves and Exposure only")),
     }
+}
+
+/// Exposure's Set Black/Gray/White Point eyedroppers (#9266), as Photoshop 2025 sets them (measured
+/// on 8-bit gray patches): the sample's value `v` (its luma, as stored) goes to black through the
+/// Offset (`offset = -v · 2^exposure`), to 18 % gray or to white through the Exposure
+/// (`exposure = log2((0.18 − offset) / v)`, `log2((1 − offset) / v)`). Gamma is left alone.
+pub fn exposure_eyedropper(base: &Value, picker: CurvesEyedropper, sample: [f32; 3], mode: ColorMode) -> Result<Adjustment> {
+    const CMD: &str = "exposure eyedropper";
+    check_eyedropper(CMD, picker, sample, mode)?;
+    let mut adjustment = from_params("exposure", base, None, mode)?;
+    let Adjustment::Exposure { exposure, offset, .. } = &mut adjustment else {
+        return Err(bad(CMD, "expected an Exposure adjustment"));
+    };
+    let sample = sample.map(|v| v.clamp(0.0, 1.0));
+    let v = if mode == ColorMode::Grayscale { (sample[0] + sample[1] + sample[2]) / 3.0 } else { rgb_luma(sample) };
+    let target = match picker {
+        CurvesEyedropper::Black => {
+            *offset = (-v * exposure.exp2()).clamp(-0.5, 0.5);
+            return Ok(adjustment);
+        }
+        CurvesEyedropper::NeutralGray => 0.18,
+        CurvesEyedropper::White => 1.0,
+    };
+    if v < 1.0 / 4096.0 {
+        return Err(bad(CMD, "the sample is black: no exposure brings it up"));
+    }
+    let stops = ((target - *offset).max(1e-6) / v).log2();
+    *exposure = if stops.is_finite() { stops.clamp(-20.0, 20.0) } else { *exposure };
+    Ok(adjustment)
 }
 
 /// Resolve a merged-composite colour sample into the black, luma-preserving neutral-gray or white target.
@@ -884,7 +914,8 @@ pub fn layer_eyedropper(s: &crate::Session, layer: photocraft_doc::LayerId, p: &
     let (kind, adj) = match &l.content {
         photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::Curves { .. }) => ("curves", adj),
         photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::Levels { .. }) => ("levels", adj),
-        _ => return Err(bad(EYEDROPPER, "`eyedropper` applies to Levels and Curves adjustment layers only")),
+        photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::Exposure { .. }) => ("exposure", adj),
+        _ => return Err(bad(EYEDROPPER, "`eyedropper` applies to Levels, Curves and Exposure adjustment layers only")),
     };
     let mut rest = p.clone();
     if let Some(o) = rest.as_object_mut() {
@@ -1492,6 +1523,44 @@ mod tests {
         }
         s.execute("layer.newAdjustmentLayer.hueSaturation", json!({})).unwrap();
         assert!(s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "white", "at": [1, 1]}})).is_err(), "Levels and Curves only");
+    }
+
+    /// #9266: Exposure's eyedroppers give Photoshop 2025's values (measured on 8-bit gray patches
+    /// 64 and 200): black on 64 → offset −0.2510, white on 200 → exposure +0.3505, gray on 64 →
+    /// exposure −0.4796; on an adjustment layer they sample below it, one history step each.
+    #[test]
+    fn exposure_eyedroppers_match_photoshop() {
+        let g = |v: f32| [v / 255.0; 3];
+        let get = |a: Adjustment| match a {
+            Adjustment::Exposure { exposure, offset, .. } => (exposure, offset),
+            other => panic!("{other:?}"),
+        };
+        let base = json!({});
+        let (_, o) = get(exposure_eyedropper(&base, CurvesEyedropper::Black, g(64.0), ColorMode::Rgb).unwrap());
+        assert!((o + 0.25098).abs() < 1e-4, "{o}");
+        let (e, _) = get(exposure_eyedropper(&base, CurvesEyedropper::White, g(200.0), ColorMode::Rgb).unwrap());
+        assert!((e - 0.35052).abs() < 1e-4, "{e}");
+        let (e, _) = get(exposure_eyedropper(&base, CurvesEyedropper::NeutralGray, g(64.0), ColorMode::Rgb).unwrap());
+        assert!((e + 0.47956).abs() < 1e-4, "{e}");
+        // The other settings stay; black on a black sample brings nothing up; Grayscale has no gray.
+        let (e, o) = get(exposure_eyedropper(&json!({"exposure": 1.0, "gamma": 1.5}), CurvesEyedropper::Black, g(64.0), ColorMode::Rgb).unwrap());
+        assert!(e == 1.0 && (o + 0.50).abs() < 1e-4, "offset clamps at −0.5: {o}");
+        assert!(exposure_eyedropper(&base, CurvesEyedropper::White, [0.0; 3], ColorMode::Rgb).is_err());
+        assert!(exposure_eyedropper(&base, CurvesEyedropper::NeutralGray, g(64.0), ColorMode::Grayscale).is_err());
+        assert!(exposure_eyedropper(&base, CurvesEyedropper::White, [f32::NAN; 3], ColorMode::Rgb).is_err());
+        // On a layer, through `layer.setAdjustment`.
+        let mut s = crate::Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        s.execute("edit.fill", json!({"color": "#c8c8c8"})).unwrap();
+        s.execute("layer.newAdjustmentLayer.exposure", json!({})).unwrap();
+        let steps = s.active().unwrap().history.past_len();
+        s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "white", "at": [2, 2]}})).unwrap();
+        assert_eq!(s.active().unwrap().history.past_len(), steps + 1);
+        let e = match &s.active().unwrap().doc.layers.last().unwrap().content {
+            photocraft_doc::LayerContent::Adjustment(Adjustment::Exposure { exposure, .. }) => *exposure,
+            other => panic!("{other:?}"),
+        };
+        assert!((e - 0.35052).abs() < 1e-3, "{e}");
     }
 
     /// #3127: on a smart object the eyedropper param records the adjustment it resolved to as
