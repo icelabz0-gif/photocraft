@@ -84,18 +84,29 @@ const DEPTH_OPTIONS: &[(u64, &str, &str)] = &[(8, "8 bit", "Integer"), (16, "16 
 pub const UNITS: &[(&str, &str, f32)] =
     &[("px", "Pixels", 0.0), ("in", "Inches", 1.0), ("cm", "Centimeters", 2.54), ("mm", "Millimeters", 25.4), ("pt", "Points", 72.0), ("pica", "Picas", 6.0)];
 
-/// Pixels to the display unit at `ppi`.
-pub fn to_unit(px: f32, unit: &str, ppi: f32) -> f32 {
-    match UNITS.iter().find(|u| u.0 == unit) {
-        Some((_, _, per_in)) if *per_in > 0.0 => px / ppi.max(1.0) * per_in,
+/// Units of `unit` per inch, 0 for pixels: points and picas at `pt_per_in` (Preferences › Point/Pica
+/// Size, 72 PostScript or 72.27 traditional), as Image Size and the Crop tool convert them.
+fn per_inch(unit: &str, pt_per_in: f32) -> f32 {
+    let pt = if pt_per_in.is_finite() && pt_per_in > 0.0 { pt_per_in } else { 72.0 };
+    match unit {
+        "pt" => pt,
+        "pica" => pt / 12.0,
+        _ => UNITS.iter().find(|u| u.0 == unit).map_or(0.0, |u| u.2),
+    }
+}
+
+/// Pixels to the display unit at `ppi`, with `pt_per_in` points per inch.
+pub fn to_unit(px: f32, unit: &str, ppi: f32, pt_per_in: f32) -> f32 {
+    match per_inch(unit, pt_per_in) {
+        per_in if per_in > 0.0 => px / ppi.max(1.0) * per_in,
         _ => px,
     }
 }
 
-/// Display unit back to pixels at `ppi`.
-pub fn from_unit(v: f32, unit: &str, ppi: f32) -> f32 {
-    match UNITS.iter().find(|u| u.0 == unit) {
-        Some((_, _, per_in)) if *per_in > 0.0 => (v / per_in * ppi.max(1.0)).round(),
+/// Display unit back to pixels at `ppi`, with `pt_per_in` points per inch.
+pub fn from_unit(v: f32, unit: &str, ppi: f32, pt_per_in: f32) -> f32 {
+    match per_inch(unit, pt_per_in) {
+        per_in if per_in > 0.0 => (v / per_in * ppi.max(1.0)).round(),
         _ => v.round(),
     }
 }
@@ -128,8 +139,8 @@ fn clipboard_preset(f: &Map<String, Value>) -> Option<Preset> {
 
 /// Set Width or Height (`key`) from a value typed in `unit`: whole pixels for `file.new`, plus the
 /// typed value so the field keeps showing it (see [`shown_size`]).
-pub fn set_size(f: &mut Map<String, Value>, key: &str, v: f32, unit: &str, ppi: f32) {
-    f.insert(key.into(), px_value(from_unit(v, unit, ppi)));
+pub fn set_size(f: &mut Map<String, Value>, key: &str, v: f32, unit: &str, ppi: f32, pt_per_in: f32) {
+    f.insert(key.into(), px_value(from_unit(v, unit, ppi, pt_per_in)));
     f.insert(typed_key(key), json!({"value": v, "unit": unit}));
     f.remove("__preset");
     f.remove("__savedPreset");
@@ -139,12 +150,12 @@ pub fn set_size(f: &mut Map<String, Value>, key: &str, v: f32, unit: &str, ppi: 
 /// while it still gives the field's pixel count, else the pixels converted. Converting the rounded
 /// pixels back on every keystroke turned a typed `5` mm into 14 px and the text into `4.9` (#1147).
 /// A size over the 300000 px limit shows the limit, not the typed value the document won't have.
-pub fn shown_size(f: &Map<String, Value>, key: &str, d: f32, unit: &str, ppi: f32) -> f32 {
+pub fn shown_size(f: &Map<String, Value>, key: &str, d: f32, unit: &str, ppi: f32, pt_per_in: f32) -> f32 {
     let px = get_f(f, key, d);
     let typed = f.get(&typed_key(key)).and_then(Value::as_object).filter(|t| unit != "px" && t.get("unit").and_then(Value::as_str) == Some(unit));
     match typed.and_then(|t| t.get("value")).and_then(Value::as_f64) {
-        Some(v) if from_unit(v as f32, unit, ppi).max(1.0) == px => v as f32,
-        _ => to_unit(px, unit, ppi),
+        Some(v) if from_unit(v as f32, unit, ppi, pt_per_in).max(1.0) == px => v as f32,
+        _ => to_unit(px, unit, ppi, pt_per_in),
     }
 }
 
@@ -418,7 +429,8 @@ impl Card {
         if unit == "px" {
             format!("{w} x {h} px @ {} ppi", widgets::fmt_num(f64::from(ppi)))
         } else {
-            let v = |n: u32| widgets::fmt_num(f64::from(to_unit(n as f32, &unit, ppi)));
+            let pt_per_in = units.point_size.per_inch() as f32;
+            let v = |n: u32| widgets::fmt_num(f64::from(to_unit(n as f32, &unit, ppi, pt_per_in)));
             format!("{} x {} {unit} @ {} ppi", v(w), v(h), widgets::fmt_num(f64::from(ppi)))
         }
     }
@@ -665,12 +677,15 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
             let ppi = get_f(f, "resolution", 72.0);
             let mut unit = get_s(f, "__unit", "px");
             // A typed unit (`210mm` while in pixels) converts at the new document's resolution.
-            let units = widgets::FieldUnits { unit: widgets::unit_of_key(&unit), dpi: f64::from(ppi), ppi: 72.0 };
+            // Points and picas per Preferences › Point/Pica Size, as Image Size converts them.
+            let pt_per_in = units.point_size.per_inch();
+            let units = widgets::FieldUnits { unit: widgets::unit_of_key(&unit), dpi: f64::from(ppi), ppi: pt_per_in };
+            let pt_per_in = pt_per_in as f32;
             small_label(ui, tl!("Width"));
             ui.horizontal(|ui| {
-                let mut w = shown_size(f, "width", 1920.0, &unit, ppi);
+                let mut w = shown_size(f, "width", 1920.0, &unit, ppi, pt_per_in);
                 if widgets::value_field_units(ui, &mut w, 0.0..=300_000.0, 110.0, widgets::unit_decimals(&unit), units).changed() {
-                    set_size(f, "width", w, &unit, ppi);
+                    set_size(f, "width", w, &unit, ppi, pt_per_in);
                 }
                 let opts: Vec<(String, &str)> = UNITS.iter().map(|u| (u.0.to_string(), u.1)).collect();
                 if widgets::dropdown(ui, "nd-unit", &mut unit, &opts, 120.0) {
@@ -680,9 +695,9 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
             });
             small_label(ui, tl!("Height"));
             ui.horizontal(|ui| {
-                let mut h = shown_size(f, "height", 1080.0, &unit, ppi);
+                let mut h = shown_size(f, "height", 1080.0, &unit, ppi, pt_per_in);
                 if widgets::value_field_units(ui, &mut h, 0.0..=300_000.0, 110.0, widgets::unit_decimals(&unit), units).changed() {
-                    set_size(f, "height", h, &unit, ppi);
+                    set_size(f, "height", h, &unit, ppi, pt_per_in);
                 }
                 ui.add_space(6.0);
                 // Page orientation (≠ Type › Orientation → Hướng chữ).
@@ -903,30 +918,42 @@ mod tests {
 
     #[test]
     fn units_round_trip_through_pixels() {
-        assert_eq!(to_unit(2100.0, "in", 300.0), 7.0);
-        assert_eq!(from_unit(7.0, "in", 300.0), 2100.0);
-        assert_eq!(from_unit(2.54, "cm", 300.0), 300.0);
-        assert_eq!(to_unit(640.0, "px", 72.0), 640.0);
+        assert_eq!(to_unit(2100.0, "in", 300.0, 72.0), 7.0);
+        assert_eq!(from_unit(7.0, "in", 300.0, 72.0), 2100.0);
+        assert_eq!(from_unit(2.54, "cm", 300.0, 72.0), 300.0);
+        assert_eq!(to_unit(640.0, "px", 72.0, 72.0), 640.0);
+    }
+
+    /// Points and picas follow Preferences › Point/Pica Size, as Image Size's do: 7227 traditional
+    /// points are 100 in, not 7227 / 72.
+    #[test]
+    fn points_and_picas_follow_the_point_size_preference() {
+        assert_eq!(from_unit(7227.0, "pt", 100.0, 72.27), 10_000.0);
+        assert_eq!(from_unit(602.25, "pica", 100.0, 72.27), 10_000.0);
+        assert_eq!(from_unit(7200.0, "pt", 100.0, 72.0), 10_000.0);
+        assert!((to_unit(10_000.0, "pt", 100.0, 72.27) - 7227.0).abs() < 0.01);
+        // A preference that isn't a positive number converts at PostScript points.
+        assert_eq!(from_unit(7200.0, "pt", 100.0, f32::NAN), 10_000.0);
     }
 
     /// #1147: 5 mm at 72 ppi is 14 px, which is 4.94 mm. The field must keep showing the typed 5.
     #[test]
     fn typed_size_in_a_physical_unit_shows_as_typed() {
         let mut f = crate::state::UiState::new_document_fields();
-        set_size(&mut f, "height", 5.0, "mm", 72.0);
+        set_size(&mut f, "height", 5.0, "mm", 72.0, 72.0);
         assert_eq!(command_params(&f)["height"], json!(14));
-        assert_eq!(shown_size(&f, "height", 1080.0, "mm", 72.0), 5.0);
+        assert_eq!(shown_size(&f, "height", 1080.0, "mm", 72.0, 72.0), 5.0);
         // Another unit, or pixels changed elsewhere (a preset, the orientation swap): converted.
-        assert_eq!(shown_size(&f, "height", 1080.0, "cm", 72.0), to_unit(14.0, "cm", 72.0));
+        assert_eq!(shown_size(&f, "height", 1080.0, "cm", 72.0, 72.0), to_unit(14.0, "cm", 72.0, 72.0));
         f.insert("height".into(), json!(1080));
-        assert_eq!(shown_size(&f, "height", 1080.0, "mm", 72.0), to_unit(1080.0, "mm", 72.0));
+        assert_eq!(shown_size(&f, "height", 1080.0, "mm", 72.0, 72.0), to_unit(1080.0, "mm", 72.0, 72.0));
         // Pixels show whole pixels.
-        set_size(&mut f, "width", 512.4, "px", 72.0);
-        assert_eq!(shown_size(&f, "width", 1920.0, "px", 72.0), 512.0);
+        set_size(&mut f, "width", 512.4, "px", 72.0, 72.0);
+        assert_eq!(shown_size(&f, "width", 1920.0, "px", 72.0, 72.0), 512.0);
         // Over the 300000 px limit the field shows the limit.
-        set_size(&mut f, "width", 300_000.0, "mm", 72.0);
+        set_size(&mut f, "width", 300_000.0, "mm", 72.0, 72.0);
         assert_eq!(command_params(&f)["width"], json!(300_000));
-        assert_eq!(shown_size(&f, "width", 1920.0, "mm", 72.0), to_unit(300_000.0, "mm", 72.0));
+        assert_eq!(shown_size(&f, "width", 1920.0, "mm", 72.0, 72.0), to_unit(300_000.0, "mm", 72.0, 72.0));
     }
 
     /// #5661: 1 px at 300 ppi is 0.0033 in. Showing it in inches clamped the field to 0.01 in and
@@ -957,12 +984,12 @@ mod tests {
     #[test]
     fn orientation_swap_keeps_the_typed_values() {
         let mut f = crate::state::UiState::new_document_fields();
-        set_size(&mut f, "width", 841.0, "mm", 72.0);
-        set_size(&mut f, "height", 1189.0, "mm", 72.0);
+        set_size(&mut f, "width", 841.0, "mm", 72.0, 72.0);
+        set_size(&mut f, "height", 1189.0, "mm", 72.0, 72.0);
         swap_size(&mut f);
         let p = command_params(&f);
         assert_eq!((p["width"].clone(), p["height"].clone()), (json!(3370), json!(2384)));
-        assert_eq!((shown_size(&f, "width", 1920.0, "mm", 72.0), shown_size(&f, "height", 1080.0, "mm", 72.0)), (1189.0, 841.0));
+        assert_eq!((shown_size(&f, "width", 1920.0, "mm", 72.0, 72.0), shown_size(&f, "height", 1080.0, "mm", 72.0, 72.0)), (1189.0, 841.0));
     }
 
     #[test]
