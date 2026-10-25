@@ -1764,6 +1764,9 @@ fn combo_box_arrow_keys<T: PartialEq + Clone>(ui: &mut Ui, response: &Response, 
     } else {
         return false;
     };
+    // egui also moves keyboard focus on an arrow press, to the widget beside the dropdown (a Lock
+    // icon of the Layers panel), after which the list stopped stepping (#9334): keep it here.
+    ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     let index = options.iter().position(|(value, _)| value == current).unwrap_or(0);
     let next = if step > 0 { (index + 1).min(options.len() - 1) } else { index.saturating_sub(1) };
     match options.get(next) {

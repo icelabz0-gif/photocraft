@@ -12,7 +12,7 @@ use crate::state::Tool;
 
 #[test]
 fn arrow_keys_step_the_open_blend_mode_dropdown_without_nudging_the_layer() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_max_steps(64).build_eframe(|cc| {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 520.0)).with_max_steps(64).build_eframe(|cc| {
         PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
@@ -44,6 +44,45 @@ fn arrow_keys_step_the_open_blend_mode_dropdown_without_nudging_the_layer() {
     h.key_press(egui::Key::ArrowUp);
     h.run_steps(2);
     assert_eq!(layer(&h).0, BlendMode::Normal);
+    // Close the list and open it again with the pointer, which then rests on the list.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let combo = h.query_all_by_role(Role::ComboBox).find(|n| named(n)).expect("the dropdown again");
+    let r = combo.accesskit_node().raw_bounds().expect("its bounds");
+    let at = egui::pos2(((r.x0 + r.x1) / 2.0) as f32, ((r.y0 + r.y1) / 2.0) as f32);
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.run_steps(2);
+    }
+    assert!(crate::widgets::dropdown_list_open(&h.ctx), "the click opens the list");
+    h.event(egui::Event::PointerMoved(at + egui::vec2(0.0, 80.0)));
+    h.run_steps(2);
+    // Every press steps again, not just the first, and keyboard focus stays on the dropdown
+    // instead of moving to the Lock icons below it (#9334). A keyboard's press and release come
+    // in separate frames.
+    let key = |h: &mut Harness<'_, PhotocraftApp>, key: egui::Key| {
+        for pressed in [true, false] {
+            h.event(egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: Default::default() });
+            h.run_steps(2);
+        }
+    };
+    let focused = h.ctx.memory(|m| m.focused());
+    assert!(focused.is_some(), "the click focuses the dropdown");
+    let mut seen = vec![BlendMode::Normal];
+    for _ in 0..3 {
+        key(&mut h, egui::Key::ArrowDown);
+        seen.push(layer(&h).0);
+        assert_eq!(h.ctx.memory(|m| m.focused()), focused, "focus stays on the dropdown");
+    }
+    seen.dedup();
+    assert_eq!(seen.len(), 4, "each ↓ picks the next mode: {seen:?}");
+    for _ in 0..3 {
+        key(&mut h, egui::Key::ArrowUp);
+    }
+    assert_eq!(layer(&h).0, BlendMode::Normal, "↑ steps back each time");
+    assert_eq!(layer(&h).1, bounds, "the Move tool's nudge never takes the keys");
 }
 
 /// #1481: with the Blend Mode list open, a letter picks the next mode starting with it (as in
