@@ -366,6 +366,31 @@ fn angle_gradient_seam_is_anti_aliased() {
 }
 
 #[test]
+fn angle_gradient_seam_mixes_premultiplied() {
+    // Half covered by the transparent end and half by the opaque one, a seam pixel stores the
+    // opaque colour at half alpha (the seam weight is area coverage), so it composites to half
+    // its colour — straight mixing would store a half-intensity colour compositing to a
+    // quarter. As the compositor's gradient fills (its parity tests compare the two).
+    let g = Fill::Gradient {
+        stops: vec![(0.0, Color { alpha: 0.0, ..Color::BLACK }), (1.0, Color::WHITE)],
+        angle: 0.0,
+        scale: 1.0,
+        style: photocraft_doc::GradientStyle::Angle,
+        reverse: false,
+        opacity_stops: vec![],
+        midpoints: vec![],
+        offset: (0.0, -0.05),
+        dither: false,
+        align: true,
+    };
+    let px = grad(g, Rect::new(0, 0, 100, 10));
+    for x in 51..70 {
+        let p = px[4 * 100 + x];
+        assert!((p[3] - 0.5).abs() < 1e-3 && p[0] > 0.99, "seam pixel ({x},4): {p:?}");
+    }
+}
+
+#[test]
 fn coverage_surface_and_vector_mask_values() {
     let p = shapes::rect(10.0, 10.0, 20.0, 20.0);
     let r = fill_rasterizer(&p, DEFAULT_TOLERANCE);

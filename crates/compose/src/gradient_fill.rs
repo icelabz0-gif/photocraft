@@ -165,12 +165,7 @@ fn render_ramp<const N: usize>(f: &Fill, rect: Rect, frame: Rect, ramp: Option<R
             let x = rect.x0 + i as i32;
             let (t, wrap, seam) = crate::effects::gradient_seam(*style, *angle, *scale, *reverse, *offset, frame, x as f32 + 0.5, y as f32 + 0.5);
             let c = ramp.sample(t);
-            *p = if seam > 0.0 {
-                let past = ramp.sample(wrap);
-                std::array::from_fn(|i| c[i] + (past[i] - c[i]) * seam)
-            } else {
-                c
-            };
+            *p = if seam > 0.0 { crate::effects::seam_mix(c, ramp.sample(wrap), seam) } else { c };
             if *dith {
                 dither_channels_to(p.get_mut(..N.saturating_sub(1)).unwrap_or_default(), x, y, quantum);
             }
@@ -371,6 +366,24 @@ mod tests {
                 let t = crate::effects::gradient_t(GradientStyle::Angle, 0.0, 1.0, false, (0.0, -0.5 / 16.0), frame, px, py);
                 assert!((at(x, y) - ramp.sample(t)[0]).abs() < 1e-6, "({x},{y}) left the plain ramp");
             }
+        }
+    }
+
+    #[test]
+    fn angle_gradient_seam_mixes_premultiplied() {
+        // Half covered by the transparent end and half by the opaque one, a seam pixel stores
+        // the opaque colour at half alpha (the seam weight is area coverage), so it composites
+        // to half its colour — straight mixing would store a half-intensity colour compositing
+        // to a quarter.
+        let frame = Rect::new(0, 0, 17, 16);
+        let mut f = Fill::gradient(vec![(0.0, Color { alpha: 0.0, ..Color::BLACK }), (1.0, Color::WHITE)], 0.0, 1.0, GradientStyle::Angle, false);
+        if let Fill::Gradient { offset, .. } = &mut f {
+            *offset = (0.0, -0.5 / 16.0);
+        }
+        let px = render(&f, frame, frame);
+        for x in 8..17 {
+            let p = px[(7 * 17 + x) as usize];
+            assert!((p[3] - 0.5).abs() < 1e-4 && p[0] > 0.99, "seam pixel ({x},7): {p:?}");
         }
     }
 }

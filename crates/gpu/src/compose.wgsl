@@ -795,10 +795,12 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
 // The gradient parameter `t` (0..1), the position past the seam the pixel also covers, and the
 // weight of that position: `gradient_seam` anti-aliases an Angle gradient's 0/1 wrap seam
 // (effects::gradient_seam, #4933) — the sweep jumps from the last stop back to the first there,
-// so a pixel whose centre sits within half a pixel's arc of the seam (an arc shrinks with the
-// distance from the centre) covers both sides and mixes the ramp past the seam — clamped to the
-// end stops — into its own by the fraction beyond the seam. Other styles and pixels clear of
-// the seam come back weight 0 (the wrapped position is then `t` itself).
+// so a pixel whose centre sits within half the pixel's width across the seam covers both sides
+// and mixes the ramp past the seam — clamped to the end stops — into its own by the fraction
+// beyond the seam. That width is the pixel's half-extent projected on the seam's normal
+// (|sin| + |cos| of the seam angle: 1 for the axis-aligned seams, √2 at 45°) divided by the
+// sweep, which shrinks with the distance from the centre. Other styles and pixels clear of the
+// seam come back weight 0 (the wrapped position is then `t` itself).
 fn gradient_seam(d: vec2<i32>) -> vec3<f32> {
     // p0 = (angle°, scale, reverse, style), p1 = frame (x0, y0, w, h)
     let w = max(op.p1.z, 1.0);
@@ -828,7 +830,10 @@ fn gradient_seam(d: vec2<i32>) -> vec3<f32> {
     }
     t = clamp(t, 0.0, 1.0);
     if (op.p0.z > 0.5) { t = 1.0 - t; }
-    let half_arc = min(0.5 / (6.28318530718 * max(length(vec2<f32>(dx, dy)), 0.000001)), 0.5);
+    let half_arc = min(
+        0.5 * (abs(s) + abs(c)) / (6.28318530718 * max(length(vec2<f32>(dx, dy)), 0.000001)),
+        0.5,
+    );
     let edge = min(t, 1.0 - t);
     if (i32(op.p0.w) == 2 && edge < half_arc) {
         let wrap = select(t + 1.0, t - 1.0, t >= 0.5);
@@ -840,6 +845,14 @@ fn gradient_seam(d: vec2<i32>) -> vec3<f32> {
 // The gradient ramp (colour in rows 0-2, alpha in row 3) at `v`.
 fn ramp_at(v: f32) -> vec4<f32> {
     return vec4(lut(0, v), lut(1, v), lut(2, v), lut(3, v));
+}
+
+// Two straight ramp samples mixed by an Angle seam's coverage weight: the mix runs in
+// premultiplied form, so a semi-transparent side keeps its colour when composited (straight
+// mixing would darken it), then converts back to straight (effects::seam_mix).
+fn seam_mix(a: vec4<f32>, b: vec4<f32>, w: f32) -> vec4<f32> {
+    let pm = mix(vec4(a.rgb * a.a, a.a), vec4(b.rgb * b.a, b.a), w);
+    return select(vec4(0.0), vec4(pm.rgb / pm.a, pm.a), pm.a > 0.0);
 }
 
 // photocraft_color::dither_noise: the gradient dither's position hash, in [0, 1).
@@ -856,7 +869,7 @@ fn layer_texel(d: vec2<i32>) -> vec4<f32> {
         let g = gradient_seam(d);
         var c = ramp_at(g.x);
         if (g.z > 0.0) {
-            c = mix(c, ramp_at(g.y), g.z);
+            c = seam_mix(c, ramp_at(g.y), g.z);
         }
         // p2.w: dither (gradient fills), rounded to p2.z levels on integer documents.
         if (op.p2.w > 0.5) {
@@ -1176,7 +1189,7 @@ fn fx_color(d: vec2<i32>) -> vec4<f32> {
         let g = gradient_seam(d);
         var c = ramp_at(g.x);
         if (g.z > 0.0) {
-            c = mix(c, ramp_at(g.y), g.z);
+            c = seam_mix(c, ramp_at(g.y), g.z);
         }
         return c;
     }

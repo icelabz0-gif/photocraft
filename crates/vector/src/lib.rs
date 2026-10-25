@@ -310,9 +310,21 @@ impl Paint {
                 let mut c = sample_stops(stops, midpoints, opacity_stops, t);
                 if seam > 0.0 {
                     // The seam of an Angle gradient's sweep is anti-aliased like the compositor's
-                    // (the parity tests keep the two in step).
+                    // (the parity tests keep the two in step): the weight is area coverage, so
+                    // the two sides mix premultiplied by alpha and convert back to straight.
                     let past = sample_stops(stops, midpoints, opacity_stops, wrap);
-                    c = std::array::from_fn(|i| c[i] + (past[i] - c[i]) * seam);
+                    let pm = |mut v: [f32; 4]| {
+                        let alpha = v[3];
+                        v[..3].iter_mut().for_each(|ch| *ch *= alpha);
+                        v
+                    };
+                    let (a, b) = (pm(c), pm(past));
+                    let mut m = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * seam);
+                    if m[3] > 0.0 {
+                        let alpha = m[3];
+                        m[..3].iter_mut().for_each(|ch| *ch /= alpha);
+                    }
+                    c = m;
                 }
                 if *dith {
                     dither(&mut c, x.floor() as i32, y.floor() as i32);
@@ -426,9 +438,11 @@ fn gradient_seam(
     y: f64,
 ) -> (f32, f32, f32) {
     let (t, r) = gradient_pos(style, angle, scale, reverse, offset, frame, x, y);
-    // Half the pixel's angular width as a fraction of the sweep: half a pixel of arc at r
-    // (capped at half the ramp, for pixels at the sweep's centre where the arc is unbounded).
-    let half = (0.5 / (std::f64::consts::TAU * r.max(1e-6))).min(0.5);
+    let (s, c) = f64::from(angle).to_radians().sin_cos();
+    // Half the pixel's extent across the seam as a fraction of the sweep: a square pixel's
+    // half-width projected on the seam's normal (|sin| + |cos| of the seam angle), capped at
+    // half the ramp, for pixels at the sweep's centre where the arc is unbounded.
+    let half = (0.5 * (s.abs() + c.abs()) / (std::f64::consts::TAU * r.max(1e-6))).min(0.5);
     let d = t.min(1.0 - t);
     let (wrap, weight) = if style == GradientStyle::Angle && d < half { (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half)) } else { (t, 0.0) };
     (t as f32, wrap as f32, weight as f32)

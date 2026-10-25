@@ -1094,19 +1094,40 @@ fn gradient_pos(style: GradientStyle, angle: f32, scale: f32, reverse: bool, off
 /// [`gradient_t`] with an Angle gradient's 0/1 wrap seam anti-aliased (#4933): returns the ramp
 /// position `t`, the position past the seam the pixel also covers (`t` itself when `weight` is
 /// 0) and `weight`, the fraction of the pixel beyond the seam. The seam is where the sweep jumps
-/// from the last stop back to the first: a pixel whose centre sits within half a pixel's arc of
-/// it (an arc shrinks with the distance `r` from the centre) covers both sides, so it mixes the
-/// ramp value past the seam — clamped to the end stops — into its own, proportionally. The other
-/// styles have no seam; `reverse` mirrors `t` but the seam straddle (and its mix) is symmetric.
+/// from the last stop back to the first: a pixel whose centre sits within half a pixel's width
+/// across it covers both sides, so it mixes the ramp value past the seam — clamped to the end
+/// stops — into its own, proportionally. The width is the pixel's half-extent projected on the
+/// seam's normal (|sin| + |cos| of the seam angle: 1 for the axis-aligned seams, √2 at 45°)
+/// divided by the sweep, which shrinks with the distance `r` from the centre. The other styles
+/// have no seam; `reverse` mirrors `t` but the seam straddle (and its mix) is symmetric.
 #[allow(clippy::too_many_arguments)]
 pub fn gradient_seam(style: GradientStyle, angle: f32, scale: f32, reverse: bool, offset: (f32, f32), bounds: Rect, x: f32, y: f32) -> (f32, f32, f32) {
     let (t, r) = gradient_pos(style, angle, scale, reverse, offset, bounds, x, y);
-    // Half the pixel's angular width as a fraction of the sweep: half a pixel of arc at r
-    // (capped at half the ramp, for pixels at the sweep's centre where the arc is unbounded).
-    let half = (0.5 / (std::f32::consts::TAU * r.max(1e-6))).min(0.5);
+    let (s, c) = angle.to_radians().sin_cos();
+    // Half the pixel's extent across the seam as a fraction of the sweep (capped at half the
+    // ramp, for pixels at the sweep's centre where the arc is unbounded).
+    let half = (0.5 * (s.abs() + c.abs()) / (std::f32::consts::TAU * r.max(1e-6))).min(0.5);
     let d = t.min(1.0 - t);
     let (wrap, weight) = if style == GradientStyle::Angle && d < half { (if t >= 0.5 { t - 1.0 } else { t + 1.0 }, 0.5 - 0.5 * (d / half)) } else { (t, 0.0) };
     (t, wrap, weight)
+}
+
+/// Mixes two straight ramp samples (RGBA, or CMYKA with the alpha last) by an Angle seam's
+/// coverage weight: the mix runs in premultiplied form, so a semi-transparent side keeps its
+/// colour when composited (straight mixing would darken it), then converts back to straight.
+pub fn seam_mix<const N: usize>(a: [f32; N], b: [f32; N], w: f32) -> [f32; N] {
+    let premultiplied = |mut v: [f32; N]| {
+        let alpha = v[N - 1];
+        v[..N - 1].iter_mut().for_each(|ch| *ch *= alpha);
+        v
+    };
+    let (a, b) = (premultiplied(a), premultiplied(b));
+    let mut m = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * w);
+    if m[N - 1] > 0.0 {
+        let alpha = m[N - 1];
+        m[..N - 1].iter_mut().for_each(|ch| *ch /= alpha);
+    }
+    m
 }
 
 /// Samples colour and opacity stops at `t`.
@@ -1314,12 +1335,7 @@ fn paint_fx(
                     let (x, y) = ((big.x0 + (i % w) as i32) as f32 + 0.5, (big.y0 + (i / w) as i32) as f32 + 0.5);
                     let (t, wrap, seam) = gradient_seam(g.style, angle, scale, g.reverse, offset, shape_bounds, x, y);
                     let c = prepared.sample(t);
-                    if seam > 0.0 {
-                        let past = prepared.sample(wrap);
-                        std::array::from_fn(|i| c[i] + (past[i] - c[i]) * seam)
-                    } else {
-                        c
-                    }
+                    if seam > 0.0 { seam_mix(c, prepared.sample(wrap), seam) } else { c }
                 },
                 blend,
                 opacity,
@@ -2567,6 +2583,26 @@ mod tests {
         let (_, wrap, w) = gradient_seam(GradientStyle::Linear, 0.0, 1.0, false, (0.0, 0.0), b, 0.5, 16.0);
         assert_eq!(w, 0.0);
         assert!((wrap - gradient_t(GradientStyle::Linear, 0.0, 1.0, false, (0.0, 0.0), b, 0.5, 16.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn angle_gradient_seam_band_follows_the_pixels_diagonal_projection() {
+        // A square pixel reaches |sin| + |cos| = √2 half-pixels across a 45° seam, so centres up
+        // to 0.707 px clear of it still straddle; an axis-aligned seam's band stays half a pixel.
+        let b = Rect::new(0, 0, 64, 64);
+        let (s, c) = (std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+        // Centres `h` px off the 45° seam through (32, 32), 50 px along it.
+        let at = |h: f32| {
+            let (x, y) = (32.0 + 50.0 * c + h * s, 32.0 - 50.0 * c + h * s);
+            gradient_seam(GradientStyle::Angle, 45.0, 1.0, false, (0.0, 0.0), b, x, y).2
+        };
+        assert!((at(0.0) - 0.5).abs() < 1e-4, "{}", at(0.0));
+        assert!(at(0.6) > 0.0 && at(0.6) < 0.5, "{}", at(0.6));
+        assert_eq!(at(0.8), 0.0);
+        // The axis-aligned seam keeps its half-pixel band.
+        let axis = |h: f32| gradient_seam(GradientStyle::Angle, 0.0, 1.0, false, (0.0, 0.0), b, 82.0, 32.0 + h).2;
+        assert!(axis(0.4) > 0.0, "{}", axis(0.4));
+        assert_eq!(axis(0.6), 0.0);
     }
 
     #[test]
