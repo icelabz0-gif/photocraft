@@ -2019,7 +2019,7 @@ mod multi_layer_formatting {
         let (app, ids) = fixture();
         let before = ids.map(|id| style(&app, id, 0));
         let mut h = controls(app, false);
-        h.get_all_by_role(Role::ComboBox).next().unwrap().click();
+        h.get_all_by_role(Role::TextInput).next().unwrap().click();
         h.run();
         h.get_by_role(Role::TextInput).type_text("JetBrains");
         h.key_press(egui::Key::ArrowDown);
@@ -2042,7 +2042,7 @@ mod multi_layer_formatting {
             assert_eq!(style(h.state(), ids[i], 0), expected, "family changes preserve each peer's face and metrics");
         }
         assert_eq!(style(h.state(), ids[2], 0), before[2]);
-        h.get_all_by_role(Role::ComboBox).nth(2).unwrap().click();
+        h.get_all_by_role(Role::ComboBox).find(|n| n.value().as_deref() == Some("Smooth")).unwrap().click();
         h.run();
         h.get_by_label("Sharp").click();
         h.run();
@@ -2079,7 +2079,7 @@ mod multi_layer_formatting {
         );
         PhotocraftApp::setup_context(&h.ctx, Default::default());
         h.run_steps(4);
-        h.get_all_by_role(Role::ComboBox).next().unwrap().click();
+        h.get_all_by_role(Role::TextInput).next().unwrap().click();
         h.run();
         h.run();
     }

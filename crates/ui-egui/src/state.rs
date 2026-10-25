@@ -1172,6 +1172,17 @@ pub struct BoxResize {
     pub aff: photocraft_geom::Affine,
 }
 
+/// A font choice for subsequent typing, invalidated by navigation or a document edit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeInsertionStyle {
+    pub document: u64,
+    pub layer: u64,
+    pub session: String,
+    pub revision: u64,
+    pub caret: usize,
+    pub style: photocraft_doc::text::CharStyle,
+}
+
 /// In-progress inline type editing (Type tool). Offsets are character indices.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextEdit {
@@ -1380,6 +1391,9 @@ pub struct UiState {
     /// Inline type editing session, if any.
     #[serde(default)]
     pub text_edit: Option<TextEdit>,
+    /// Font for subsequent typing at this caret, separate from existing character runs.
+    #[serde(default)]
+    pub type_insertion_style: Option<TypeInsertionStyle>,
     /// Clock time in seconds when type cursor blink was last reset (e.g. on keypress/caret move).
     #[serde(skip)]
     pub caret_blink_time: f64,
@@ -1630,6 +1644,7 @@ impl Default for UiState {
             recent_files: Vec::new(),
             recent_fonts: Vec::new(),
             text_edit: None,
+            type_insertion_style: None,
             caret_blink_time: 0.0,
             text_edit_return_tool: None,
             type_transform: None,
