@@ -1912,7 +1912,9 @@ mod tests {
         use photocraft_io::raw::decodes_on_this_thread;
         let ctx = egui::Context::default();
         let develop = |reuse: bool, commit: bool| {
-            let (mut app, dng) = raw_app();
+            let (mut app, mut dng) = raw_app();
+            // Kept decodes are found by file contents: other tests open the same synthetic DNG.
+            dng.extend_from_slice(b"a_raw_open_decodes_the_file_once");
             let before = decodes_on_this_thread();
             app.open_bytes("IMG_0007.dng", &dng).unwrap();
             let raw = app.pending_raw_open.take().unwrap();

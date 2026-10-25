@@ -220,17 +220,16 @@ impl Fingerprint {
         const K: u64 = 0x9E37_79B9_7F4A_7C15;
         let mix = |lane: u64, word: u64| (lane ^ word).wrapping_mul(K).rotate_left(29);
         let mut lanes = [0x243F_6A88_85A3_08D3u64, 0x1319_8A2E_0370_7344, 0xA409_3822_299F_31D0, 0x082E_FA98_EC4E_6C89];
-        let mut chunks = bytes.chunks_exact(32);
-        for chunk in &mut chunks {
-            for (lane, w) in lanes.iter_mut().zip(chunk.chunks_exact(8)) {
-                *lane = mix(*lane, u64::from_le_bytes(w.try_into().expect("8 bytes")));
+        let (blocks, rest) = bytes.as_chunks::<32>();
+        let mut absorb = |block: &[u8; 32]| {
+            for (lane, word) in lanes.iter_mut().zip(block.as_chunks::<8>().0) {
+                *lane = mix(*lane, u64::from_le_bytes(*word));
             }
-        }
+        };
+        blocks.iter().for_each(&mut absorb);
         let mut tail = [0u8; 32];
-        tail[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
-        for (lane, w) in lanes.iter_mut().zip(tail.chunks_exact(8)) {
-            *lane = mix(*lane, u64::from_le_bytes(w.try_into().expect("8 bytes")));
-        }
+        tail[..rest.len()].copy_from_slice(rest);
+        absorb(&tail);
         let digest = lanes.iter().fold(bytes.len() as u64, |acc, &lane| mix(acc, lane));
         Fingerprint(bytes.len(), digest)
     }
@@ -372,10 +371,13 @@ pub fn fit_preview_look(raw: &[u8], sensor: &Sensor, opts: &DevelopOptions) -> R
     photocraft_raw::fit_look(sensor, opts, &Reference { width: w, height: h, rgb: &rgb }).map_err(|e| e.to_string())
 }
 
+/// A sensor and the look fitted to it, as [`develop_fitted`] hands them back.
+type Kept = (Sensor, Option<CameraLook>);
+
 /// Decodes and develops; a file without colour calibration gets a look fitted to its preview.
 /// With `keep`, also hands back the sensor and the look it fitted (the default look, when
 /// `opts` named none) instead of freeing them.
-fn develop_fitted(bytes: &[u8], opts: &DevelopOptions, keep: bool) -> Result<(photocraft_raw::Developed, Option<(Sensor, Option<CameraLook>)>), RawError> {
+fn develop_fitted(bytes: &[u8], opts: &DevelopOptions, keep: bool) -> Result<(photocraft_raw::Developed, Option<Kept>), RawError> {
     let sensor = decode_sensor(bytes).map_err(|e| match e {
         IoError::Raw(e) => e,
         e => RawError::Malformed(e.to_string()),
