@@ -22,7 +22,7 @@
 //! - `methods`: this list.
 
 use std::io::{BufRead, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -344,7 +344,16 @@ fn serve_tcp_until_idle(
     ready: impl FnOnce(std::net::SocketAddr),
     idle: Duration,
 ) -> Result<(), AutomationError> {
-    let listener = TcpListener::bind(addr).map_err(|e| AutomationError::Io(format!("bind {addr}: {e}")))?;
+    // Resolve and check the address before binding, so a non-loopback socket is never opened,
+    // not even for the moment between `bind` and the check.
+    let resolved = addr
+        .to_socket_addrs()
+        .map_err(|e| AutomationError::Io(format!("resolve {addr}: {e}")))?
+        .collect::<Vec<_>>();
+    let Some(first) = resolved.first().filter(|_| resolved.iter().all(|a| a.ip().is_loopback())) else {
+        return Err(bad(format!("{addr} is not a loopback address")));
+    };
+    let listener = TcpListener::bind(first).map_err(|e| AutomationError::Io(format!("bind {addr}: {e}")))?;
     let local = listener.local_addr().map_err(|e| AutomationError::Io(e.to_string()))?;
     if !local.ip().is_loopback() {
         return Err(bad(format!("{addr} is not a loopback address")));
@@ -1241,6 +1250,17 @@ mod tests {
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["id"], "a");
         assert!(v["result"].as_array().unwrap().iter().any(|m| m == "batch"));
+    }
+
+    /// #9361: the address is checked after resolution and before the bind, so a routable address
+    /// is refused by the check itself (BadRequest) rather than by the bind failing (or, where the
+    /// OS would allow it, briefly succeeding on every interface).
+    #[test]
+    fn tcp_refuses_a_non_loopback_address_before_binding() {
+        let h = Arc::new(Mutex::new(Headless::new()));
+        let err = serve_tcp("8.8.8.8:0", h, "0".repeat(64), |_| {}).unwrap_err();
+        assert!(matches!(err, AutomationError::BadRequest(_)), "{err:?}");
+        assert!(err.to_string().contains("loopback"), "{err}");
     }
 
     /// #4965: a connection that keeps sending without authenticating is closed at the deadline,
