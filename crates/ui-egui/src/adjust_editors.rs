@@ -896,6 +896,62 @@ fn move_hue_range_handle(bounds: [f32; 4], k: usize, deg: f32) -> [f32; 4] {
     b
 }
 
+/// The range handle a press at `x` grabs, given the four handles' x positions on a bar `w` wide:
+/// the nearest within 10 points, or within a third of the gap to the next handle on that side, so
+/// the middle third of a narrow zone still drags the zone (at least 3 points, for handles that
+/// coincide). The bar is a hue circle: the next handle past an edge is the first from the other.
+fn hue_range_handle_at(xs: [f32; 4], x: f32, w: f32) -> Option<u8> {
+    let k = nearest(&xs, x)?;
+    let (xk, d) = (xs[k as usize], x - xs[k as usize]);
+    let gap = xs
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| j != k as usize)
+        .map(|(_, &o)| if d >= 0.0 { (o - xk).rem_euclid(w) } else { (xk - o).rem_euclid(w) })
+        .fold(f32::INFINITY, f32::min);
+    (d.abs() < (gap / 3.0).clamp(3.0, 10.0)).then_some(k)
+}
+
+/// Which zone of a colour range a hue `deg` falls in, between its handles: 0 = the left fade
+/// (between the first two), 1 = the fully-on span, 2 = the right fade; `None` outside the range.
+fn hue_range_zone(bounds: [f32; 4], deg: f32) -> Option<u8> {
+    let b = HueRange::canonical_bounds(bounds);
+    let rel = (deg - b[0]).rem_euclid(360.0);
+    let (one, two, three) = (b[1] - b[0], b[2] - b[0], b[3] - b[0]);
+    if rel <= one {
+        Some(0)
+    } else if rel <= two {
+        Some(1)
+    } else if rel <= three {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// A drag of `delta` degrees on a zone of a colour range (#9252), as in Photoshop: the left fade
+/// moves the two left handles, the fully-on span all four, the right fade the two right handles;
+/// a side never crosses the other or grows the range past a turn.
+fn move_hue_range_zone(start: [f32; 4], zone: u8, delta: f32) -> [f32; 4] {
+    let b = HueRange::canonical_bounds(start);
+    if !delta.is_finite() {
+        return b;
+    }
+    let moved = match zone {
+        0 => {
+            let d = delta.min(b[2] - b[1]).max(b[3] - 359.0 - b[0]);
+            [b[0] + d, b[1] + d, b[2], b[3]]
+        }
+        1 => b.map(|v| v + delta),
+        2 => {
+            let d = delta.max(b[1] - b[2]).min(b[0] + 359.0 - b[3]);
+            [b[0], b[1], b[2] + d, b[3] + d]
+        }
+        _ => b,
+    };
+    HueRange::canonical_bounds(moved)
+}
+
 /// The spectrum bar after the adjustment (what each hue becomes), sampled at `n` hues.
 fn adjusted_spectrum(v: &Value, n: usize) -> Vec<Color32> {
     let adj = photocraft_engine::commands::adjustment_from_params("hueSaturation", v);
@@ -1035,17 +1091,44 @@ fn hue_saturation(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
             p.rect_filled(Rect::from_center_size(pos2(x, mid), vec2(5.0, 12.0)), 1.0, fill);
             p.rect_stroke(Rect::from_center_size(pos2(x, mid), vec2(5.0, 12.0)), 1.0, Stroke::new(1.0, t.text_dim), StrokeKind::Inside);
         }
+        ui.data_mut(|d| d.insert_temp(cx.mem.with("hs-range-bars"), bars));
         let drag_id = cx.mem.with("hs-range-drag");
+        let zone_id = cx.mem.with("hs-range-zone");
         let mut which: Option<u8> = ui.data(|d| d.get_temp(drag_id)).flatten();
+        // A press between the handles drags a zone (#9252): its zone, the bounds and x it began at.
+        let mut zone: Option<(u8, [f32; 4], f32)> = ui.data(|d| d.get_temp(zone_id)).flatten();
         if bresp.is_pointer_button_down_on()
             && ui.input(|i| i.pointer.primary_pressed())
             && let Some(pos) = ui.input(|i| i.pointer.press_origin())
         {
-            which = nearest(&b.map(xof), pos.x).filter(|k| (xof(b[*k as usize]) - pos.x).abs() < 10.0);
+            which = hue_range_handle_at(b.map(xof), pos.x, w);
+            zone = if which.is_none() { hue_range_zone(b, deg_of(pos.x)).map(|z| (z, b, pos.x)) } else { None };
         }
-        if bresp.is_pointer_button_down_on()
-            && let (Some(k), Some(pos)) = (which, ui.input(|i| i.pointer.interact_pos()))
-        {
+        // The release frame applies its position too: a move and a release that land in one frame
+        // would otherwise commit the bounds from before the move. It ends where the button let go,
+        // not where the pointer went after that in the same frame.
+        let released_at = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+                _ => None,
+            })
+        });
+        let live = bresp.is_pointer_button_down_on() || released_at.is_some();
+        let drag_pos = released_at.or_else(|| ui.input(|i| i.pointer.interact_pos()));
+        if live && let (Some((z, start, x0)), Some(pos)) = (zone, drag_pos) {
+            let before = b;
+            b = move_hue_range_zone(start, z, (pos.x - x0) / w * 360.0);
+            if b != before {
+                v[key]["range"] = json!(b.map(|x| x.round()));
+                e.changed = true;
+            }
+        }
+        if zone.is_some() && !bresp.is_pointer_button_down_on() {
+            zone = None;
+            e.commit = true;
+        }
+        ui.data_mut(|d| d.insert_temp(zone_id, zone));
+        if live && let (Some(k), Some(pos)) = (which, drag_pos) {
             let k = k as usize;
             let deg = deg_of(pos.x);
             let before = b;
@@ -1732,6 +1815,53 @@ mod tests {
         let stops = [Color32::BLACK, Color32::RED];
         assert_eq!(track_stops(&cx(true), &stops), Some(&stops[..]));
         assert_eq!(track_stops(&cx(false), &stops), None);
+    }
+
+    /// #9252: Photoshop 2025's zone drags on a colour range (measured on Reds): the fully-on span
+    /// moves all four handles, each fade its own two; a side stops at the other and the range
+    /// never passes a turn.
+    /// #9272 review: at the narrowest Properties panel (a 230-point bar) a 30° zone is ~19 points
+    /// wide; a press in its middle grabs the zone, not a handle, while each handle stays grabbable.
+    #[test]
+    fn hue_range_zones_stay_selectable_on_a_narrow_bar() {
+        let w = 230.0;
+        let xs = [75.0f32, 105.0, 135.0, 165.0].map(|d| d / 360.0 * w);
+        for (a, z) in [(0, 1), (1, 2), (2, 3)] {
+            assert_eq!(hue_range_handle_at(xs, (xs[a] + xs[z]) / 2.0, w), None, "the middle of zone {a}..{z} is the zone's");
+        }
+        for (k, x) in xs.iter().enumerate() {
+            assert_eq!(hue_range_handle_at(xs, *x + 1.0, w), Some(k as u8), "handle {k}");
+        }
+        assert_eq!(hue_range_handle_at(xs, xs[0] - 9.0, w), Some(0), "the full reach outside the range");
+        let stacked = [50.0, 50.0, 80.0, 120.0];
+        assert!(hue_range_handle_at(stacked, 51.0, w).is_some(), "coinciding handles stay grabbable");
+        // Reds (315/345…15\45): its fully-on zone crosses the seam, ~9.6 points from each edge.
+        let reds = [315.0f32, 345.0, 15.0, 45.0].map(|d| d / 360.0 * w);
+        for x in [w - 1.0, w - 3.0, 0.5, 2.5] {
+            assert_eq!(hue_range_handle_at(reds, x, w), None, "x {x}: Reds' fully-on zone across the seam");
+        }
+        assert_eq!(hue_range_handle_at(reds, reds[1] + 1.0, w), Some(1));
+        assert_eq!(hue_range_handle_at(reds, reds[2] - 1.0, w), Some(2));
+    }
+
+    #[test]
+    fn hue_range_zones_move_their_handles() {
+        let reds = [-45.0, -15.0, 15.0, 45.0];
+        assert_eq!(hue_range_zone(reds, 345.0 - 15.0), Some(0));
+        assert_eq!(hue_range_zone(reds, 0.0), Some(1));
+        assert_eq!(hue_range_zone(reds, 30.0), Some(2));
+        assert_eq!(hue_range_zone(reds, 180.0), None);
+        let centre = move_hue_range_zone(reds, 1, 37.0);
+        assert_eq!(centre, [-8.0, 22.0, 52.0, 82.0], "all four, as Photoshop's 315/345…15\\45 → 352/21…52\\81");
+        let left = move_hue_range_zone(centre, 0, -19.0);
+        assert_eq!(left, [-27.0, 3.0, 52.0, 82.0], "the left two only");
+        let right = move_hue_range_zone(left, 2, 19.0);
+        assert_eq!(right, [-27.0, 3.0, 71.0, 101.0], "the right two only");
+        assert_eq!(move_hue_range_zone(reds, 0, 100.0), [-15.0, 15.0, 15.0, 45.0], "the left side stops at the right");
+        assert_eq!(move_hue_range_zone(reds, 2, -100.0), [-45.0, -15.0, -15.0, 15.0], "and the right at the left");
+        let wide = move_hue_range_zone(reds, 2, 500.0);
+        assert!(wide[3] - wide[0] <= 359.0 + 1e-3, "{wide:?}");
+        assert_eq!(move_hue_range_zone(reds, 1, f32::NAN), reds);
     }
 
     #[test]
