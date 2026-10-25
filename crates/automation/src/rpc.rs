@@ -186,6 +186,10 @@ impl Headless {
             "doc.close" => self.close(index_of(&p)?),
             "batch" => self.batch(&p),
             "methods" => Ok(json!(METHODS)),
+            // Commands aren't methods; name the method that runs them (#9039).
+            other if photocraft_engine::commands::find(other).is_some() => Err(bad(format!(
+                "`{other}` is an engine command, not a method: send {{\"method\":\"engine.execute\",\"params\":{{\"command\":\"{other}\",\"params\":{{…}}}}}}"
+            ))),
             other => Err(bad(format!("unknown method `{other}` (try `methods`)"))),
         }
     }
@@ -1171,6 +1175,9 @@ mod tests {
             }
         }
         assert!(h.handle("jobs.nope", Value::Null).unwrap_err().to_string().contains("unknown method"));
+        // A command id sent as a method points to engine.execute, which runs it (#9039).
+        let e = h.handle("image.detectFaces", Value::Null).unwrap_err().to_string();
+        assert!(e.contains(r#""method":"engine.execute""#) && e.contains(r#""command":"image.detectFaces""#), "{e}");
     }
 
     #[test]
