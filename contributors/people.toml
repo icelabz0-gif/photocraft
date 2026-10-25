@@ -275,3 +275,7 @@ sync_github_name = false
 [people.erenova]
 display_name = "Erenova"
 sync_github_name = false
+
+[people.diegochagas]
+real_name = "Diego Chagas"
+display_name = "Diego Chagas"
