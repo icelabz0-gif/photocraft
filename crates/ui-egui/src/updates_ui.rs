@@ -11,6 +11,8 @@ pub(crate) struct Runtime {
     notified_version: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     prompt: Option<craft_update::StartupPrompt>,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
 pub(crate) fn check(app: &mut PhotocraftApp, _ctx: &egui::Context, params: Value) -> Result<Value, String> {
@@ -70,62 +72,60 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(prompt) = &mut app.updates_rt.prompt {
+        if let Some(result) = app.updates_rt.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            app.updates_rt.update_rx = None;
+            match result {
+                // The guarded close path asks about unsaved work and waits for saves; the restart helper
+                // relaunches once the process exits.
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => {
+                    prompt.status_message = Some(e);
+                    prompt.is_installing = false;
+                }
+            }
+        }
         match prompt.show(ctx) {
             craft_update::StartupPromptResponse::Pending => {}
             craft_update::StartupPromptResponse::UpdateAndRestart => {
                 prompt.is_installing = true;
                 if let Some(install) = craft_update::self_update::current(&craft_update::suite::PHOTOCRAFT) {
                     let mut release = prompt.release.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    app.updates_rt.update_rx = Some(rx);
+                    let ctx = ctx.clone();
                     std::thread::spawn(move || {
-                        let http = match craft_update::Http::new("PhotoCraft/Update") {
-                            Ok(h) => h,
-                            Err(e) => {
-                                log::warn!("could not initialize HTTP: {e}");
-                                return;
-                            }
-                        };
-                        if release.assets.is_empty() {
-                            if let Ok(Some(full)) =
-                                craft_update::check_for_update(&craft_update::suite::PHOTOCRAFT, &http, photocraft_engine::build_info::VERSION)
+                        let mut run = || -> Result<(), String> {
+                            let http = craft_update::Http::new("PhotoCraft/Update").map_err(|e| format!("could not initialize HTTP: {e}"))?;
+                            if release.assets.is_empty()
+                                && let Some(full) =
+                                    craft_update::check_for_update(&craft_update::suite::PHOTOCRAFT, &http, photocraft_engine::build_info::VERSION)
+                                        .ok()
+                                        .flatten()
                             {
                                 release = full;
                             }
-                        }
-                        let paths = match craft_update::Paths::for_app(&craft_update::suite::PHOTOCRAFT) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                log::warn!("could not find paths: {e}");
-                                return;
-                            }
+                            let paths = craft_update::Paths::for_app(&craft_update::suite::PHOTOCRAFT).map_err(|e| format!("could not find paths: {e}"))?;
+                            let platform = craft_update::Platform::current().ok_or("unsupported platform for self update")?;
+                            craft_update::self_update::update(
+                                &craft_update::suite::PHOTOCRAFT,
+                                &install,
+                                &release,
+                                platform,
+                                &http,
+                                &paths,
+                                &craft_update::Stop::default(),
+                                &mut |_| {},
+                                &|| Ok(()),
+                                Some(photocraft_engine::build_info::VERSION),
+                            )
+                            .map_err(|e| e.to_string())
                         };
-                        let stop = craft_update::Stop::default();
-                        let platform = match craft_update::Platform::current() {
-                            Some(p) => p,
-                            None => {
-                                log::warn!("unsupported platform for self update");
-                                return;
-                            }
-                        };
-                        let last = || Ok(());
-                        match craft_update::self_update::update(
-                            &craft_update::suite::PHOTOCRAFT,
-                            &install,
-                            &release,
-                            platform,
-                            &http,
-                            &paths,
-                            &stop,
-                            &mut |_| {},
-                            &last,
-                            Some(photocraft_engine::build_info::VERSION),
-                        ) {
-                            Ok(()) => {
-                                std::process::exit(0);
-                            }
-                            Err(e) => {
-                                log::warn!("PhotoCraft self-update failed: {e}");
-                            }
+                        let result = run();
+                        if let Err(e) = &result {
+                            log::warn!("PhotoCraft self-update failed: {e}");
                         }
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
                     });
                 } else {
                     prompt.status_message = Some("Cannot auto-update this installation type. Please download manually.".to_string());
