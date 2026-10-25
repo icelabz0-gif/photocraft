@@ -66,6 +66,7 @@ mod services;
 // macOS gets one instance from LaunchServices (open-documents Apple events).
 #[cfg(any(not(target_os = "macos"), test))]
 mod single_instance;
+mod startup_report;
 // Tablet support (macOS AppKit monitor, Linux X11/Wayland, Windows barrel button).
 mod tablet;
 mod ui_state;
@@ -380,6 +381,9 @@ fn main() -> eframe::Result {
     log::info!("GPU startup: {:?} ({sentinel_ms:.2} ms)", plan);
     let retry_cpu = !safe_gpu && plan.backend != photocraft_engine::prefs::GpuBackend::Cpu;
     let keep_marker = gpu_startup::keep_marker_after_error(&plan, os);
+    // For the failure dialog below: the plan itself moves into the window closure.
+    let started_renderer = plan.backend.name().to_string();
+    let started_note = plan.reason.clone();
     let app_created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_callback = app_created.clone();
     let started_sentinel = sentinel.clone();
@@ -614,6 +618,16 @@ fn main() -> eframe::Result {
                 Ok(_) => return Ok(()),
                 Err(error) => log::error!("could not start CPU compatibility mode: {error}"),
             }
+        }
+    }
+    // A launch that fails before a window exists leaves nothing on screen, and a desktop launch
+    // has no console for the `Err` above: log it, then say why in a native dialog with the log
+    // file to attach (#7643). A terminal or automation launch can read standard error or the
+    // exit status instead, so it keeps the silent exit.
+    if let Err(error) = &result {
+        log::error!("PhotoCraft could not start: {error}");
+        if startup_report::needs_dialog(control_port.is_some()) {
+            startup_report::show(&error.to_string(), &started_renderer, started_note.as_deref(), logger.and_then(logging::AppLogger::path).as_deref());
         }
     }
     result
