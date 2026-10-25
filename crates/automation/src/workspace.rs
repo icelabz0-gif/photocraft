@@ -101,7 +101,10 @@ impl AuthorizedWorkspace {
                 // Best effort, and only when there is a file being replaced: a save still
                 // succeeds for a document whose Finder tag could not come along.
                 if let Ok(old) = root.dir.open(&relative) {
+                    let old = old.into_std();
                     let _ = photocraft_format::atomic::meta::copy_xattrs(old.as_fd(), file.as_fd());
+                    // The creation time too (#9388), through the same handles.
+                    let _ = photocraft_format::atomic::meta::copy_created_file(&old, &file);
                 }
             }
             // Falls back to a plain fsync on shares that refuse a full flush (#1336).
@@ -606,6 +609,22 @@ mod tests {
         assert!(workspace.write("adir", b"x").is_err());
         assert!(inside.join("adir").is_dir());
         assert!(temp_files(&inside).is_empty());
+    }
+
+    /// #9401 review: replacing a file through the automation path keeps its creation time, the
+    /// same as a save through `atomic_write` does on macOS (#9388).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_keeps_the_replaced_files_creation_time() {
+        use std::os::macos::fs::FileTimesExt;
+        let (inside, _, workspace) = roots("created");
+        let path = inside.join("doc.psd");
+        workspace.write("doc.psd", b"original").unwrap();
+        let born = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_created(born)).unwrap();
+        workspace.write("doc.psd", b"replacement").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(std::fs::metadata(&path).unwrap().created().unwrap(), born, "the creation time survives the automation write");
     }
 
     /// #7095: replacing a file through the automation path keeps the old file's extended
