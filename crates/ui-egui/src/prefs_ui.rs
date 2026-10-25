@@ -1780,6 +1780,8 @@ fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) 
         || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "memoryUsageMb"))
         // The browser presents frames itself: Low-Latency Drawing does nothing there.
         || (cfg!(target_arch = "wasm32") && path == "performance.lowLatencyDrawing")
+        // The browser can't start another program.
+        || (cfg!(target_arch = "wasm32") && path == "rawDefaults.externalEditor")
         || (section == "export" && !export_field_visible(obj, k))
         || (section == "tools" && !tools_field_visible(obj, k));
     (query.is_empty() || preference_matches(section, k, query))

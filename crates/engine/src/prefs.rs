@@ -901,6 +901,10 @@ pub struct RawDefaults {
     pub open_in_camera_raw: bool,
     /// The demosaic method raws are developed with; the open-time Camera Raw dialog starts from it.
     pub demosaic: RawDemosaic,
+    /// darktable or RapidRAW, for File › Edit in Raw Editor and Develop in Raw Editor
+    /// (`raw_editor_cmds`): the program (`darktable`, `darktable-cli`, `RapidRAW`) or its `.app`
+    /// bundle. Empty: none.
+    pub external_editor: String,
 }
 
 impl RawDemosaic {
@@ -925,6 +929,7 @@ impl Default for RawDefaults {
             apply_auto_tone: false,
             open_in_camera_raw: true,
             demosaic: RawDemosaic::Ahd,
+            external_editor: String::new(),
         }
     }
 }

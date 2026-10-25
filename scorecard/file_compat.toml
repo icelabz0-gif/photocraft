@@ -78,9 +78,9 @@ note = "io pdf.rs: Save As / Save a Copy / CLI write one flattened RGB/Gray/CMYK
 [[item]]
 id = "FILE-215-11"
 target = "RAW: lossy DNG, highlight modes, .xmp sidecars, RAW prefs wired, per-camera corpus"
-status = "missing"
+status = "partial"
 issue = 215
-note = "raw sensor.rs:210 lossy DNG unsupported; raw_defaults unread; no xmp"
+note = "lossy DNG decodes (2026-10-13); the open-time Camera Raw dialog starts from the raw's .xmp sidecar settings (camera_raw_ui sidecar_settings, 2026-10-25); highlight modes, absolute WB from sidecars and a per-camera corpus remain"
 
 [[item]]
 id = "FILE-215-12"
