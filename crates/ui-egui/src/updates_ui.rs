@@ -68,7 +68,7 @@ pub(crate) fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    let mut download = None;
+    let mut download: Option<String> = None;
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(prompt) = &mut app.updates_rt.prompt {
@@ -99,8 +99,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                             if release.assets.is_empty()
                                 && let Some(full) =
                                     craft_update::check_for_update(&craft_update::suite::PHOTOCRAFT, &http, photocraft_engine::build_info::VERSION)
-                                        .ok()
-                                        .flatten()
+                                        .map_err(|e| format!("could not fetch release assets: {e}"))?
                             {
                                 release = full;
                             }
