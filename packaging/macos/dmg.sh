@@ -28,29 +28,43 @@ hdiutil_retry() {
 # Finder information, or similar detritus not allowed" (#3034), while the DMG's own signature and
 # Gatekeeper still passed.
 # Usage: check_dmg_app <dmg> <App.app>
-check_dmg_app() {
-  local dmg="$1" app="$2" dir rc=0
+#
+# The check runs in a subshell whose EXIT trap detaches the image and removes the scratch directory
+# however it ends: a failed step, `set -e`, Ctrl-C, or the SIGTERM a cancelled job gets (bash skips
+# the EXIT trap when a signal kills it, so HUP, INT and TERM are turned into exits). The traps are
+# the subshell's own, so a caller's EXIT trap is left alone.
+check_dmg_app() (
+  dmg="$1" app="$2" rc=0
   dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dmg-check.XXXXXX")"
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'dmg_check_cleanup "$dir" "$?"' EXIT
   mkdir "$dir/mnt" "$dir/copy"
-  if ! hdiutil_retry attach attach -readonly -nobrowse -noautoopen -mountpoint "$dir/mnt" "$dmg" >/dev/null; then
-    rm -rf "$dir"
-    return 1
-  fi
+  hdiutil_retry attach attach -readonly -nobrowse -noautoopen -mountpoint "$dir/mnt" "$dmg" >/dev/null || exit 1
   echo "==> codesign --verify --strict --deep: $app in $(basename "$dmg"), then a copy installed from it"
   if ! codesign --verify --strict --deep --verbose=2 "$dir/mnt/$app"; then
     rc=1
   elif ! ditto "$dir/mnt/$app" "$dir/copy/$app" || ! codesign --verify --strict --deep --verbose=2 "$dir/copy/$app"; then
     rc=1
   fi
-  rm -rf "$dir/copy"
-  if hdiutil_retry detach detach "$dir/mnt" >/dev/null; then
-    rm -rf "$dir"
-  else
-    echo "error: could not detach $dir/mnt" >&2
-    rc=1
-  fi
   if [[ "$rc" != 0 ]]; then
     echo "error: $app in $(basename "$dmg") fails codesign --verify --strict --deep" >&2
   fi
-  return "$rc"
+  exit "$rc"
+)
+
+# check_dmg_app's EXIT trap. Whatever is mounted on <dir>/mnt is detached (found by its device, not
+# a flag, so an image attached just before a signal goes too), then <dir> is removed. Exits with
+# <status>, or 1 when the image won't detach (then <dir> stays, with the mount in it).
+# Usage: dmg_check_cleanup <dir> <status>
+dmg_check_cleanup() {
+  local dir="$1" rc="$2" dev
+  dev="$(stat -f %d "$dir/mnt" 2>/dev/null)" || dev=""
+  if [[ -n "$dev" && "$dev" != "$(stat -f %d "$dir")" ]] && ! hdiutil_retry detach detach "$dir/mnt" >/dev/null; then
+    echo "error: could not detach $dir/mnt" >&2
+    exit 1
+  fi
+  rm -rf "$dir"
+  exit "$rc"
 }

@@ -45,6 +45,27 @@ echo "test licence" >"$CRAFT_FONTS_DIR/fonts/test-sans/OFL.txt"
 DMG="$DIST/photocraft-$VERSION-macos-$ARCH.dmg"
 check_dmg_app "$DMG" PhotoCraft.app || fail "the app in $(basename "$DMG") fails codesign --strict"
 
+# Interrupted while the image is mounted (SIGTERM, as a cancelled job gets it: a stand-in codesign
+# sends it to the check), the check still detaches the image and removes its scratch directory.
+mkdir "$TMP/stub" "$TMP/interrupted"
+cat >"$TMP/stub/codesign" <<'EOF'
+#!/bin/sh
+kill -TERM "$PPID"
+EOF
+chmod +x "$TMP/stub/codesign"
+if (
+  PATH="$TMP/stub:$PATH"
+  export RUNNER_TEMP="$TMP/interrupted"
+  check_dmg_app "$DMG" PhotoCraft.app
+) >/dev/null 2>&1; then
+  fail "check_dmg_app passed though it was interrupted"
+fi
+left="$(ls -A "$TMP/interrupted")"
+if [[ -n "$left" ]]; then
+  hdiutil detach -force "$TMP/interrupted/$left/mnt" >/dev/null 2>&1 || true
+  fail "an interrupted check_dmg_app left $left behind, its image still attached"
+fi
+
 # The check must catch the defect it guards against: the same staged files, imaged the old way.
 OLD="$TMP/makehybrid.dmg"
 hdiutil makehybrid -quiet -hfs -hfs-volume-name PhotoCraft -o "$OLD" "$CARGO_TARGET_DIR/macos-package/dmg"
@@ -70,4 +91,4 @@ case "$out" in
   *) fail "verify.sh rejected the makehybrid image for another reason: $out" ;;
 esac
 
-echo "ok: the app in the DMG passes codesign --strict; a makehybrid image of it is rejected by check_dmg_app and verify.sh"
+echo "ok: the app in the DMG passes codesign --strict; an interrupted check detaches; a makehybrid image of it is rejected by check_dmg_app and verify.sh"
