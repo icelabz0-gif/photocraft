@@ -173,7 +173,10 @@ pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &
         _ => PathBuf::from("."),
     };
     if !dir.exists() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("cannot save {}: the folder {} does not exist; create it first", path.display(), dir.display())));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("cannot save {}: the folder {} does not exist; create it first", path.display(), dir.display()),
+        ));
     }
 
     // Create a fresh temporary file next to the target (same directory, so the rename never
