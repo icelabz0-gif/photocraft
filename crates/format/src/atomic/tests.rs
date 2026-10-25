@@ -290,6 +290,35 @@ fn sweeping_a_missing_folder_is_a_no_op() {
     sweep_stale_temps(Path::new("/nonexistent-pc-6604/doc.psd"));
 }
 
+/// #6662 review: a bare relative name (`doc.psd`) has the empty path as its parent; the sweep
+/// must fall back to the current directory exactly like the write does.
+#[test]
+fn a_bare_relative_name_sweeps_the_current_folder() {
+    assert_eq!(sibling_dir(Path::new("doc.psd")), Path::new("."));
+    assert_eq!(sibling_dir(Path::new("./doc.psd")), Path::new("."));
+    assert_eq!(sibling_dir(Path::new("/some/dir/doc.psd")), Path::new("/some/dir"));
+}
+
+/// #6662 review: `temp_name` truncates at 64 chars, so two destinations sharing their first 64
+/// characters have indistinguishable temps. A save of one must not delete the other's orphan.
+#[cfg(unix)]
+#[test]
+fn a_long_destination_name_skips_the_ambiguous_sweep() {
+    let d = TempDir::new("sweep-long");
+    let stem: String = "l".repeat(64);
+    let one = d.0.join(format!("{stem}-one.psd"));
+    let two = d.0.join(format!("{stem}-two.psd"));
+    std::fs::write(&one, ORIGINAL).unwrap();
+    std::fs::write(&two, ORIGINAL).unwrap();
+    // A dead process's temp beside `two`, indistinguishable from one of `one`.
+    let foreign = d.0.join(format!(".{stem}.{}-0.pcsave.tmp", i32::MAX));
+    std::fs::write(&foreign, b"tmp").unwrap();
+
+    atomic_write(&one, b"new").unwrap();
+
+    assert!(foreign.exists(), "a 64-char name is ambiguous, so the sweep is skipped and the other file's temp survives");
+}
+
 #[test]
 fn sync_file_flushes_a_local_file() {
     let dir = TempDir::new("sync");

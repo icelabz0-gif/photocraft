@@ -166,11 +166,8 @@ pub fn atomic_write_with(fs: &dyn AtomicFs, retry: RenameRetry, path: &Path, byt
 pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &Path, bytes: &[u8], progress: &dyn Fn(f32)) -> io::Result<()> {
     let target = resolve_symlink(path);
     let name = target.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: not a file path", path.display())))?;
-    let dir = match target.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    std::fs::create_dir_all(&dir).map_err(|e| context(e, format!("cannot create the folder {}", dir.display())))?;
+    let dir = sibling_dir(&target);
+    std::fs::create_dir_all(dir).map_err(|e| context(e, format!("cannot create the folder {}", dir.display())))?;
 
     // Create a fresh temporary file next to the target (same directory, so the rename never
     // crosses a device). The name is unique per process and call; retry a few on collisions.
@@ -186,7 +183,7 @@ pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &
             Err(e) => {
                 // A partial temp file may exist; the destination was never touched.
                 let _ = fs.remove(&candidate);
-                return Err(write_error(e, path, &dir));
+                return Err(write_error(e, path, dir));
             }
         }
     }
@@ -203,7 +200,7 @@ pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &
     }
     // The new bytes are in place; a failed directory fsync can't be undone and must not report
     // the save as failed, so it is best effort.
-    let _ = fs.sync_dir(&dir);
+    let _ = fs.sync_dir(dir);
     // The save succeeded: clear any temp files an earlier interrupted save of this file left (#6604).
     sweep_stale_temps(&target);
     Ok(())
@@ -241,6 +238,15 @@ fn resolve_symlink(path: &Path) -> PathBuf {
     }
 }
 
+/// The directory to write beside `path`: its parent, or the current directory for a bare
+/// relative name (`doc.psd`'s parent is the empty path, which no file call accepts).
+fn sibling_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    }
+}
+
 /// A unique hidden temporary file name to write beside `file` before renaming over it.
 pub fn temp_name(file: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -266,10 +272,16 @@ const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 
 /// cleanup must never fail a save.
 pub fn sweep_stale_temps(path: &Path) {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return };
-    let Some(dir) = path.parent() else { return };
+    // `temp_name` truncates the file name to 64 chars: a name of 64 chars or more can share its
+    // temp prefix with another destination, so sweeping could delete that file's orphan. Skip
+    // the ambiguous case; the temps stay until the file they belong to is saved again.
+    if name.chars().count() >= 64 {
+        return;
+    }
+    let dir = sibling_dir(path);
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    // `temp_name` truncates the file name to 64 chars and prefixes a dot.
-    let stem: String = name.chars().take(64).collect();
+    // Below 64 chars the name is `temp_name`'s stem unchanged (see the guard above).
+    let stem = name;
     let prefix = format!(".{stem}.");
     for e in rd.flatten() {
         let entry_name = e.file_name();
