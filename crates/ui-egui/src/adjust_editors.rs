@@ -58,6 +58,8 @@ pub struct Edit {
     pub commit: bool,
     /// Open the host's gradient-file dialog without changing adjustment parameters.
     pub import_gradients: bool,
+    /// Black & White's Auto: the host fills in the weights for its image ([`apply_auto`]).
+    pub auto: bool,
 }
 
 impl Edit {
@@ -65,6 +67,7 @@ impl Edit {
         self.changed |= o.changed;
         self.commit |= o.commit;
         self.import_gradients |= o.import_gradients;
+        self.auto |= o.auto;
     }
     fn discrete(changed: bool) -> Self {
         Edit { changed, commit: changed, ..Default::default() }
@@ -1160,6 +1163,9 @@ fn black_white(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
             v["tintColor"] = json!(adjust_params::hex(c));
         }
         e.add(r);
+        if widgets::secondary_button(ui, tl!("Auto"), 0.0).on_hover_text(tl!("A grey mix that spreads the image's tones")).clicked() {
+            e.auto = true;
+        }
         if widgets::secondary_button(ui, tl!("Default"), 0.0).clicked() {
             for (i, key) in HUE_RANGES.iter().enumerate() {
                 v[*key] = json!(adjust_params::BW_DEFAULTS[i]);
@@ -1168,6 +1174,23 @@ fn black_white(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
         }
     });
     e
+}
+
+/// Black & White's Auto (#9269): the weights `image.adjustments.blackWhite.auto` finds for
+/// `layer` (an adjustment layer: the image under it; a pixel layer: its pixels) into `v`, as one
+/// discrete edit of `e`.
+pub fn apply_auto(app: &mut crate::PhotocraftApp, v: &mut Value, layer: Option<photocraft_doc::LayerId>, e: &mut Edit) {
+    let p = layer.map_or(json!({}), |id| json!({"layer": id.0}));
+    match app.run("image.adjustments.blackWhite.auto", p) {
+        Ok(Value::Object(w)) => {
+            for (k, x) in w {
+                v[k] = x;
+            }
+            e.add(Edit::discrete(true));
+        }
+        Ok(_) => {}
+        Err(err) => app.ui.status = err,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1669,9 +1692,12 @@ pub fn layer_editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: LayerId, adj
     if matches!(kind, "levels" | "curves") {
         crate::layer_picker::controls(app, ui, id);
     }
-    let e = editor(ui, kind, &mut values, &cx);
+    let mut e = editor(ui, kind, &mut values, &cx);
     if e.import_gradients {
         crate::preset_files_ui::import_gradients_dialog(app);
+    }
+    if e.auto {
+        apply_auto(app, &mut values, Some(id), &mut e);
     }
     if e.changed {
         app.live_adjust = Some((id, values.clone()));
