@@ -42,6 +42,12 @@ pub enum Kind {
     /// A `"#rrggbb"` colour (`color`, or `color=#rrggbb` with a default), picked with a swatch.
     /// Without a default the param stays unset until a colour is picked.
     Color(Option<[f32; 3]>),
+    /// A point `[x, y]` in percent of the canvas (`point=[x,y]`, a plug-in `point` param): two
+    /// fields in the dialog and a handle dragged on the canvas (`plugin_points`).
+    Point([f32; 2]),
+    /// A direction in degrees, 0-360 (`angle=45`, a plug-in `angle` param): 0 points right and the
+    /// angle grows clockwise on screen. A dial with a number field beside it.
+    Angle(f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +120,11 @@ pub fn parse_spec(spec: &str) -> Vec<Param> {
             Kind::Color(crate::color_picker_ui::parse_hex(default))
         } else if v == "doc" {
             Kind::Document
+        } else if let Some(d) = v.strip_prefix("angle") {
+            let d = d.trim_start_matches('=').trim().parse::<f64>().ok().and_then(photocraft_plugins::wrap_angle).unwrap_or(0.0);
+            Kind::Angle(d as f32)
+        } else if let Some(d) = v.strip_prefix("point") {
+            Kind::Point(parse_point(d.trim_start_matches('=')))
         } else if v == "json" || v.starts_with("layer id") || v.starts_with('[') || v.starts_with('{') || v.trim_end_matches('?') == "index|name" {
             // `index|name`: a reference (an alpha channel…) the dialog sets through another control.
             Kind::Json
@@ -134,6 +145,23 @@ pub fn parse_spec(spec: &str) -> Vec<Param> {
         out.push(Param { key, kind });
     }
     out
+}
+
+/// `[x,y]` of a `point=[x,y]` default; the canvas centre when it is missing or malformed.
+fn parse_point(s: &str) -> [f32; 2] {
+    let nums: Vec<f32> = s.trim().trim_start_matches('[').trim_end_matches(']').split(',').filter_map(|n| n.trim().parse().ok()).collect();
+    match nums.as_slice() {
+        [x, y] if x.is_finite() && y.is_finite() => [x.clamp(0.0, 100.0), y.clamp(0.0, 100.0)],
+        _ => [50.0, 50.0],
+    }
+}
+
+/// The parameter spec a dialog's fields follow: its own (`__spec`, plug-ins) or its command's.
+pub(crate) fn spec_of(f: &Map<String, Value>) -> Option<String> {
+    match f.get("__spec").and_then(Value::as_str) {
+        Some(s) => Some(s.to_string()),
+        None => photocraft_engine::commands::find(f.get("__command").and_then(Value::as_str)?).map(|c| c.params.to_string()),
+    }
 }
 
 /// The number a range bound starts with, ignoring a unit or marker after it: `5000 px?` → 5000,
@@ -246,10 +274,13 @@ const FULL_RESOLUTION_PREVIEW: &[&str] = &[
 
 /// Whether `command` with `params` previews at full resolution: [`FULL_RESOLUTION_PREVIEW`], every
 /// Filter Gallery filter (its strokes, grain and textures are sized in pixels; the settings are
-/// abstract levels, not lengths) and the dithered colour-mode conversions (Indexed Color, Bitmap).
+/// abstract levels, not lengths), plug-ins that mark no parameter `"unit": "px"` (their lengths
+/// can't be scaled to a reduced copy, so bevels and shadows would preview enlarged), and the
+/// dithered colour-mode conversions (Indexed Color, Bitmap).
 fn full_resolution_preview(command: &str, params: &Value) -> bool {
     let choice = |key: &str| params.get(key).and_then(Value::as_str);
     FULL_RESOLUTION_PREVIEW.contains(&command)
+        || (command == "plugin.run" && !photocraft_engine::plugin_cmds::declares_pixel_units(params))
         || command.starts_with("filter.gallery.")
         || (command == "image.mode.indexedColor" && choice("dither") != Some("none"))
         || (command == "image.mode.bitmap" && !matches!(choice("method"), Some("threshold" | "threshold50")))
@@ -385,6 +416,8 @@ fn default_value(app: &PhotocraftApp, command: &str, p: &Param) -> Option<Value>
             json!(crate::color_picker_ui::hex([fg[0], fg[1], fg[2]]))
         }
         Kind::Color(None) => return None,
+        Kind::Point(p) => json!(p),
+        Kind::Angle(a) => json!(a),
         // Colour inputs come from the current swatches, so the proxy preview matches the result.
         Kind::Json if p.key == "foreground" => json!(app.session.tools.foreground),
         Kind::Json if p.key == "background" => json!(app.session.tools.background),
@@ -576,6 +609,8 @@ pub fn open_with_spec(app: &mut PhotocraftApp, command: &str, label: &str, spec:
             Kind::Bool(default) => json!(default),
             Kind::Int { default } => json!(default),
             Kind::Color(Some(rgb)) => json!(crate::color_picker_ui::hex(*rgb)),
+            Kind::Point(p) => json!(p),
+            Kind::Angle(a) => json!(a),
             _ => continue,
         };
         fields.insert(p.key, v);
@@ -600,23 +635,107 @@ pub(crate) fn source_label(key: &str) -> String {
     if key.contains(' ') {
         return key.to_string();
     }
-    // camelCase → "Camel Case"
+    // snake_case and camelCase → "Snake Case" / "Camel Case".
     let mut s = String::new();
-    for (i, ch) in key.chars().enumerate() {
-        if i == 0 {
-            s.extend(ch.to_uppercase());
-        } else if ch.is_uppercase() {
+    let mut capitalize = true;
+    for ch in key.chars() {
+        if ch == '_' || ch == '-' {
             s.push(' ');
-            s.push(ch);
+            capitalize = true;
+        } else if ch.is_uppercase() {
+            if !s.is_empty() && !s.ends_with(' ') {
+                s.push(' ');
+            }
+            s.extend(ch.to_uppercase());
+            capitalize = false;
         } else {
-            s.push(ch);
+            if capitalize {
+                s.extend(ch.to_uppercase());
+            } else {
+                s.extend(ch.to_lowercase());
+            }
+            capitalize = false;
         }
     }
     s
 }
 
+/// Whether manifest-declared equality conditions for `key` currently match the dialog values.
+/// Conditions are ANDed; manifests validate controllers and inherited visibility predicates.
+pub(crate) fn param_visible(f: &Map<String, Value>, key: &str) -> bool {
+    let Some(conditions) = f.get("__visibleWhen").and_then(Value::as_object).and_then(|all| all.get(key)).and_then(Value::as_object) else { return true };
+    conditions.iter().all(|(controller, expected)| f.get(controller) == Some(expected))
+}
+
+fn field_label(f: &Map<String, Value>, key: &str) -> String {
+    f.get("__labels").and_then(Value::as_object).and_then(|labels| labels.get(key)).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| label(key))
+}
+
 fn choice_label(v: &str) -> String {
     label(v)
+}
+
+/// A suite's effect selector stays above its preset row and its scrollable controls.
+pub(crate) fn selector_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    let Some(key) = f.get("__presetSelector").and_then(Value::as_str).map(str::to_owned) else { return };
+    let Some(spec) = spec_of(f) else { return };
+    let Some(Param { kind: Kind::Choice { options, default }, .. }) = parse_spec(&spec).into_iter().find(|p| p.key == key) else { return };
+    choice_row(ui, f, &key, &options, default.as_deref());
+    ui.add_space(6.0);
+}
+
+fn choice_row(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, options: &[String], default: Option<&str>) {
+    let t = Tokens::get(ui.ctx());
+    let cmd = f.get("__command").and_then(Value::as_str).unwrap_or_default().to_string();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(field_label(f, key)).color(t.text_dim));
+        let initial = default.or_else(|| options.first().map(String::as_str)).unwrap_or("");
+        let mut cur = f.get(key).and_then(Value::as_str).unwrap_or(initial).to_string();
+        let labels: Vec<String> = options.iter().map(|o| choice_label(o)).collect();
+        let mut opts: Vec<(String, &str)> = options.iter().cloned().zip(labels.iter().map(String::as_str)).collect();
+        // Lens Blur's Source: each alpha channel by its name, in place of `channel`.
+        let depth = cmd == LENS_BLUR && key == "depthMap";
+        let names: Vec<String> = if depth {
+            f.get("__channels").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+        } else {
+            Vec::new()
+        };
+        let channels: Vec<String> = (0..names.len()).map(channel_choice).collect();
+        if depth {
+            opts.retain(|(v, _)| v != "channel");
+            opts.extend(channels.iter().cloned().zip(names.iter().map(String::as_str)));
+            if cur == "channel"
+                && let Some(i) = f.get("depthChannel").and_then(|v| channel_index(v, &names))
+            {
+                cur = channel_choice(i);
+            }
+        }
+        // Like Photoshop, the profile menus also list the profiles installed in the
+        // system (printer and paper profiles, press conditions), by description.
+        let lists_installed = installed_filter(&cmd, key).is_some();
+        let installed = if lists_installed { installed_choices(&cmd, key, &photocraft_engine::installed_profiles::installed()) } else { Vec::new() };
+        opts.extend(installed.iter().map(|(path, description)| (path.clone(), description.as_str())));
+        // Assign Profile: only what the document's colour mode can take (#4951).
+        if key == "profile"
+            && let Some(allowed) = f.get("__profiles").and_then(Value::as_array)
+        {
+            opts.retain(|(v, _)| allowed.iter().any(|a| a.as_str() == Some(v.as_str())));
+        }
+        // A profile given by path that isn't listed (typed by an agent, or spelled with
+        // different case) still shows, by its file name, instead of a blank menu.
+        let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if lists_installed && !opts.iter().any(|(v, _)| *v == cur) {
+            opts.push((cur.clone(), stem.as_str()));
+        }
+        crate::widgets::dropdown(ui, &format!("flt-{cmd}-{}", key), &mut cur, &opts, 170.0);
+        if let Some(i) = cur.strip_prefix("channel:").filter(|_| depth).and_then(|i| i.parse::<usize>().ok()) {
+            f.insert("depthChannel".into(), json!(i));
+            cur = "channel".into();
+        } else if depth {
+            f.remove("depthChannel");
+        }
+        f.insert(key.to_string(), json!(cur));
+    });
 }
 
 fn uses_logarithmic_slider(min: f32, max: f32) -> bool {
@@ -781,17 +900,50 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let cmd = f.get("__command").and_then(Value::as_str).unwrap_or_default().to_string();
     // Plug-in dialogs carry their own spec (from the plug-in's manifest).
-    let spec = match f.get("__spec").and_then(Value::as_str) {
-        Some(s) => s.to_string(),
-        None => match photocraft_engine::commands::find(&cmd) {
-            Some(c) => c.params.to_string(),
-            None => return,
-        },
-    };
+    let Some(spec) = spec_of(f) else { return };
     if crate::select_mask_view::owns(f) {
         crate::select_mask_view::controls(ui, f);
     }
-    for p in parse_spec(&spec) {
+    // Ungrouped parameters (including the effect selector) render before the tabbed controls.
+    // Tabs are filtered against the current visible parameters so changing an effect also changes
+    // its tabs and repairs a selection that belonged to the previous effect.
+    let (all_tabs, group_of) = tabs_of(f);
+    let mut params = parse_spec(&spec);
+    params.sort_by_key(|p| group_of.contains_key(&p.key));
+    let tabs: Vec<String> = all_tabs
+        .into_iter()
+        .filter(|tab| {
+            params.iter().any(|p| {
+                f.get("__presetSelector").and_then(Value::as_str) != Some(p.key.as_str()) && group_of.get(&p.key) == Some(tab) && param_visible(f, &p.key)
+            })
+        })
+        .collect();
+    let mut selected = selected_tab(f, &tabs);
+    f.insert(TAB.into(), json!(selected));
+    let mut tab_row = tabs.len() > 1;
+    for p in params {
+        if f.get("__presetSelector").and_then(Value::as_str) == Some(p.key.as_str()) || !param_visible(f, &p.key) {
+            continue;
+        }
+        if let Some(group) = group_of.get(&p.key) {
+            if std::mem::take(&mut tab_row) {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    for name in &tabs {
+                        let response = crate::widgets::pill_tab(ui, name, *name == selected);
+                        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), *name == selected, name));
+                        if response.clicked() {
+                            selected.clone_from(name);
+                        }
+                    }
+                });
+                f.insert(TAB.into(), json!(selected));
+                ui.add_space(6.0);
+            }
+            if *group != selected {
+                continue;
+            }
+        }
         if zoom_center::owns(&cmd, f) && matches!(p.key.as_str(), "centerX" | "centerY") {
             if p.key == "centerX" {
                 zoom_center::row(ui, f);
@@ -803,7 +955,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 let mut v = f.get(&p.key).and_then(Value::as_f64).unwrap_or(default as f64) as f32;
                 if cmd == "image.mode.indexedColor" && p.key == "colors" {
                     let mut count = v.round().clamp(2.0, 256.0) as u32;
-                    crate::widgets::color_count_row(ui, &label(&p.key), &mut count);
+                    crate::widgets::color_count_row(ui, &field_label(f, &p.key), &mut count);
                     f.insert(p.key, json!(count));
                     continue;
                 }
@@ -829,7 +981,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                         // Keep one numeric field for direct entry and one log-scaled slider for
                         // wide ranges. slider_row would add a second, linear slider (#146).
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
+                            ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 crate::widgets::value_field(ui, &mut v, min..=max, unit, 74.0);
                             });
@@ -842,7 +994,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     } else {
                         // A double-click on the slider puts it back to the filter's default.
                         let gestures = crate::widgets::RowGestures { reset: Some(default), wheel_step: None, ..Default::default() };
-                        crate::widgets::slider_row_with(ui, &label(&p.key), &mut v, min..=max, unit, None, gestures);
+                        crate::widgets::slider_row_with(ui, &field_label(f, &p.key), &mut v, min..=max, unit, None, gestures);
                     }
                 });
                 // Small ranges (0–1 thresholds and centres) keep the two decimals their field shows.
@@ -850,66 +1002,17 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 f.insert(p.key, json!((v * scale).round() / scale));
             }
             Kind::Choice { options, default } => {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
-                    let initial = default.as_deref().or_else(|| options.first().map(String::as_str)).unwrap_or("");
-                    let mut cur = f.get(&p.key).and_then(Value::as_str).unwrap_or(initial).to_string();
-                    let labels: Vec<String> = options.iter().map(|o| choice_label(o)).collect();
-                    let mut opts: Vec<(String, &str)> = options.iter().cloned().zip(labels.iter().map(String::as_str)).collect();
-                    // Lens Blur's Source: each alpha channel by its name, in place of `channel`.
-                    let depth = cmd == LENS_BLUR && p.key == "depthMap";
-                    let names: Vec<String> = if depth {
-                        f.get("__channels").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let channels: Vec<String> = (0..names.len()).map(channel_choice).collect();
-                    if depth {
-                        opts.retain(|(v, _)| v != "channel");
-                        opts.extend(channels.iter().cloned().zip(names.iter().map(String::as_str)));
-                        if cur == "channel"
-                            && let Some(i) = f.get("depthChannel").and_then(|v| channel_index(v, &names))
-                        {
-                            cur = channel_choice(i);
-                        }
-                    }
-                    // Like Photoshop, the profile menus also list the profiles installed in the
-                    // system (printer and paper profiles, press conditions), by description.
-                    let lists_installed = installed_filter(&cmd, &p.key).is_some();
-                    let installed =
-                        if lists_installed { installed_choices(&cmd, &p.key, &photocraft_engine::installed_profiles::installed()) } else { Vec::new() };
-                    opts.extend(installed.iter().map(|(path, description)| (path.clone(), description.as_str())));
-                    // Assign Profile: only what the document's colour mode can take (#4951).
-                    if p.key == "profile"
-                        && let Some(allowed) = f.get("__profiles").and_then(Value::as_array)
-                    {
-                        opts.retain(|(v, _)| allowed.iter().any(|a| a.as_str() == Some(v.as_str())));
-                    }
-                    // A profile given by path that isn't listed (typed by an agent, or spelled with
-                    // different case) still shows, by its file name, instead of a blank menu.
-                    let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if lists_installed && !opts.iter().any(|(v, _)| *v == cur) {
-                        opts.push((cur.clone(), stem.as_str()));
-                    }
-                    crate::widgets::dropdown(ui, &format!("flt-{cmd}-{}", p.key), &mut cur, &opts, 170.0);
-                    if let Some(i) = cur.strip_prefix("channel:").filter(|_| depth).and_then(|i| i.parse::<usize>().ok()) {
-                        f.insert("depthChannel".into(), json!(i));
-                        cur = "channel".into();
-                    } else if depth {
-                        f.remove("depthChannel");
-                    }
-                    f.insert(p.key.clone(), json!(cur));
-                });
+                choice_row(ui, f, &p.key, &options, default.as_deref());
             }
             Kind::Bool(default) => {
                 let mut b = f.get(&p.key).and_then(Value::as_bool).unwrap_or(default);
-                crate::widgets::checkbox(ui, &mut b, &label(&p.key));
+                crate::widgets::checkbox(ui, &mut b, &field_label(f, &p.key));
                 f.insert(p.key, json!(b));
             }
             Kind::Text => {
                 let mut v = f.get(&p.key).and_then(Value::as_str).unwrap_or_default().to_string();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
+                    ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
                     ui.add(egui::TextEdit::singleline(&mut v).desired_width(200.0));
                     // Install Plug-in…: pick the .wasm file instead of typing its path (#7531).
                     if cmd == "plugin.install" && p.key == "path" && crate::widgets::secondary_button(ui, tl!("Browse…"), 0.0).clicked() {
@@ -930,7 +1033,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 let mut opts: Vec<(String, &str)> = vec![("-1".to_string(), tl!("None"))];
                 opts.extend(names.iter().enumerate().map(|(i, n)| (i.to_string(), n.as_str())));
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
+                    ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
                     crate::widgets::dropdown(ui, &format!("flt-{cmd}-{}", p.key), &mut sel, &opts, 170.0);
                 });
                 match sel.parse::<i64>() {
@@ -943,7 +1046,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 let mut vals: Vec<f32> =
                     f.get(&p.key).and_then(Value::as_array).map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
                 vals.resize(n, 0.0);
-                ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
+                ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
                 egui::Grid::new(format!("flt-grid-{cmd}-{}", p.key)).spacing([4.0, 4.0]).show(ui, |ui| {
                     for (i, v) in vals.iter_mut().enumerate() {
                         crate::widgets::value_field(ui, v, -999.0..=999.0, "", 44.0);
@@ -960,7 +1063,22 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 let rgb = set.or(default).unwrap_or([0.0; 3]);
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                 let bytes = rgb.map(q);
-                let name = label(&p.key);
+                let name = field_label(f, &p.key);
+                if cmd == "plugin.run" {
+                    // Plug-in colours: egui's popup picker edits the field continuously, so the live
+                    // preview follows the colour as it changes (the modal Color Picker sets it on OK).
+                    let mut edit = bytes;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&name).color(t.text_dim));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::widgets::color_edit_button_srgb(ui, &mut edit).on_hover_text(&name);
+                            ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
+                        });
+                    });
+                    let picked = if edit == bytes { rgb } else { edit.map(|b| f32::from(b) / 255.0) };
+                    f.insert(p.key.clone(), json!(crate::color_picker_ui::hex(picked)));
+                    continue;
+                }
                 let mut clicked = false;
                 let eyedropper = cmd == REPLACE_COLOR && p.key == "color";
                 ui.horizontal(|ui| {
@@ -987,10 +1105,31 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     crate::color_picker_ui::request_field(f, &p.key, &crate::color_picker_ui::title_for(&name));
                 }
             }
+            Kind::Point(default) => {
+                // The same value the canvas handle drags (`plugin_points`), so the two stay in sync.
+                let [mut x, mut y] = crate::plugin_points::value(f, &p.key).unwrap_or(default);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::widgets::value_field(ui, &mut y, 0.0..=100.0, "%", 64.0);
+                        ui.label(egui::RichText::new("Y").color(t.text_dim));
+                        crate::widgets::value_field(ui, &mut x, 0.0..=100.0, "%", 64.0);
+                        ui.label(egui::RichText::new("X").color(t.text_dim));
+                    });
+                });
+                // Clamp only: rounding here would quietly change presets and defaults every frame.
+                f.insert(p.key, json!([x.clamp(0.0, 100.0), y.clamp(0.0, 100.0)]));
+            }
+            Kind::Angle(default) => {
+                let mut deg = f.get(&p.key).and_then(Value::as_f64).and_then(photocraft_plugins::wrap_angle).map_or(default, |a| a as f32);
+                angle_dial_row(ui, &field_label(f, &p.key), &mut deg);
+                let deg = photocraft_plugins::wrap_angle(f64::from(deg)).unwrap_or(0.0);
+                f.insert(p.key, json!(deg));
+            }
             Kind::Int { default } => {
                 let mut v = f.get(&p.key).and_then(Value::as_f64).unwrap_or(default as f64) as f32;
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
+                    ui.label(egui::RichText::new(field_label(f, &p.key)).color(t.text_dim));
                     crate::widgets::value_field(ui, &mut v, -30000.0..=30000.0, "", 80.0);
                     // A seed gets a fresh random value in one click (#5710): Clouds, Add Noise,
                     // Fibers… then render a new pattern, as each run of Photoshop's does.
@@ -1024,6 +1163,82 @@ fn random_seed(entropy: u64, current: i64) -> i64 {
     let h = std::collections::hash_map::RandomState::new().hash_one(entropy);
     let seed = (h % 30_001) as i64;
     if seed == current { (seed + 1) % 30_001 } else { seed }
+}
+
+/// Diameter of the angle dial, in points.
+const DIAL: f32 = 64.0;
+
+/// The angle a pointer at `rel` (relative to the dial's centre, screen coordinates: y down) sets:
+/// whole degrees in 0..360, 0 pointing right (east) and growing clockwise on screen, so due south
+/// is 90 and due north 270. `None` too close to the centre to have a direction.
+pub fn dial_angle(rel: egui::Vec2) -> Option<f32> {
+    (rel.length_sq() > 1.0).then(|| rel.y.atan2(rel.x).to_degrees().round().rem_euclid(360.0))
+}
+
+/// A plug-in `angle` row: the label, a dial (drag anywhere on it to point the handle at the
+/// pointer; arrow keys step it by a degree when it has focus) and a number field kept in sync.
+/// Typed values outside 0-360 wrap when the caller stores them.
+fn angle_dial_row(ui: &mut egui::Ui, name: &str, deg: &mut f32) {
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(name).color(t.text_dim));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::widgets::value_field(ui, deg, -36000.0..=36000.0, "°", 64.0);
+            let (rect, mut dial) = ui.allocate_exact_size(egui::vec2(DIAL, DIAL), egui::Sense::click_and_drag());
+            dial.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), name));
+            let c = rect.center();
+            if (dial.clicked() || dial.dragged())
+                && let Some(a) = dial.interact_pointer_pos().and_then(|pos| dial_angle(pos - c))
+            {
+                *deg = a;
+                dial.mark_changed();
+            }
+            if dial.has_focus() {
+                let step = ui.input(|i| {
+                    i.num_presses(egui::Key::ArrowRight) as f32 + i.num_presses(egui::Key::ArrowDown) as f32
+                        - i.num_presses(egui::Key::ArrowLeft) as f32
+                        - i.num_presses(egui::Key::ArrowUp) as f32
+                });
+                if step != 0.0 {
+                    *deg = (deg.round() + step).rem_euclid(360.0);
+                    dial.mark_changed();
+                }
+            }
+            let painter = ui.painter();
+            let radius = DIAL / 2.0 - 5.0;
+            painter.circle(c, radius, t.field, egui::Stroke::new(1.0, t.field_border));
+            let r = deg.to_radians();
+            // Clockwise on screen: y grows downwards.
+            let handle = c + egui::vec2(r.cos(), r.sin()) * radius;
+            painter.line_segment([c, handle], egui::Stroke::new(2.0, t.accent));
+            painter.circle_filled(c, 2.0, t.text_dim);
+            painter.circle(handle, 4.0, egui::Color32::WHITE, egui::Stroke::new(1.0, t.accent));
+            if dial.has_focus() {
+                painter.circle_stroke(c, radius + 3.0, egui::Stroke::new(1.0, t.accent));
+            }
+            let _ = dial.on_hover_text(tl!("Drag to set the direction"));
+        });
+    });
+}
+
+/// The selected tab of a plug-in dialog with grouped params.
+const TAB: &str = "__tab";
+
+/// A plug-in dialog's tabs (`__tabs`, in order) and each grouped param's tab (`__groupOf`).
+fn tabs_of(f: &Map<String, Value>) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let tabs = f.get("__tabs").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let group_of = f
+        .get("__groupOf")
+        .and_then(Value::as_object)
+        .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|g| (k.clone(), g.to_string()))).collect())
+        .unwrap_or_default();
+    (tabs, group_of)
+}
+
+/// The dialog's selected tab: `__tab` when it names one of `tabs`, else the first.
+fn selected_tab(f: &Map<String, Value>, tabs: &[String]) -> String {
+    let chosen = f.get(TAB).and_then(Value::as_str).filter(|t| tabs.iter().any(|n| n == t));
+    chosen.or(tabs.first().map(String::as_str)).unwrap_or_default().to_string()
 }
 
 /// User-facing params (strip the dialog's private `__` keys).
@@ -2273,6 +2488,24 @@ mod tests {
         }
     }
 
+    /// A plug-in that marks no param `"unit": "px"` doesn't say which lengths are document pixels,
+    /// so a reduced proxy would enlarge its bevels, shadows and textures relative to Apply.
+    #[test]
+    fn plugin_previews_keep_document_pixel_scale_without_a_units_contract() {
+        for params in [
+            json!({"id": "test.preview-scale", "effect": "bevel", "bevel_size": 8.0}),
+            json!({"id": "test.preview-scale", "params": {"effect": "shadow", "shadow_distance": 15.0}}),
+            json!({"id": "test.preview-scale"}),
+        ] {
+            for requested in [1, 2, 3, 8] {
+                assert_eq!(preview_factor("plugin.run", &params, requested), 1, "{params}, factor {requested}");
+            }
+        }
+        // Built-ins whose pixel controls can be scaled retain their reduced previews.
+        assert_eq!(preview_factor("filter.blur.gaussianBlur", &json!({"radius": 8.0}), 4), 4);
+        assert_eq!(preview_factor("filter.pixelate.mosaic", &json!({"cellSize": 10.0}), 4), 2);
+    }
+
     /// #2063: proxy previews scaled what isn't a length (Tree's canvas fraction, Lens Correction's
     /// perspective), clamped negative lengths to +0.1 (Offset left/up), left Shadows/Highlights'
     /// radii in document pixels and rounded Mosaic's 10 px cells to 3 proxy px (12 px).
@@ -2866,5 +3099,201 @@ mod tests {
         let px = |x: i32| doc.layers[0].surface().unwrap().read_region(photocraft_geom::Rect::new(x, 5, x + 1, 6));
         assert!(px(2)[1] > 0.5, "near the point: shifted to green {:?}", px(2));
         assert!(px(38)[0] > 0.9 && px(38)[1] < 0.1, "far away: still red {:?}", px(38));
+    }
+
+    #[test]
+    fn point_params_open_with_their_defaults_and_pass_through_unchanged() {
+        let spec = r#"{"start":point=[12,12.5],"end":point=[88,62],"bad":point=[1],"amount":0..100=50}"#;
+        let kinds: Vec<Kind> = parse_spec(spec).into_iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            [Kind::Point([12.0, 12.5]), Kind::Point([88.0, 62.0]), Kind::Point([50.0, 50.0]), Kind::Range { min: 0.0, max: 100.0, default: 50.0 }]
+        );
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        let mut fixed = Map::new();
+        fixed.insert("id".into(), json!("org.example.bolt"));
+        open_with_spec(&mut app, "plugin.run", "Bolt", spec, fixed);
+        let fields = &mut app.ui.dialogs.last_mut().unwrap().fields;
+        assert_eq!(fields["start"], json!([12.0, 12.5]));
+        fields.insert("end".into(), json!([33.25, 70.0]));
+        let params = params_of(fields);
+        assert_eq!(params["start"], json!([12.0, 12.5]));
+        assert_eq!(params["end"], json!([33.25, 70.0]), "a point value reaches the command unchanged");
+        assert_eq!(params["id"], json!("org.example.bolt"));
+    }
+
+    #[test]
+    fn plugin_color_params_open_with_their_defaults_and_pass_through_unchanged() {
+        let m = photocraft_plugins::Manifest::parse(
+            br##"{"id":"org.example.bolt","name":"Bolt","kind":"filter",
+                "params":{"inner":{"type":"color","default":"#CFEAFF"},"outer":{"type":"color","default":"#5a8cff"}}}"##,
+        )
+        .unwrap();
+        let spec = m.params_notation();
+        let kinds: Vec<Kind> = parse_spec(&spec).into_iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [Kind::Color(crate::color_picker_ui::parse_hex("#cfeaff")), Kind::Color(crate::color_picker_ui::parse_hex("#5a8cff"))]);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        let mut fixed = Map::new();
+        fixed.insert("id".into(), json!("org.example.bolt"));
+        open_with_spec(&mut app, "plugin.run", "Bolt", &spec, fixed);
+        let fields = &mut app.ui.dialogs.last_mut().unwrap().fields;
+        assert_eq!((&fields["inner"], &fields["outer"]), (&json!("#cfeaff"), &json!("#5a8cff")));
+        // A colour the picker set survives drawing the dialog and reaches the plug-in unchanged.
+        fields.insert("inner".into(), json!("#ff8800"));
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |ui| body(ui, fields)).textures_delta.clear();
+        let params = params_of(fields);
+        assert_eq!(params["inner"], json!("#ff8800"));
+        assert_eq!(params["outer"], json!("#5a8cff"));
+        let resolved = m.resolve_params(&params).unwrap();
+        assert_eq!((&resolved["inner"], &resolved["outer"]), (&json!("#ff8800"), &json!("#5a8cff")));
+    }
+
+    #[test]
+    fn plugin_tabs_default_to_the_first_and_keep_every_tabs_values() {
+        let m = photocraft_plugins::Manifest::parse(
+            br##"{"id":"org.example.bolt","name":"Bolt","kind":"filter","params":{
+                "effect":{"type":"choice","options":["a","b"]},
+                "glow":{"type":"number","min":0,"max":1,"default":0.5,"group":"Glow"},
+                "start":{"type":"point","default":[12,12],"group":"Bolt"},
+                "inner":{"type":"color","default":"#ffffff","group":"Colour"}}}"##,
+        )
+        .unwrap();
+        let mut fixed = Map::new();
+        fixed.insert("id".into(), json!("org.example.bolt"));
+        fixed.insert("__tabs".into(), json!(m.tabs()));
+        fixed.insert("__groupOf".into(), json!({"glow": "Glow", "start": "Bolt", "inner": "Colour"}));
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        open_with_spec(&mut app, "plugin.run", "Bolt", &m.params_notation(), fixed);
+        let fields = &mut app.ui.dialogs.last_mut().unwrap().fields;
+        let (tabs, group_of) = tabs_of(fields);
+        assert_eq!(tabs, ["Glow", "Bolt", "Colour"]);
+        assert_eq!(group_of.get("effect"), None, "ungrouped: always visible");
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        ctx.run_ui(Default::default(), |ui| body(ui, fields)).textures_delta.clear();
+        assert_eq!(fields[TAB], json!("Glow"), "the first tab is selected");
+        // Another tab: the hidden tabs' values still reach the plug-in (and the live preview).
+        fields.insert(TAB.into(), json!("Colour"));
+        fields.insert("start".into(), json!([40.0, 60.0]));
+        ctx.run_ui(Default::default(), |ui| body(ui, fields)).textures_delta.clear();
+        assert_eq!(fields[TAB], json!("Colour"));
+        let params = params_of(fields);
+        assert_eq!(
+            (&params["effect"], &params["glow"], &params["start"], &params["inner"]),
+            (&json!("a"), &json!(0.5), &json!([40.0, 60.0]), &json!("#ffffff"))
+        );
+        assert!(params.get("__tab").is_none() && params.get("__tabs").is_none());
+        // A stale or unknown tab falls back to the first.
+        fields.insert(TAB.into(), json!("Gone"));
+        assert_eq!(selected_tab(fields, &tabs), "Glow");
+    }
+
+    #[test]
+    fn suite_controls_labels_and_tabs_follow_the_selected_effect_without_resetting_values() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let fields = json!({
+            "__command": "plugin.run", "__presetSelector": "effect",
+            "__spec": "{\"effect\":\"lightning|shadow|fire\",\"bolt_width\":0..100=5,\"glow_size\":0..100=10,\"inner_colour\":color=#ffffff,\"shadow_softness\":0..100=20,\"fire_style\":\"soft|hard\",\"fire_detail\":0..100=30}",
+            "__tabs": ["General", "Bolt", "Glow", "Colour", "Shadow"],
+            "__groupOf": {"effect": "General", "bolt_width": "Bolt", "glow_size": "Glow", "inner_colour": "Colour", "shadow_softness": "Shadow"},
+            "__labels": {"effect": "Effect", "bolt_width": "Bolt Width", "glow_size": "Glow Size", "inner_colour": "Inner Colour", "shadow_softness": "Shadow Softness", "fire_style": "Fire Style", "fire_detail": "Flame Detail"},
+            "__visibleWhen": {"bolt_width": {"effect": "lightning"}, "glow_size": {"effect": "lightning"}, "inner_colour": {"effect": "lightning"}, "shadow_softness": {"effect": "shadow"}, "fire_style": {"effect": "fire"}, "fire_detail": {"effect": "fire", "fire_style": "hard"}},
+            "effect": "lightning", "bolt_width": 7.0, "glow_size": 13.0, "inner_colour": "#ffaa00", "shadow_softness": 23.0, "fire_style": "soft", "fire_detail": 37.0
+        }).as_object().unwrap().clone();
+        let mut h = Harness::builder().with_size(egui::vec2(650.0, 600.0)).build_ui_state(
+            |ui, fields| {
+                if !ui.ctx().fonts(|fonts| fonts.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                selector_body(ui, fields);
+                body(ui, fields);
+            },
+            fields,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(4);
+        assert!(h.query_by_label("Effect").is_some());
+        assert!(h.query_by_label("General").is_none(), "the hoisted selector cannot create an empty tab");
+        assert!(h.query_by_label("Bolt Width").is_some());
+        assert!(h.query_by_label("Shadow Softness").is_none());
+        h.get_by_label("Glow").click();
+        h.run_steps(2);
+        assert_eq!(h.state()[TAB], json!("Glow"), "a tab click survives later frames");
+        assert!(h.query_by_label("Glow Size").is_some());
+        let values = params_of(h.state());
+
+        h.state_mut().insert("effect".into(), json!("shadow"));
+        h.run_steps(2);
+        assert_eq!(h.state()[TAB], json!("Shadow"), "a stale Lightning tab repairs to the visible group");
+        assert!(h.query_by_label("Shadow Softness").is_some());
+        for label in ["Bolt", "Glow", "Colour", "Shadow", "Bolt Width", "Glow Size", "Inner Colour"] {
+            assert!(h.query_by_label(label).is_none(), "single-group effect has no tabs or Lightning controls: {label}");
+        }
+        h.state_mut().insert("effect".into(), json!("fire"));
+        h.run_steps(2);
+        assert_eq!(h.state()[TAB], json!(""));
+        assert!(h.query_by_label("Fire Style").is_some());
+        assert!(h.query_by_label("Flame Detail").is_none(), "AND predicates hide subordinate controls");
+        h.state_mut().insert("fire_style".into(), json!("hard"));
+        h.run_steps(2);
+        assert!(h.query_by_label("Flame Detail").is_some());
+        h.state_mut().insert("effect".into(), json!("lightning"));
+        h.run_steps(2);
+        for key in ["bolt_width", "glow_size", "inner_colour", "shadow_softness", "fire_detail"] {
+            assert_eq!(h.state()[key], values[key], "switching effects preserves {key}");
+        }
+    }
+
+    #[test]
+    fn plugin_labels_use_explicit_text_or_readable_parameter_names() {
+        assert_eq!(source_label("shadow_softness"), "Shadow Softness");
+        assert_eq!(source_label("glowRadius"), "Glow Radius");
+        let f = json!({"__labels": {"lt_width": "Bolt Width"}}).as_object().unwrap().clone();
+        assert_eq!(field_label(&f, "lt_width"), "Bolt Width");
+        assert_eq!(field_label(&f, "shadow_softness"), label("shadow_softness"));
+    }
+
+    #[test]
+    fn plugin_dial_points_east_at_0_and_turns_clockwise() {
+        assert_eq!(dial_angle(egui::vec2(20.0, 0.0)), Some(0.0), "due east");
+        assert_eq!(dial_angle(egui::vec2(0.0, 20.0)), Some(90.0), "due south: clockwise on screen");
+        assert_eq!(dial_angle(egui::vec2(-20.0, 0.0)), Some(180.0), "due west");
+        assert_eq!(dial_angle(egui::vec2(0.0, -20.0)), Some(270.0), "due north");
+        assert_eq!(dial_angle(egui::vec2(20.0, -0.1)), Some(0.0), "just above east rounds to 0, not 360");
+        assert_eq!(dial_angle(egui::vec2(0.2, 0.2)), None, "the centre has no direction");
+    }
+
+    #[test]
+    fn plugin_angle_params_open_with_their_defaults_wrap_and_pass_through() {
+        let m = photocraft_plugins::Manifest::parse(
+            br#"{"id":"org.example.bolt","name":"Bolt","kind":"filter",
+                "params":{"direction":{"type":"angle","default":45,"group":"Bolt"},"tilt":{"type":"angle"}}}"#,
+        )
+        .unwrap();
+        let spec = m.params_notation();
+        let kinds: Vec<Kind> = parse_spec(&spec).into_iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [Kind::Angle(45.0), Kind::Angle(0.0)]);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        let mut fixed = Map::new();
+        fixed.insert("id".into(), json!("org.example.bolt"));
+        open_with_spec(&mut app, "plugin.run", "Bolt", &spec, fixed);
+        let fields = &mut app.ui.dialogs.last_mut().unwrap().fields;
+        assert_eq!((&fields["direction"], &fields["tilt"]), (&json!(45.0), &json!(0.0)));
+        let ctx = egui::Context::default();
+        let draw = |fields: &mut Map<String, Value>| ctx.run_ui(Default::default(), |ui| body(ui, fields)).textures_delta.clear();
+        // A value the dial or field set survives drawing and reaches the plug-in unchanged.
+        fields.insert("direction".into(), json!(137.5));
+        draw(fields);
+        let params = params_of(fields);
+        assert_eq!((&params["direction"], &params["tilt"]), (&json!(137.5), &json!(0.0)));
+        let resolved = m.resolve_params(&params).unwrap();
+        assert_eq!(resolved["direction"], json!(137.5));
+        // Out-of-range values from the dialog wrap into 0-360.
+        for (given, want) in [(370.0, 10.0), (-90.0, 270.0), (360.0, 360.0)] {
+            fields.insert("direction".into(), json!(given));
+            draw(fields);
+            assert_eq!(fields["direction"], json!(want), "{given}");
+        }
     }
 }
