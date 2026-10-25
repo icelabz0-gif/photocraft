@@ -697,6 +697,10 @@ fn stroke_params(app: &PhotocraftApp, d: &Drag, points: &[Vec<f64>]) -> serde_js
     if crate::eraser_ui::block_mode(app, tool) {
         p["block"] = json!(true);
     }
+    // With the tiles shown, what leaves one edge comes back at the other (#8883).
+    if app.ui.view.pattern_preview {
+        p["wrap"] = json!(true);
+    }
     p
 }
 
