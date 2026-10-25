@@ -555,10 +555,39 @@ pub(crate) fn shift_shape(doc: &Document, sh: &mut ShapeLayer, dx: f64, dy: f64)
 
 /// Applies an affine transform to a shape's path, keeping the live shape when the transform
 /// is a translation plus axis-aligned scale (otherwise the shape stops being parametric).
+/// Returns axial and perpendicular scales only when an affine transform keeps an
+/// arrowhead's local axes perpendicular. A skewed head cannot be regenerated
+/// faithfully from the current ArrowLine width and length parameters.
+fn arrow_axis_scales(a: &Affine, from: [f64; 2], to: [f64; 2]) -> Option<(f64, f64)> {
+    let [m0, m1, m2, m3, _, _] = a.m;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let old_length = dx.hypot(dy);
+    if !old_length.is_finite() || old_length <= 1e-12 {
+        return None;
+    }
+    let (ux, uy) = (dx / old_length, dy / old_length);
+    let (ax, ay) = (m0 * ux + m2 * uy, m1 * ux + m3 * uy);
+    let (px, py) = (-m0 * uy + m2 * ux, -m1 * uy + m3 * ux);
+    let axial = ax.hypot(ay);
+    let perpendicular = px.hypot(py);
+    if !axial.is_finite() || !perpendicular.is_finite() || axial <= 1e-12 || perpendicular <= 1e-12 {
+        return None;
+    }
+    let dot = ax * px + ay * py;
+    (dot.abs() <= 1e-10 * axial * perpendicular).then_some((axial, perpendicular))
+}
+
 pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
     sh.path = sh.path.transform(a);
     let [m0, m1, m2, m3, tx, ty] = a.m;
     let axis_aligned = m1.abs() < 1e-12 && m2.abs() < 1e-12 && m0 > 0.0 && m3 > 0.0;
+    // The path has already received the exact affine transform. Drop live arrow
+    // parameters if later edits would regenerate a different, unskewed head.
+    if let Some(LiveShape::ArrowLine { from, to, .. }) = sh.live.as_ref()
+        && arrow_axis_scales(a, *from, *to).is_none()
+    {
+        sh.live = None;
+    }
     sh.live = match (sh.live.take(), axis_aligned) {
         (Some(l), true) => {
             let r = |r: [f64; 4]| [r[0] * m0 + tx, r[1] * m3 + ty, r[2] * m0, r[3] * m3];
@@ -617,7 +646,19 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 LiveShape::Ellipse { rect } => Some(LiveShape::Ellipse { rect: r(rect) }),
                 LiveShape::Line { from, to, weight } => Some(LiveShape::Line { from: pt(from), to: pt(to), weight: weight * k }),
                 LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
-                    Some(LiveShape::ArrowLine { from: pt(from), to: pt(to), weight: weight * k, start, end, width: width * k, length: length * k, concavity })
+                    // Flips and quarter-turns can have different axial and perpendicular
+                    // scales; using the smaller axis for both loses arrowhead length.
+                    let (axial_scale, perpendicular_scale) = arrow_axis_scales(a, from, to).unwrap_or((k, k));
+                    Some(LiveShape::ArrowLine {
+                        from: pt(from),
+                        to: pt(to),
+                        weight: weight * perpendicular_scale,
+                        start,
+                        end,
+                        width: width * perpendicular_scale,
+                        length: length * axial_scale,
+                        concavity,
+                    })
                 }
                 _ => None,
             }
@@ -2063,3 +2104,33 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod arrow_affine_regression_tests {
+    use super::*;
+
+    #[test]
+    fn reflected_horizontal_arrow_uses_axial_scale_for_head_length() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [-2.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let (axial, perpendicular) = arrow_axis_scales(&a, [0.0, 0.0], [100.0, 0.0]).unwrap();
+        assert!((axial - 2.0).abs() < 1e-10);
+        assert!((perpendicular - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn anisotropic_diagonal_arrow_cannot_remain_parametric() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [2.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert!(arrow_axis_scales(&a, [0.0, 0.0], [100.0, 100.0]).is_none());
+    }
+
+    #[test]
+    fn uniform_scale_preserves_diagonal_arrow_axes() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [2.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let (axial, perpendicular) = arrow_axis_scales(&a, [0.0, 0.0], [100.0, 100.0]).unwrap();
+        assert!((axial - 2.0).abs() < 1e-10);
+        assert!((perpendicular - 2.0).abs() < 1e-10);
+    }
+}
