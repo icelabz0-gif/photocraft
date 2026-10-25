@@ -4899,6 +4899,7 @@ name = "photocraft-compose"
 version = "0.16.0"
 dependencies = [
  "criterion",
+ "photocraft-algo",
  "photocraft-cms",
  "photocraft-color",
  "photocraft-doc",
@@ -4998,6 +4999,7 @@ version = "0.16.0"
 dependencies = [
  "half",
  "log",
+ "photocraft-algo",
  "photocraft-cms",
  "photocraft-color",
  "photocraft-compose",
