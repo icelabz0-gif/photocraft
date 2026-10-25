@@ -3821,7 +3821,15 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         let refined = crate::select_mask_view::ants(app, idx);
         // A floating piece's ants hug the pixels being moved.
         let floated = floating_outline(app, idx);
+        // Select › Modify outlines the selection its preview made (on the proxy, reduced by `k`;
+        // #8414), until OK commits it.
+        let modified = app
+            .filter_preview
+            .as_ref()
+            .filter(|f| f.key.doc == doc.id && f.key.command.starts_with("select.modify."))
+            .and_then(|f| Some((f.result.clone()?, f.key.k.max(1))));
         let (outlined, k) = match &refined {
+            None if modified.is_some() => modified.as_ref().map_or((None, 1), |(d, k)| (d.selection.as_ref(), *k)),
             None => (floated.as_ref().or(doc.selection.as_ref()), 1),
             Some(None) => (None, 1),
             Some(Some((proxy, k))) => (proxy.selection.as_ref(), (*k).max(1)),
