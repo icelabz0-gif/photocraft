@@ -9,6 +9,8 @@ use crate::PhotocraftApp;
 pub(crate) struct Runtime {
     startup_checked: bool,
     notified_version: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    prompt: Option<craft_update::StartupPrompt>,
 }
 
 pub(crate) fn check(app: &mut PhotocraftApp, _ctx: &egui::Context, params: Value) -> Result<Value, String> {
@@ -36,6 +38,18 @@ pub(crate) fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
     {
         app.updates_rt.notified_version = Some(release.version.clone());
         app.ui.updates_open = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let update_rel = craft_update::Release {
+                tag: format!("v{}", release.version),
+                version: craft_update::parse_version(&release.version),
+                name: format!("PhotoCraft {}", release.version),
+                html_url: release.url.clone(),
+                ..Default::default()
+            };
+            app.updates_rt.prompt =
+                Some(craft_update::StartupPrompt::new(&craft_update::suite::PHOTOCRAFT, update_rel, photocraft_engine::build_info::VERSION));
+        }
     }
     if app.session.updates.check.is_none() {
         return;
@@ -52,13 +66,86 @@ pub(crate) fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let mut download = None;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(prompt) = &mut app.updates_rt.prompt {
+        match prompt.show(ctx) {
+            craft_update::StartupPromptResponse::Pending => {}
+            craft_update::StartupPromptResponse::UpdateAndRestart => {
+                prompt.is_installing = true;
+                if let Some(install) = craft_update::self_update::current(&craft_update::suite::PHOTOCRAFT) {
+                    let release = prompt.release.clone();
+                    std::thread::spawn(move || {
+                        let http = match craft_update::Http::new("PhotoCraft/Update") {
+                            Ok(h) => h,
+                            Err(e) => {
+                                log::warn!("could not initialize HTTP: {e}");
+                                return;
+                            }
+                        };
+                        let paths = match craft_update::Paths::for_app(&craft_update::suite::PHOTOCRAFT) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                log::warn!("could not find paths: {e}");
+                                return;
+                            }
+                        };
+                        let stop = craft_update::Stop::default();
+                        let platform = match craft_update::Platform::current() {
+                            Some(p) => p,
+                            None => {
+                                log::warn!("unsupported platform for self update");
+                                return;
+                            }
+                        };
+                        let last = || Ok(());
+                        if let Err(e) = craft_update::self_update::update(
+                            &craft_update::suite::PHOTOCRAFT,
+                            &install,
+                            &release,
+                            platform,
+                            &http,
+                            &paths,
+                            &stop,
+                            &mut |_| {},
+                            &last,
+                            Some(photocraft_engine::build_info::VERSION),
+                        ) {
+                            log::warn!("PhotoCraft self-update failed: {e}");
+                        }
+                    });
+                } else {
+                    prompt.status_message = Some("Cannot auto-update this installation type. Please download manually.".to_string());
+                    prompt.is_installing = false;
+                }
+            }
+            craft_update::StartupPromptResponse::Download => {
+                download = Some(prompt.release.html_url.clone());
+                app.updates_rt.prompt = None;
+                app.ui.updates_open = false;
+            }
+            craft_update::StartupPromptResponse::Later => {
+                app.updates_rt.prompt = None;
+                app.ui.updates_open = false;
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.updates_rt.prompt.is_some() {
+        return;
+    }
+
     if !app.ui.updates_open {
+        if let Some(url) = download {
+            crate::links::open(app, ctx, &url);
+        }
         return;
     }
     let mut open = true;
     let status = app.session.updates.status.clone();
     let mut retry = false;
-    let mut download = None;
     egui::Window::new(tl!("PhotoCraft Updates"))
         .id(egui::Id::new("photocraft_updates"))
         .open(&mut open)
