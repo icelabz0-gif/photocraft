@@ -57,6 +57,11 @@ what an agent can't finish alone.
   uses Transform Warp's Cylinder re-rendered flat after Replace Contents (#4112, fixed 2026-10-14;
   vertical cylinders and ones with perspective are still unread).
 - **Impact:** PSD is the format professionals exchange. Beta requires it to be reliable.
+- **Fixed (2026-10-21):** a shape layer's dash pattern now round trips through PSD in the
+  right units: PSD keeps the stroke width in pixels and the dash lengths in points, while the
+  model keeps the dash lengths as multiples of the width (as the SVG and Affinity readers do).
+  At 72 dpi, where a point is a pixel, a Photoshop dash of 6 pt on a 5 px stroke renders as 1.2
+  widths, not 6.
 - **Estimate:** 150–250 h. **Human:** opening exports in Photoshop on the owner's Mac (or a
   scripted check there) is the only real oracle.
 
@@ -373,6 +378,7 @@ what an agent can't finish alone.
 | 2026-10-15 | minor | G10: Cineon write landed (10-bit log gray/RGB, Save As `.cin`) |
 | 2026-10-14 | minor | G1: 32-bit Hue/Saturation unclipped (slider on whole levels) and Colorize's saturation scaled by 1 − \|Lightness\|; photoshop rgb32 hue-saturation and hue-saturation-colorize pass |
 | 2026-10-14 | minor | G1: Lab adjustment layers' results are whole samples (native Lab path); photoshop lab8 curves passes |
+| 2026-10-21 | minor | G1: a shape layer's dash pattern round trips through PSD in the right units: the width in pixels, the dash lengths in points, and the model's multiples of the width; no floor changed |
 | 2026-10-19 | minor | G9: Color panel modes, ramp and copy commands from its panel menu, the same in every theme (UI-217-17 done, #6000) |
 | 2026-10-15 | minor | G1 / #5972 A1: render only provably constant-RGB `GdFl` noise fills; variable noise synthesis remains open |
 | 2026-10-20 | minor | G10: `.asl` layer style library import and export landed (#1051) |
