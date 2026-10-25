@@ -395,7 +395,7 @@ pub fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>
         let mut l = cmds::new_layer(&app.session, &doc, &p).ok()?;
         l.id = PREVIEW_LAYER;
         let above = app.session.active().and_then(|s| s.active_layer);
-        shown.insert_above(above, l);
+        shown.insert_new(above, l);
     } else {
         let l = doc.layer(layer)?;
         let f = edited_fill(app, l, doc.bounds(), cmd, &p)?;

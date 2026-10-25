@@ -322,7 +322,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         new_layer(s, &d.doc, p)?
     };
     let id = s.edit("New Gradient Fill Layer", |doc, active| {
-        let id = doc.insert_above(*active, layer);
+        let id = doc.insert_new(*active, layer);
         *active = Some(id);
         Ok(id)
     })?;
