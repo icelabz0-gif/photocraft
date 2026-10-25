@@ -182,8 +182,12 @@ fn unreadable_folder_is_not_reported_as_missing() {
     std::fs::create_dir(&locked).unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     let e = atomic_write(&locked.join("sub/out.png"), b"x").unwrap_err();
+    // Probing a non-existent child answers NotFound only when traversal of `locked`
+    // is permitted despite mode 0o000, i.e. when running as root.
+    let can_traverse = matches!(std::fs::metadata(locked.join("sub")), Err(p) if p.kind() == io::ErrorKind::NotFound);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     if e.kind() == io::ErrorKind::NotFound {
+        assert!(can_traverse, "a run that cannot traverse {locked:?} must report the inaccessible ancestor, not a missing folder: {e}");
         return; // running as root: permissions aren't enforced
     }
     assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
