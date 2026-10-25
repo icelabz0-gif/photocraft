@@ -116,6 +116,7 @@ pub mod guide_layout_ui;
 pub mod guide_select;
 pub mod history_menu_ui;
 pub mod hold_keys;
+pub mod hue_sat_presets;
 pub mod i18n;
 mod icon_data;
 pub mod icons;
