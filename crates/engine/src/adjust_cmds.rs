@@ -247,11 +247,12 @@ fn default_lut_dirs() -> Vec<std::path::PathBuf> {
     discovered_lut_dirs_with(std::env::var_os("PHOTOCRAFT_LUTS_DIR"), std::env::current_exe().ok())
 }
 
-/// Scan `.cube`, `.3dl` and `.look` files from directories, deduplicating by stem.
+/// Scan `.cube`, `.3dl` and `.look` files from directories, deduplicating by stem and target.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn scan_lut_dirs(dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
+    let mut seen_targets = std::collections::HashSet::new();
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -272,6 +273,10 @@ pub fn scan_lut_dirs(dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Vec<
                 continue;
             };
             if !meta.is_file() || meta.len() > MAX_FOLDER_LUT_BYTES {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !seen_targets.insert(canonical) {
                 continue;
             }
             let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);

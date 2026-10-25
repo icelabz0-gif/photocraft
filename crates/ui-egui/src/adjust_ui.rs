@@ -352,10 +352,26 @@ mod lookup_picker_tests {
     /// Discovered LUTs from candidate directories are offered when fileHandling.lutFolder is empty.
     #[test]
     fn discovered_luts_are_offered_when_folder_preference_is_empty() {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let Some(parent) = exe.parent() else { return };
+        let candidate_dir = parent.join("LUTs");
+        let _ = std::fs::create_dir_all(&candidate_dir);
+        let test_file = candidate_dir.join("test_ui_discovered.cube");
+        let _ = std::fs::write(&test_file, "LUT_3D_SIZE 2\n0 0 0\n");
+
         let app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
-        let folder = folder_luts(&app, &ctx);
-        assert!(folder.iter().all(|(name, path)| !name.is_empty() && !path.is_empty()));
+        let mut folder = folder_luts(&app, &ctx);
+        for _ in 0..500 {
+            if folder.iter().any(|(name, _)| name == "test_ui_discovered.cube") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            folder = folder_luts(&app, &ctx);
+        }
+        let found = folder.iter().any(|(name, p)| name == "test_ui_discovered.cube" && p == test_file.to_str().unwrap());
+        let _ = std::fs::remove_file(&test_file);
+        assert!(found);
     }
 
     #[test]
