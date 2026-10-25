@@ -315,6 +315,36 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn startup_update_prompt_appears_and_can_be_dismissed() {
+        let (mut app, _, sender) = app();
+        let ctx = egui::Context::default();
+        at(&mut app, &ctx, 0.0);
+        sender
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(Ok(Some(Release {
+                version: "99.0.0".into(),
+                url: "https://github.com/storytold/photocraft/releases/tag/v99.0.0".into(),
+            })))
+            .unwrap();
+        at(&mut app, &ctx, 1.0);
+        assert!(app.updates_rt.prompt.is_some(), "startup prompt initialized on available release");
+        let prompt = app.updates_rt.prompt.as_ref().unwrap();
+        assert_eq!(prompt.release.tag, "v99.0.0");
+        assert!(prompt.open);
+
+        // Rendering show() renders the prompt modal
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(&mut app, ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert!(app.updates_rt.prompt.is_some());
+    }
+
+    #[test]
     fn a_manual_check_that_fails_to_start_opens_the_status_window() {
         let mut app =
             PhotocraftApp::new(Session::new(), Services { check_updates: Some(Box::new(|| Err("Could not start worker".into()))), ..Default::default() });
