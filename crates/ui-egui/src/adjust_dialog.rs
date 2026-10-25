@@ -65,7 +65,12 @@ pub fn picker_armed(app: &PhotocraftApp) -> bool {
     let Some(dialog) = app.ui.dialogs.last().filter(|d| picker_kind(&d.fields).is_some()) else { return false };
     if picker_kind(&dialog.fields) == Some("hueSaturation") {
         let ranged = dialog.fields.get(HUE_PICKER_RANGE).and_then(Value::as_str).is_some();
-        return ranged && hue_picker(dialog.fields.get(CURVE_PICKER)).is_some() && app.session.active().is_some_and(|s| !adjust_editors::is_gray(s.doc.mode));
+        // The colour ranges don't apply under Colorize (the engine refuses the sample).
+        let colorize = dialog.fields.get("colorize").and_then(Value::as_bool).unwrap_or(false);
+        return !colorize
+            && ranged
+            && hue_picker(dialog.fields.get(CURVE_PICKER)).is_some()
+            && app.session.active().is_some_and(|s| !adjust_editors::is_gray(s.doc.mode));
     }
     let Some(eyedropper) = picker(dialog.fields.get(CURVE_PICKER)) else { return false };
     app.session.active().is_some_and(|s| picker_supported(s.doc.mode, eyedropper))
@@ -919,6 +924,15 @@ mod tests {
             h.run_steps(2);
             assert_eq!(range(&h), want, "{label}");
         }
+        // CodeRabbit on #9267: Colorize turned on before the dialog draws again leaves no armed
+        // picker, so a canvas press isn't taken (and doesn't end in the engine's refusal).
+        h.get_by_label("Sample a color range").click();
+        h.run_steps(2);
+        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("colorize".into(), json!(true));
+        assert!(!picker_armed(h.state()), "not with Colorize on");
+        assert!(!sample_at(h.state_mut(), 5.0, 10.0), "the press isn't the picker's");
+        assert!(!h.state().ui.status.contains("Colorize"), "and shows no refusal: {}", h.state().ui.status);
+        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("colorize".into(), json!(false));
         crate::dialogs::confirm(h.state_mut(), id).unwrap();
     }
 
