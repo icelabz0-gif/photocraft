@@ -864,11 +864,16 @@ pub fn curves_eyedropper(base: &Value, picker: CurvesEyedropper, sample: [f32; 3
 pub fn eyedropper_from_params(s: &crate::Session, kind: &str, p: &Value) -> Result<Option<Adjustment>> {
     let Some(e) = p.get("eyedropper") else { return Ok(None) };
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let (picker, sample) = eyedropper_sample(&d.doc, None, e)?;
     let mut base = p.clone();
     if let Some(o) = base.as_object_mut() {
         o.remove("eyedropper");
     }
+    if kind == "hueSaturation" {
+        let (op, range) = hue_eyedropper_op(e)?;
+        let sample = eyedropper_color(&d.doc, None, e)?;
+        return hue_saturation_eyedropper(&base, range, op, sample, d.doc.mode).map(Some);
+    }
+    let (picker, sample) = eyedropper_sample(&d.doc, None, e)?;
     adjustment_eyedropper(kind, &base, picker, sample, d.doc.mode).map(Some)
 }
 
@@ -884,13 +889,19 @@ pub fn layer_eyedropper(s: &crate::Session, layer: photocraft_doc::LayerId, p: &
     let (kind, adj) = match &l.content {
         photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::Curves { .. }) => ("curves", adj),
         photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::Levels { .. }) => ("levels", adj),
-        _ => return Err(bad(EYEDROPPER, "`eyedropper` applies to Levels and Curves adjustment layers only")),
+        photocraft_doc::LayerContent::Adjustment(adj @ Adjustment::HueSaturation { .. }) => ("hueSaturation", adj),
+        _ => return Err(bad(EYEDROPPER, "`eyedropper` applies to Levels, Curves and Hue/Saturation adjustment layers only")),
     };
     let mut rest = p.clone();
     if let Some(o) = rest.as_object_mut() {
         o.remove("eyedropper");
     }
     let current = if user_keys(&rest).is_empty() { adj.clone() } else { from_params(kind, &rest, Some(adj), d.doc.mode)? };
+    if kind == "hueSaturation" {
+        let (op, range) = hue_eyedropper_op(e)?;
+        let sample = eyedropper_color(&d.doc, Some(layer), e)?;
+        return hue_saturation_eyedropper(&to_params(&current), range, op, sample, d.doc.mode).map(Some);
+    }
     let (picker, sample) = eyedropper_sample(&d.doc, Some(layer), e)?;
     adjustment_eyedropper(kind, &to_params(&current), picker, sample, d.doc.mode).map(Some)
 }
@@ -906,6 +917,13 @@ fn eyedropper_sample(doc: &photocraft_doc::Document, hide: Option<photocraft_doc
         Some("white") => CurvesEyedropper::White,
         _ => return Err(bad(CMD, "`eyedropper.point` must be \"black\", \"gray\" or \"white\"")),
     };
+    Ok((picker, eyedropper_color(doc, hide, e)?))
+}
+
+/// The colour an `eyedropper` param samples: `color` [r, g, b], or the image at `at` (with layer
+/// `hide` hidden), averaged over `size`.
+fn eyedropper_color(doc: &photocraft_doc::Document, hide: Option<photocraft_doc::LayerId>, e: &Value) -> Result<[f32; 3]> {
+    const CMD: &str = EYEDROPPER;
     let triple = |v: &Value| -> Option<[f64; 3]> {
         let a = v.as_array().filter(|a| a.len() == 3)?;
         Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])
@@ -939,7 +957,75 @@ fn eyedropper_sample(doc: &photocraft_doc::Document, hide: Option<photocraft_doc
     } else {
         return Err(bad(CMD, "`eyedropper` needs `at` [x, y] or `color` [r, g, b]"));
     };
-    Ok((picker, sample))
+    Ok(sample)
+}
+
+/// Hue/Saturation's three eyedroppers (#9247): sample a colour range, add to it, subtract from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HueEyedropper {
+    Sample,
+    Add,
+    Subtract,
+}
+
+/// The picker and range (`"reds"` … `"magentas"`) of a Hue/Saturation `eyedropper` param.
+fn hue_eyedropper_op(e: &Value) -> Result<(HueEyedropper, usize)> {
+    let op = match e.get("point").and_then(Value::as_str) {
+        Some("sample") => HueEyedropper::Sample,
+        Some("add") => HueEyedropper::Add,
+        Some("subtract") => HueEyedropper::Subtract,
+        _ => return Err(bad(EYEDROPPER, "`eyedropper.point` must be \"sample\", \"add\" or \"subtract\" for Hue/Saturation")),
+    };
+    let range = e
+        .get("range")
+        .and_then(Value::as_str)
+        .and_then(|r| HUE_RANGES.iter().position(|k| *k == r))
+        .ok_or_else(|| bad(EYEDROPPER, "`eyedropper.range` must name a colour range (\"reds\" … \"magentas\")"))?;
+    Ok((op, range))
+}
+
+/// Hue/Saturation's eyedroppers on colour range `range` (0 = reds … 5 = magentas) of the
+/// adjustment `base`, with `sample` the picked colour (0..1 RGB): as in Photoshop, Sample centres
+/// the range's default extent on the colour's hue, Add grows the fully-on span out to it and
+/// Subtract shrinks it to 15° past it ([`photocraft_doc::adjust::HueRange`]). A gray has no hue.
+pub fn hue_saturation_eyedropper(base: &Value, range: usize, op: HueEyedropper, sample: [f32; 3], mode: ColorMode) -> Result<Adjustment> {
+    const CMD: &str = "hue/saturation eyedropper";
+    // Duotone and Bitmap store gray pixels too, which no hue range can reach.
+    if matches!(mode, ColorMode::Grayscale | ColorMode::Duotone | ColorMode::Bitmap) {
+        return Err(bad(CMD, "Hue/Saturation's colour ranges need a colour document"));
+    }
+    if sample.iter().any(|v| !v.is_finite()) {
+        return Err(bad(CMD, "sample components must be finite"));
+    }
+    let mut adjustment = from_params("hueSaturation", base, None, mode)?;
+    let Adjustment::HueSaturation { colorize, ranges, .. } = &mut adjustment else {
+        return Err(bad(CMD, "expected a Hue/Saturation adjustment"));
+    };
+    if *colorize {
+        return Err(bad(CMD, "the colour ranges don't apply while Colorize is on"));
+    }
+    let [r, g, b] = sample.map(|v| v.clamp(0.0, 1.0));
+    let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+    if mx - mn < 1.0 / 255.0 {
+        return Err(bad(CMD, "the sampled colour is a gray: it has no hue"));
+    }
+    let d = mx - mn;
+    let sector = if mx == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if mx == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    // Whole degrees, as Photoshop's range sliders show them.
+    let hue = (sector * 60.0).round();
+    let Some(target) = ranges.get_mut(range) else { return Err(bad(CMD, "no such colour range")) };
+    match op {
+        HueEyedropper::Sample => target.sample_hue(hue),
+        HueEyedropper::Add => target.add_hue(hue),
+        HueEyedropper::Subtract => target.subtract_hue(hue),
+    }
+    Ok(adjustment)
 }
 
 /// `[[in, out], …]` in 0..255: sorted by input, duplicates collapsed, 2..=19 points.
@@ -1494,6 +1580,54 @@ mod tests {
         assert!(s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "white", "at": [1, 1]}})).is_err(), "Levels and Curves only");
     }
 
+    /// #9247: Hue/Saturation's colour range eyedroppers, on an adjustment layer (sampling below
+    /// it) and through the command, follow Photoshop's sample / add / subtract rules; one history
+    /// step each; grays, Colorize and bad params are refused.
+    #[test]
+    fn hue_saturation_eyedroppers_move_the_colour_range() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 4, "height": 8})).unwrap();
+        s.execute("edit.fill", json!({"color": "#0080ff"})).unwrap(); // hue 210
+        s.execute("select.inverse", json!({})).unwrap();
+        s.execute("edit.fill", json!({"color": "#ffa000"})).unwrap(); // hue ~38
+        s.execute("select.deselect", json!({})).unwrap();
+        s.execute("layer.newAdjustmentLayer.hueSaturation", json!({})).unwrap();
+        let reds = |s: &crate::Session| match &s.active().unwrap().doc.layers.last().unwrap().content {
+            photocraft_doc::LayerContent::Adjustment(Adjustment::HueSaturation { ranges, .. }) => ranges[0].bounds,
+            _ => panic!("hue/saturation layer"),
+        };
+        let steps = s.active().unwrap().history.past_len();
+        let pick = |s: &mut crate::Session, point: &str, x: f64| {
+            s.execute("layer.setAdjustment", json!({"eyedropper": {"point": point, "range": "reds", "at": [x, 2]}})).unwrap();
+        };
+        pick(&mut s, "sample", 1.0);
+        assert_eq!(reds(&s), [165.0, 195.0, 225.0, 255.0], "centred on the blue");
+        pick(&mut s, "add", 6.0);
+        let b = reds(&s);
+        assert_eq!(b, [8.0, 38.0, 225.0, 255.0], "grown out to the orange");
+        pick(&mut s, "subtract", 1.0);
+        assert_eq!(reds(&s)[2], 195.0, "pulled back to 15° short of the blue");
+        assert_eq!(s.active().unwrap().history.past_len(), steps + 3);
+        // As documented for `layer.setAdjustment`: an explicit `color`, and `size` around `at`.
+        s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "sample", "range": "reds", "color": [0.0, 0.5, 1.0]}})).unwrap();
+        assert_eq!(reds(&s), [165.0, 195.0, 225.0, 255.0], "the colour's hue, 210°");
+        pick(&mut s, "add", 6.0);
+        s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "sample", "range": "reds", "at": [1, 2], "size": 3}})).unwrap();
+        assert_eq!(reds(&s), [165.0, 195.0, 225.0, 255.0], "a 3 × 3 sample of the blue");
+        for bad in [
+            json!({"point": "sample", "range": "reds", "color": [0.5, 0.5, 0.5]}),
+            json!({"point": "black", "range": "reds", "at": [1, 1]}),
+            json!({"point": "sample", "range": "teals", "at": [1, 1]}),
+            json!({"point": "sample", "at": [1, 1]}),
+            json!({"point": "add", "range": "reds", "at": [99, 1]}),
+        ] {
+            assert!(s.execute("layer.setAdjustment", json!({"eyedropper": bad})).is_err(), "{bad}");
+        }
+        s.execute("layer.setAdjustment", json!({"colorize": true})).unwrap();
+        assert!(s.execute("layer.setAdjustment", json!({"eyedropper": {"point": "sample", "range": "reds", "at": [1, 1]}})).is_err(), "not with Colorize");
+    }
+
     /// #3127: on a smart object the eyedropper param records the adjustment it resolved to as
     /// the smart filter, not the raw sample (which re-rendered as an identity).
     #[test]
@@ -1567,6 +1701,40 @@ mod tests {
     }
 
     /// A colourful 16×16 document (`mode`, `depth`) for command tests.
+    /// #9267 review: the destructive command with a given colour moves the range before applying.
+    /// Sampling the green swatch into Reds and desaturating Reds grays the green and leaves the red.
+    #[test]
+    fn hue_saturation_command_eyedropper_moves_the_range_it_applies() {
+        let mut s = colourful("rgb", 8);
+        let before = pixels(&s);
+        let green = [60.0 / 255.0, 140.0 / 255.0, 80.0 / 255.0];
+        s.execute("image.adjustments.hueSaturation", json!({"eyedropper": {"point": "sample", "range": "reds", "color": green}, "reds": {"saturation": -100}}))
+            .unwrap();
+        let after = pixels(&s);
+        assert_eq!(after[0], before[0], "the red swatch is outside the moved Reds range");
+        assert_ne!(after[1], before[1], "the green swatch is desaturated");
+        let g = &after[1];
+        assert!((g[0] - g[1]).abs() < 0.02 && (g[1] - g[2]).abs() < 0.02, "now a gray: {g:?}");
+    }
+
+    /// #9267 review: a gray-storage document (Grayscale, Duotone, Bitmap) has no hue ranges, and a
+    /// sample that isn't finite is refused as Levels and Curves refuse it, not read as 0.
+    #[test]
+    fn hue_saturation_eyedropper_refuses_gray_modes_and_non_finite_samples() {
+        let pick = |sample: [f32; 3], mode| hue_saturation_eyedropper(&json!({}), 0, HueEyedropper::Sample, sample, mode);
+        assert!(pick([1.0, 0.0, 0.0], ColorMode::Rgb).is_ok());
+        for mode in [ColorMode::Grayscale, ColorMode::Duotone, ColorMode::Bitmap] {
+            assert!(pick([1.0, 0.0, 0.0], mode).is_err(), "{mode:?}");
+        }
+        for sample in [[f32::INFINITY, 1.0, 0.0], [f32::NAN, 0.0, 1.0], [0.0, f32::NEG_INFINITY, 1.0]] {
+            let e = pick(sample, ColorMode::Rgb).unwrap_err().to_string();
+            assert!(e.contains("finite"), "{sample:?}: {e}");
+        }
+        let mut s = colourful("rgb", 8);
+        let r = s.execute("image.adjustments.hueSaturation", json!({"eyedropper": {"point": "sample", "range": "reds", "color": [1e300, 1.0, 0.0]}}));
+        assert!(r.is_err(), "1e300 is inf as f32, not 0");
+    }
+
     fn colourful(mode: &str, depth: u32) -> crate::Session {
         let mut s = crate::Session::new();
         s.execute("file.new", json!({"width": 16, "height": 16, "mode": mode, "depth": depth})).unwrap();
