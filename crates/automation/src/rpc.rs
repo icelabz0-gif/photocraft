@@ -662,7 +662,11 @@ mod tests {
         }
         h.handle("doc.save", json!({"path": path.to_string_lossy(), "quality": 85})).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes.get(12..16), Some(&b"VP8 "[..]), "a WebP saved with a quality is lossy");
+        // An embedded ICC profile adds a VP8X container header before the actual image chunk.
+        assert!(
+            matches!(photocraft_codecs::webp_encoding(&bytes), Some(photocraft_codecs::WebpEncoding::Lossy { .. })),
+            "a WebP saved with a quality is lossy"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

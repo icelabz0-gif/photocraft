@@ -9,9 +9,10 @@ use photocraft_engine::file_cmds::open_bytes_as;
 use photocraft_engine::jobs::{OpenSource, Started};
 use serde_json::json;
 
+/// A bare PNG thumbnail: the Affinity preview reader deliberately rejects compressed metadata.
 fn fixture() -> Vec<u8> {
     let mut src = Session::new();
-    src.execute("file.new", json!({"width": 2, "height": 1, "background": "#dc283c"})).unwrap();
+    src.execute("file.new", json!({"width": 2, "height": 1, "background": "#dc283c", "profile": "none"})).unwrap();
     let png = photocraft_io::export(&src.active().unwrap().doc, "preview.png", &Default::default()).unwrap().bytes;
     // Observed v12 preview envelope, without a native object graph.
     let mut bytes = vec![0; 72];
