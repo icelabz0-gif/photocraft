@@ -1416,7 +1416,14 @@ mod tests {
             }
         }
         let doc = Arc::new(doc);
-        let f = Map::from_iter([("format".into(), json!("jpg")), ("scale".into(), json!(100)), ("quality".into(), json!(32))]);
+        // Without the embedded profile, whose fixed size the proxy would scale with the pixels
+        // (the untagged document is tagged sRGB on export, #9325).
+        let f = Map::from_iter([
+            ("format".into(), json!("jpg")),
+            ("scale".into(), json!(100)),
+            ("quality".into(), json!(32)),
+            ("embedProfile".into(), json!(false)),
+        ]);
         let actual = photocraft_io::export(&export_document(&doc, &f, None).unwrap(), "x.jpg", &settings(&f).io_options()).unwrap().bytes.len() as u64;
         let proxy = preview_proxy(&doc, &f).unwrap();
         let old = estimate_native(&doc, &proxy, &f).unwrap();
