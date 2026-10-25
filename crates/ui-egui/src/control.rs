@@ -133,8 +133,9 @@ pub enum Outcome {
 /// field's value is validated before the first one is applied, so a typo, an unknown field, a
 /// bad value or a bad nested key can't reply with success while nothing — or only half of it —
 /// changed (#412).
-pub const UI_SET_FIELDS: [&str; 39] = [
+pub const UI_SET_FIELDS: [&str; 40] = [
     "updatesOpen",
+    "importReport",
     "tool",
     "strokeTrace",
     "panels",
@@ -402,6 +403,8 @@ fn context_entries(app: &PhotocraftApp, menu: &crate::canvas_tool_menu::CanvasTo
     entries
 }
 
+/// Route control requests through normal UI/engine gates, preserving modal decisions, capability checks and
+/// asynchronous outcomes.
 fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
@@ -590,6 +593,7 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 let panels = merged_object(&app.ui.panels, p.get("panels"), "panels")?;
                 let mask_target = bool_field(p, "maskTarget")?;
                 let updates_open = bool_field(p, "updatesOpen")?;
+                let import_report = bool_field(p, "importReport")?;
                 let vector_mask_target = bool_field(p, "vectorMaskTarget")?;
                 let selection_mode = uint_field(p, "selectionMode")?;
                 let dock_tabs = merged_object(&app.ui.dock_tabs, p.get("dockTabs"), "dockTabs")?;
@@ -758,6 +762,13 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 }
                 if let Some(open) = updates_open {
                     app.ui.updates_open = open;
+                }
+                if let Some(show) = import_report {
+                    if show {
+                        crate::import_report::open(app);
+                    } else {
+                        app.ui.import_report = Default::default();
+                    }
                 }
                 if let Some(m) = vector_mask_target {
                     app.ui.vector_mask_target = m;
@@ -1293,6 +1304,10 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
         }
         "app.open" => match s("path") {
             Some(path) => {
+                let order = match photocraft_engine::file_cmds::historical_xcf_sample_order(p, "app.open") {
+                    Ok(order) => order,
+                    Err(error) => return err(error.to_string()),
+                };
                 // Directory .pcraft (the native on-disk form) loads through a capability-scoped
                 // source; the single-file (zip) form falls back to the bytes path, as do all
                 // other formats.
@@ -1320,7 +1335,7 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 };
                 wrap(opened.and_then(|(name, bytes)| {
                     let name = app.open_name(&name);
-                    let warnings = app.open_automation_bytes(&name, &bytes)?;
+                    let warnings = app.open_automation_bytes_with_sample_order(&name, &bytes, order)?;
                     // Brushes/gradients go to the preset libraries: no document, no Open Recent entry.
                     if !crate::preset_files_ui::is_preset_file(&name) {
                         app.opened_from(path);
@@ -1485,6 +1500,7 @@ mod tests {
     }
 
     #[test]
+    /// Exercise agent-facing Camera Raw changes and both completion paths on an actually opened raw document.
     fn camera_raw_control_updates_and_commits_or_cancels_an_open_raw() {
         use photocraft_raw::testgen::{DngSpec, mosaic, scene};
         let (w, h) = (48, 32);
@@ -1493,9 +1509,7 @@ mod tests {
         let dng = spec.build();
         for finish in ["commit", "cancel"] {
             let services = crate::Services {
-                import: Some(Box::new(|name, bytes, opts| {
-                    photocraft_io::import_with_options(name, bytes, opts).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
-                })),
+                import: Some(Box::new(|name, bytes, opts| photocraft_io::import_with_options(name, bytes, opts).map_err(|e| e.to_string()))),
                 ..Default::default()
             };
             let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
@@ -2664,6 +2678,8 @@ mod tests {
     }
 
     #[test]
+    /// Verify automation file operations obey separate capability roots and expose import/export warnings in their
+    /// replies.
     fn automation_open_and_save_use_the_roots_and_reply_with_warnings() {
         use photocraft_color::{ColorMode, SampleType};
         use photocraft_doc::Document;
@@ -2689,7 +2705,10 @@ mod tests {
         let w = written.clone();
         let services = crate::Services {
             import: Some(Box::new(|name: &str, _b: &[u8], _opts: &photocraft_io::ImportOptions| {
-                Ok((Document::new(name, Size::new(4, 4), ColorMode::Rgb, SampleType::U8), vec!["Adjustment layer flattened".to_string()]))
+                Ok(crate::test_import_result(
+                    Document::new(name, Size::new(4, 4), ColorMode::Rgb, SampleType::U8),
+                    vec!["Adjustment layer flattened".to_string()],
+                ))
             })),
             export: Some(Box::new(|_d: &Document, _p: &str, _s: &crate::ExportSettings| Ok((b"out".to_vec(), vec!["Layers were flattened".to_string()])))),
             automation_read: Some(Box::new(|path: &str| Ok((path.rsplit('/').next().unwrap_or(path).to_string(), b"x".to_vec())))),
@@ -2808,6 +2827,7 @@ mod tests {
     }
 
     #[test]
+    /// Open native directory bundles through the app route while retaining the supported ZIP-bundle fallback.
     fn app_open_opens_a_directory_pcraft_and_falls_back_for_the_zip_form() {
         use photocraft_doc::Document;
         use serde_json::json;
@@ -2824,7 +2844,10 @@ mod tests {
                 }
             })),
             import: Some(Box::new(|name: &str, _b: &[u8], _opts: &photocraft_io::ImportOptions| {
-                Ok((Document::new(name, photocraft_doc::Size::new(4, 4), photocraft_doc::ColorMode::Rgb, photocraft_doc::SampleType::U8), Vec::new()))
+                Ok(crate::test_import_result(
+                    Document::new(name, photocraft_doc::Size::new(4, 4), photocraft_doc::ColorMode::Rgb, photocraft_doc::SampleType::U8),
+                    Vec::new(),
+                ))
             })),
             automation_read: Some(Box::new(|path: &str| {
                 if path == "zipped.pcraft" {

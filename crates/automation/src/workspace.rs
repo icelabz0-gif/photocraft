@@ -36,6 +36,34 @@ pub struct AuthorizedWorkspace {
 }
 
 impl AuthorizedWorkspace {
+    /// Compare an imported read-root source with a write-root destination using only held
+    /// directory capabilities. No file contents or ambient path lookups are used.
+    pub fn is_import_source(&self, source: &str, destination: &str) -> Result<bool, AutomationError> {
+        let identity_error = |e| AutomationError::Io(format!("cannot inspect import source identity: {e}"));
+        let source = request_path(source, self.read.as_ref())?;
+        let destination = request_path(destination, self.write.as_ref())?;
+        let read = self.read.as_ref().ok_or_else(|| AutomationError::BadRequest(format!("{DENIED}: read authority is absent")))?;
+        let write = self.write.as_ref().ok_or_else(|| AutomationError::BadRequest(format!("{DENIED}: write authority is absent")))?;
+        if source == destination {
+            let a = read.dir.try_clone().map_err(identity_error)?.into_std_file();
+            let b = write.dir.try_clone().map_err(identity_error)?.into_std_file();
+            if photocraft_engine::file_cmds::same_open_files(&a, &b).map_err(identity_error)? {
+                return Ok(true);
+            }
+        }
+        let a = match read.dir.open(&source) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(file_error("inspect source", &source.to_string_lossy(), error)),
+        };
+        let b = match write.dir.open(&destination) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(file_error("inspect destination", &destination.to_string_lossy(), error)),
+        };
+        photocraft_engine::file_cmds::same_open_files(&a, &b).map_err(identity_error)
+    }
+
     /// Open the configured roots as capabilities. Either authority may be
     /// omitted; omitted authority fails closed.
     pub fn new(read_root: Option<&Path>, write_root: Option<&Path>) -> Result<Self, AutomationError> {
@@ -531,6 +559,117 @@ mod tests {
         assert_eq!(workspace.read("read.txt").unwrap(), b"canary");
         workspace.write("new-output.txt", b"created").unwrap();
         assert_eq!(std::fs::read(inside.join("new-output.txt")).unwrap(), b"created");
+    }
+
+    #[test]
+    /// Distinguish equal relative names across roots while detecting real aliases and preserving removed-source
+    /// protection.
+    fn import_source_identity_respects_separate_read_and_write_roots() {
+        let (inside, outside, _) = roots("import-source-identity");
+        std::fs::write(inside.join("source.xcf"), b"source").unwrap();
+        std::fs::write(outside.join("source.xcf"), b"other").unwrap();
+        std::fs::hard_link(inside.join("source.xcf"), outside.join("alias.pcraft")).unwrap();
+        let workspace = AuthorizedWorkspace::new(Some(&inside), Some(&outside)).unwrap();
+        assert!(!workspace.is_import_source("source.xcf", "source.xcf").unwrap(), "equal relative names in separate roots are distinct");
+        assert!(workspace.is_import_source("source.xcf", "alias.pcraft").unwrap());
+        assert!(!workspace.is_import_source("source.xcf", "new.pcraft").unwrap());
+        assert!(workspace.is_import_source("../outside/source.xcf", "new.pcraft").is_err());
+        assert!(workspace.is_import_source("source.xcf", "../inside/source.xcf").is_err());
+        std::fs::remove_file(inside.join("source.xcf")).unwrap();
+        assert!(!workspace.is_import_source("source.xcf", "new.pcraft").unwrap());
+        let same_root = AuthorizedWorkspace::new(Some(&inside), Some(&inside)).unwrap();
+        assert!(same_root.is_import_source("source.xcf", "source.xcf").unwrap(), "the original path stays protected after removal");
+    }
+
+    #[test]
+    /// Check file identity across overlapping capability roots without treating unrelated missing paths as aliases.
+    fn import_source_identity_recognizes_overlapping_roots_and_missing_paths() {
+        let (inside, _, _) = roots("import-source-overlap");
+        let sub = inside.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("source.xcf"), b"source").unwrap();
+        let workspace = AuthorizedWorkspace::new(Some(&inside), Some(&sub)).unwrap();
+        assert!(workspace.is_import_source("sub/source.xcf", "source.xcf").unwrap());
+        assert!(!workspace.is_import_source("sub/source.xcf", "new.pcraft").unwrap());
+        assert!(!workspace.is_import_source("sub/missing.xcf", "source.xcf").unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// Fail closed when Windows denies identity inspection of a source that overlaps the authorized write root.
+    fn denied_import_source_inspection_blocks_saves_through_overlapping_roots() {
+        use std::process::Command;
+
+        struct DeniedRead {
+            file: PathBuf,
+            sid: String,
+        }
+        impl DeniedRead {
+            /// Restore only the temporary fixture file's denied read permission after the identity check.
+            fn restore(&self) {
+                let output = Command::new("icacls.exe").arg(&self.file).arg("/remove:d").arg(format!("*{}", self.sid)).output().unwrap();
+                assert!(output.status.success(), "cannot restore temporary fixture read access");
+            }
+        }
+        impl Drop for DeniedRead {
+            /// Remove the fixture's explicit deny rule even when an assertion exits early, without changing
+            /// directory ACLs.
+            fn drop(&mut self) {
+                // Restore even if an assertion fails; never alter a directory ACL.
+                let _ = Command::new("icacls.exe").arg(&self.file).arg("/remove:d").arg(format!("*{}", self.sid)).output();
+            }
+        }
+
+        let (inside, _, _) = roots("import-source-denied");
+        let sub = inside.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let source = sub.join("source.xcf");
+        let mut bytes = b"gimp xcf v003\0".to_vec();
+        for value in [1u32, 1, 0, 0, 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        std::fs::write(&source, &bytes).unwrap();
+        let workspace = AuthorizedWorkspace::new(Some(&inside), Some(&sub)).unwrap();
+        let mut headless = crate::Headless::with_workspace(workspace.clone());
+        headless.open(Path::new("sub/source.xcf")).unwrap();
+        assert!(headless.session.active().unwrap().source_read_only);
+        let before = headless.session.active().unwrap().doc.clone();
+        let history = headless.session.active().unwrap().history.past_len();
+
+        let identity = Command::new("whoami.exe").args(["/user", "/fo", "csv", "/nh"]).output().unwrap();
+        assert!(identity.status.success());
+        let sid = String::from_utf8_lossy(&identity.stdout)
+            .split(',')
+            .map(|part| part.trim().trim_matches('"'))
+            .find(|part| part.starts_with("S-1-") && part.bytes().all(|byte| byte.is_ascii_digit() || byte == b'S' || byte == b'-'))
+            .unwrap()
+            .to_string();
+        let denied = DeniedRead { file: source.clone(), sid };
+        // Deny only read-data on this owned temporary file. Directory permissions
+        // and deletion/replacement rights stay intact, matching the reported case.
+        assert!(source.starts_with(&inside));
+        let output = Command::new("icacls.exe").arg(&source).arg("/deny").arg(format!("*{}:(RD)", denied.sid)).output().unwrap();
+        assert!(output.status.success(), "cannot deny read-data on temporary fixture");
+        assert_eq!(std::fs::File::open(&source).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        let error = workspace.is_import_source("sub/source.xcf", "source.xcf").unwrap_err().to_string();
+        assert!(error.contains("inspect source") && error.contains("PermissionDenied"), "{error}");
+        for destination in ["source.xcf", "converted.pcraft"] {
+            let error = headless.save(None, Some(Path::new(destination)), Some("pcraft"), &Default::default()).unwrap_err().to_string();
+            assert!(error.contains("inspect source") && error.contains("PermissionDenied"), "{error}");
+            let current = headless.session.active().unwrap();
+            assert!(Arc::ptr_eq(&before, &current.doc));
+            assert_eq!(current.history.past_len(), history);
+            assert!(current.source_read_only);
+            assert_eq!(current.protected_import_source.as_deref(), Some("sub/source.xcf"));
+            assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 1, "inspection failure must precede output creation");
+        }
+        denied.restore();
+        drop(denied);
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert!(workspace.is_import_source("sub/source.xcf", "source.xcf").unwrap());
+        headless.save(None, Some(Path::new("converted.pcraft")), None, &Default::default()).unwrap();
+        assert!(sub.join("converted.pcraft").is_file());
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
     }
 
     #[test]

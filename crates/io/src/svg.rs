@@ -464,6 +464,8 @@ fn import_parsed(name: &str, parsed: Parsed, max_group_depth: usize) -> Result<I
     import_parsed_with_budget(name, parsed, max_group_depth, MAX_PIXEL_BYTES)
 }
 
+/// Converts a parsed SVG into native contents under group and retained-pixel limits, using explicit bounded
+/// raster fallbacks where needed.
 fn import_parsed_with_budget(name: &str, parsed: Parsed, max_group_depth: usize, pixel_budget: u64) -> Result<ImportResult, IoError> {
     let Parsed { tree, fontless_text } = parsed;
     let mut warnings = Vec::new();
@@ -490,7 +492,7 @@ fn import_parsed_with_budget(name: &str, parsed: Parsed, max_group_depth: usize,
     if doc.layers.is_empty() {
         conv.warnings.push("SVG: nothing to draw (an empty drawing)".to_string());
     }
-    Ok(ImportResult { document: doc, warnings: conv.warnings, source_read_only: false, preview_only: false })
+    Ok(ImportResult { initial_view: None, document: doc, warnings: conv.warnings, source_read_only: false, preview_only: false })
 }
 
 /// The whole drawing rendered at `scale` (1 = its own size), as a straight-alpha RGBA buffer at

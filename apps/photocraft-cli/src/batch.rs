@@ -19,12 +19,21 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
+/// Select recognized readable image names, admitting only supported XCF compound transports rather than arbitrary
+/// archives.
 pub(crate) fn is_input(p: &Path) -> bool {
     let known = |e: &str| {
-        matches!(e, "pcraft" | "psd" | "psb" | "pdn" | "ora" | "kra" | "krz" | "af" | "afdesign" | "afphoto" | "afpub")
+        matches!(e, "pcraft" | "psd" | "psb" | "pdn" | "ora" | "kra" | "krz" | "af" | "afdesign" | "afphoto" | "afpub" | "xcf" | "xcfgz" | "xcfbz2" | "xcfxz")
             || photocraft_codecs::from_extension(e).is_some_and(|f| photocraft_codecs::caps(f).read)
     };
-    p.is_file() && p.extension().is_some_and(|e| known(&e.to_string_lossy().to_ascii_lowercase()))
+    // A transport suffix alone does not identify an image: only the supported XCF compound
+    // names are candidates. The importer still validates the actual container and XCF bytes.
+    p.is_file()
+        && (p.extension().is_some_and(|e| known(&e.to_string_lossy().to_ascii_lowercase()))
+            || p.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy().to_ascii_lowercase();
+                [".xcf.gz", ".xcf.bz2", ".xcf.xz"].iter().any(|suffix| name.ends_with(suffix))
+            }))
 }
 
 /// Drops the Save and view steps the desktop records from `action` (Batch saves each result
@@ -47,6 +56,8 @@ fn strip_shell_steps(action: &mut Action) {
     (action.steps, action.disabled, action.dialogs) = (steps, disabled, dialogs);
 }
 
+/// Run actions in scratch sessions with safe separate destinations, reporting per-file failures without saving a failed
+/// nested action result.
 pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result {
     let (in_dir, out_dir) = (a.in_dir.as_path(), a.out.as_path());
     let (actions, mut set, warnings) = load_actions_file(&a.actions, a.action.as_deref())?;
@@ -81,7 +92,7 @@ pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> 
             // Steps that play another action find it in the set; the session's playback stack
             // stops an action that calls itself.
             h.session.actions.list = set.clone();
-            h.open(input)?;
+            h.open_with_sample_order(input, a.import.historical_xcf_sample_order)?;
             for (id, p) in &actions {
                 if photocraft_engine::actions_cmds::shell_view_command(id) || photocraft_engine::actions_cmds::shell_save_command(id) {
                     continue;
