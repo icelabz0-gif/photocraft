@@ -1026,7 +1026,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             }
                             if let Some(anchor) = ui.data(|d| d.get_temp::<Rect>(switch_id)) {
                                 let (pivot, pos) = if crate::direction::is_rtl() {
-                                    (egui::Align2::RIGHT_TOP, anchor.right_top() + vec2(0.0, 4.0))
+                                    (egui::Align2::RIGHT_TOP, anchor.right_bottom() + vec2(0.0, 4.0))
                                 } else {
                                     (egui::Align2::LEFT_TOP, anchor.left_bottom() + vec2(0.0, 4.0))
                                 };
@@ -7658,7 +7658,7 @@ mod options_switcher_tests {
     }
 
     /// The flyout's tool rows (wide 26 pt clickable widgets in the foreground), top to bottom.
-    fn row_centers(ctx: &egui::Context) -> Vec<egui::Pos2> {
+    fn row_rects(ctx: &egui::Context) -> Vec<Rect> {
         let mut rows: Vec<Rect> = ctx.viewport(|v| {
             v.prev_pass
                 .widgets
@@ -7668,7 +7668,11 @@ mod options_switcher_tests {
                 .collect()
         });
         rows.sort_by(|a, b| a.top().total_cmp(&b.top()));
-        rows.iter().map(|r| r.center()).collect()
+        rows
+    }
+
+    fn row_centers(ctx: &egui::Context) -> Vec<egui::Pos2> {
+        row_rects(ctx).iter().map(|r| r.center()).collect()
     }
 
     #[test]
@@ -7702,5 +7706,29 @@ mod options_switcher_tests {
         frame(&mut app, &ctx, 3.1, vec![egui::Event::PointerMoved(zoom_at), pointer(zoom_at, true)]);
         frame(&mut app, &ctx, 3.15, vec![pointer(zoom_at, false)]);
         assert!(ctx.data(|d| d.get_temp::<Rect>(switch_id)).is_none(), "a lone tool opens nothing");
+    }
+
+    /// The options bar mirrors in RTL, so the flyout must drop below the switcher there too,
+    /// not cover it (#6245 review).
+    #[test]
+    fn the_flyout_opens_below_the_switcher_in_rtl_too() {
+        let _dir = crate::direction::direction_scope(crate::direction::Dir::Rtl);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.ui.tool = Tool::RectMarquee;
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::Pro);
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let at = icon_center(&ctx).expect("the tool icon is a button");
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(&mut app, &ctx, 1.0, vec![egui::Event::PointerMoved(at), pointer(at, true)]);
+        frame(&mut app, &ctx, 1.05, vec![pointer(at, false)]);
+        let switch_id = egui::Id::new("options-tool-flyout");
+        let anchor = ctx.data(|d| d.get_temp::<Rect>(switch_id)).expect("the flyout opened");
+        // One settle frame: the Area lands where it stays.
+        frame(&mut app, &ctx, 1.5, vec![egui::Event::PointerMoved(at)]);
+        let rows = row_rects(&ctx);
+        assert_eq!(rows.len(), 4, "the marquee group's four tools");
+        assert!(rows[0].top() >= anchor.bottom(), "the first row starts below the switcher, not over it");
     }
 }
