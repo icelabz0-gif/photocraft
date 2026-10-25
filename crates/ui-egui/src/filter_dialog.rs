@@ -792,6 +792,9 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         crate::select_mask_view::controls(ui, f);
     }
     for p in parse_spec(&spec) {
+        if cmd == "edit.colorSettings" && p.key == "monitorProfile" {
+            continue;
+        }
         if zoom_center::owns(&cmd, f) && matches!(p.key.as_str(), "centerX" | "centerY") {
             if p.key == "centerX" {
                 zoom_center::row(ui, f);
@@ -1030,7 +1033,14 @@ fn random_seed(entropy: u64, current: i64) -> i64 {
 pub fn params_of(f: &Map<String, Value>) -> Value {
     // A document picker left at "None" (-1) means "not given".
     let unset = |k: &str, v: &Value| k == "mapDocument" && v.as_i64() == Some(-1);
-    Value::Object(f.iter().filter(|(k, v)| !k.starts_with("__") && !unset(k, v)).map(|(k, v)| (k.clone(), v.clone())).collect())
+    Value::Object(
+        f.iter()
+            .filter(|(k, v)| {
+                !k.starts_with("__") && !unset(k, v) && !(f.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") && *k == "monitorProfile")
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 /// Filter › Distort › Displace confirmed with no map: no open document picked and no path typed
@@ -1585,6 +1595,18 @@ mod tests {
         f.insert("__command".into(), json!("edit.autoAlignLayers"));
         egui::Context::default().run_ui(Default::default(), |ui| body(ui, &mut f)).textures_delta.clear();
         assert!(!params_of(&f).as_object().unwrap().contains_key("reference"), "{f:?}");
+    }
+
+    #[test]
+    fn color_settings_leaves_monitor_selection_to_its_own_dialog() {
+        let mut f = Map::new();
+        f.insert("__command".into(), json!("edit.colorSettings"));
+        egui::Context::default().run_ui(Default::default(), |ui| body(ui, &mut f)).textures_delta.clear();
+        assert!(f.contains_key("intent"), "the remaining color settings still render");
+        assert!(!f.contains_key("monitorProfile"), "the legacy monitor selector must stay hidden");
+        // A stale value in an already-open parent must not overwrite the separate selection.
+        f.insert("monitorProfile".into(), json!("srgb"));
+        assert!(params_of(&f).get("monitorProfile").is_none());
     }
 
     /// Layer › Layer Style › Global Light (#3054): Global Light dialog opens with the active

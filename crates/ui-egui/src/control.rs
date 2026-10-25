@@ -848,6 +848,9 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
             wrap(applied)
         }
         "ui.dialog.open" => {
+            if p.get("fields").and_then(Value::as_object).is_some_and(crate::monitor_profiles_ui::owns) {
+                return err("open Monitor Profiles with kind command and command edit.monitorProfiles");
+            }
             let kind = match s("kind").unwrap_or("") {
                 "newDocument" | "NewDocument" => DialogKind::NewDocument,
                 "about" | "About" => DialogKind::About,
@@ -969,6 +972,12 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
         "ui.dialog.set" => {
             let (Some(id), Some(field)) = (u("dialog"), s("field")) else { return err("need `dialog` and `field`") };
             let value = p.get("value").cloned().unwrap_or(Value::Null);
+            if app.ui.dialogs.iter().any(|d| d.id == id && crate::monitor_profiles_ui::owns(&d.fields)) {
+                return wrap(crate::monitor_profiles_ui::set_from_control(app, id, field, value));
+            }
+            if field == "__command" && value.as_str() == Some(photocraft_engine::monitor_cmds::COMMAND) {
+                return err("open Monitor Profiles through its command, not by changing dialog routing");
+            }
             match app.ui.dialog_mut(id) {
                 // A continuation belongs to the dialog that paused it, even when another
                 // action has a valid token. Replacing it would resume or cancel that action.
@@ -987,6 +996,11 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
         "ui.dialog.confirm" | "ui.dialog.apply" => match u("dialog") {
             Some(id) => {
                 let command = app.ui.dialogs.iter().find(|dialog| dialog.id == id).and_then(|dialog| {
+                    if crate::monitor_profiles_ui::owns(&dialog.fields) {
+                        return crate::monitor_profiles_ui::params(&dialog.fields)
+                            .ok()
+                            .map(|params| (photocraft_engine::monitor_cmds::COMMAND.to_string(), params));
+                    }
                     if req.method == "ui.dialog.apply" {
                         dialog.fields.get("values").map(|values| ("prefs.set".to_string(), json!({"path": "", "value": values})))
                     } else {
@@ -1000,7 +1014,15 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     return err(error);
                 }
                 let apply = req.method == "ui.dialog.apply";
-                run_waiting(app, wait, |app| if apply { crate::prefs_ui::apply(app, id) } else { crate::dialogs::confirm(app, id) })
+                run_waiting(app, wait, |app| {
+                    if apply && app.ui.dialogs.iter().any(|d| d.id == id && crate::monitor_profiles_ui::owns(&d.fields)) {
+                        crate::monitor_profiles_ui::apply(app, id, false)
+                    } else if apply {
+                        crate::prefs_ui::apply(app, id)
+                    } else {
+                        crate::dialogs::confirm(app, id)
+                    }
+                })
             }
             None => err("missing `dialog`"),
         },

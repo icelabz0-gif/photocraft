@@ -126,6 +126,8 @@ pub struct ColorSettings {
     /// Monitor profile the canvas is displayed in: `auto` (the main display's profile when the
     /// platform supplies it, else sRGB), a built-in RGB profile id or an `.icc` path.
     pub monitor_profile: String,
+    /// Persistent physical-display overrides; absence inherits monitor_profile.
+    pub monitor_overrides: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ColorSettings {
@@ -146,6 +148,7 @@ impl Default for ColorSettings {
             dither: true,
             blend_text_gamma: photocraft_compose::psblend::TEXT_GAMMA,
             monitor_profile: "auto".into(),
+            monitor_overrides: Default::default(),
         }
     }
 }
@@ -186,13 +189,7 @@ pub fn validate_settings(c: &ColorSettings) -> std::result::Result<(), String> {
             p.device_to_pcs(c.intent()).map_err(|e| format!("working RGB space `{spec}` cannot be a source for {}: {e}", c.intent().id()))?;
         }
     }
-    let m = c.monitor_profile.as_str();
-    if !(m.is_empty() || m == "auto") {
-        let p = resolve_profile(m, None, Some(ColorMode::Rgb)).map_err(|e| e.to_string())?;
-        if p.color_space != ColorSpace::Rgb {
-            return Err(format!("monitor profile `{m}` is {:?}, not RGB", p.color_space));
-        }
-    }
+    crate::monitor_cmds::validate_rules(c)?;
     if Intent::parse(&c.intent).is_none() {
         return Err(format!("unknown intent `{}` (perceptual|relative|saturation|absolute)", c.intent));
     }
@@ -215,6 +212,7 @@ pub struct ColorState {
     pub main_display: Option<u32>,
     display_cache: Mutex<HashMap<DisplayKey, Arc<Transform>>>,
     pub(crate) display: crate::display_color::DisplayCaches,
+    pub(crate) monitor_files: crate::monitor_cmds::Runtime,
     /// View › 32-bit Preview Options per document.
     pub hdr: HashMap<DocId, crate::proof_sim::HdrPreview>,
 }
@@ -1080,7 +1078,10 @@ fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
         None => {}
     }
     validate_settings(&next).map_err(|msg| EngineError::BadParams { cmd: cmd.into(), msg })?;
+    let loaded =
+        crate::monitor_cmds::changed_files(&s.color.settings, &next, &s.color.monitor_files).map_err(|msg| EngineError::BadParams { cmd: cmd.into(), msg })?;
     if next != s.color.settings {
+        s.color.monitor_files.install(&next, loaded);
         photocraft_compose::psblend::set_text_gamma(next.blend_text_gamma);
         s.color.settings = next;
         // Persisted with the preferences.
@@ -1377,6 +1378,7 @@ mod tests {
         let monitor = monitor.with_encoded_bytes();
         s.color.set_displays(Ok(vec![crate::display_color::Display {
             id: 1,
+            key: None,
             name: "Synthetic monitor".into(),
             frame: [0.0, 0.0, 800.0, 600.0],
             profile_name: None,

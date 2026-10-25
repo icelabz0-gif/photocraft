@@ -4120,3 +4120,20 @@ curves	Smooth	Εξομάλυνση
 	Grayscale Ramp	Διαβάθμιση του γκρι
 	Current Colors	Τρέχοντα χρώματα
 	Make Ramp Web Safe	Μόνο χρώματα ιστού στη διαβάθμιση
+
+# Monitor profile chooser (#575)
+	All displays (default)	Όλες οι οθόνες (προεπιλογή)
+	Applying monitor profiles…	Εφαρμογή προφίλ οθονών…
+	Choose ICC File…	Επιλογή αρχείου ICC…
+	Currently applied:	Εφαρμόζεται τώρα:
+	Disconnected display	Αποσυνδεδεμένη οθόνη
+	Display:	Οθόνη:
+	Displays without a unique identity use the default.	Οι οθόνες χωρίς μοναδικό αναγνωριστικό χρησιμοποιούν την προεπιλογή.
+	Monitor Profiles…	Προφίλ οθονών…
+	Profile search reached its limit.	Η αναζήτηση προφίλ έφτασε στο όριό της.
+	Profile:	Προφίλ:
+	Reading profiles…	Ανάγνωση προφίλ…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Συνδέστε ξανά αυτή την οθόνη για να αλλάξετε το προφίλ της. Η «Χρήση προεπιλογής» αφαιρεί την αποθηκευμένη επιλογή.
+	Refresh	Ανανέωση
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Η αναζήτηση καλύπτει τους συνήθεις φακέλους προφίλ. Άλλα προφίλ μπορούν να επιλεγούν ως αρχεία ICC.
+	Use default	Χρήση προεπιλογής

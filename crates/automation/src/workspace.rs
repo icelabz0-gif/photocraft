@@ -259,6 +259,9 @@ fn file_error(operation: &str, path: &str, error: std::io::Error) -> AutomationE
 /// directory capabilities. Automation must use `doc.open`, `doc.save` and
 /// `doc.render` for file effects until those commands are migrated.
 pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), AutomationError> {
+    if id == photocraft_engine::monitor_cmds::COMMAND {
+        return if monitor_profiles_are_memory_only(params) { Ok(()) } else { Err(command_error(id)) };
+    }
     let safe_file_command = matches!(
         id,
         "file.new"
@@ -329,6 +332,38 @@ pub fn authorize_engine_step(id: &str, params: &Value) -> photocraft_engine::Res
 /// [`authorize_desktop_engine_command`] as a [`photocraft_engine::Session::authorize`] hook.
 pub fn authorize_desktop_engine_step(id: &str, params: &Value) -> photocraft_engine::Result<()> {
     authorize_desktop_engine_command(id, params).map_err(|e| photocraft_engine::EngineError::Other(e.to_string()))
+}
+
+/// Monitor rules have nested parameters and display keys legitimately contain a colon.
+/// Allow only the complete, known memory-only grammar; path heuristics would miss aliases
+/// and any future parameter that implicitly reads saved profile files.
+fn monitor_profiles_are_memory_only(params: &Value) -> bool {
+    let Some(object) = params.as_object() else { return false };
+    if object.keys().any(|key| !matches!(key.as_str(), "set" | "clear")) {
+        return false;
+    }
+    let bounded_display = |value: &Value| value.as_str().is_some_and(|key| !key.is_empty() && key.len() <= 128 && !key.contains('\0'));
+    let valid_set = |value: &Value| {
+        value.as_array().is_some_and(|changes| {
+            changes.len() <= photocraft_engine::monitor_cmds::MAX_RULES + 1
+                && changes.iter().all(|change| {
+                    let Some(change) = change.as_object() else { return false };
+                    change.len() == 2
+                        && change.get("display").is_some_and(bounded_display)
+                        && change
+                            .get("profile")
+                            .and_then(Value::as_str)
+                            .is_some_and(|profile| profile == "auto" || photocraft_engine::monitor_cmds::builtin(profile).is_some())
+                })
+        })
+    };
+    let valid_clear = |value: &Value| {
+        value.as_array().is_some_and(|keys| {
+            keys.len() <= photocraft_engine::monitor_cmds::MAX_RULES
+                && keys.iter().all(|key| bounded_display(key) && key.as_str() != Some(photocraft_engine::monitor_cmds::DEFAULT_DISPLAY))
+        })
+    };
+    object.get("set").is_none_or(valid_set) && object.get("clear").is_none_or(valid_clear)
 }
 
 fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
@@ -804,6 +839,118 @@ mod tests {
         assert!(session.execute("file.automate.conditionalModeChange", params).is_err());
         assert_eq!(session.active().unwrap().doc.mode, photocraft_engine::doc::ColorMode::Rgb);
         assert!(authorize_desktop_engine_step("file.saveACopy", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn monitor_profile_authorization_uses_a_closed_nested_grammar() {
+        use serde_json::json;
+        let id = photocraft_engine::monitor_cmds::COMMAND;
+        let display = photocraft_engine::monitor_cmds::mac_display_key(1, 2, 3).unwrap();
+        for params in [
+            json!({}),
+            json!({"set": [], "clear": []}),
+            json!({"set": [{"display": "default", "profile": "auto"}]}),
+            json!({"set": [{"display": display, "profile": "display-p3"}]}),
+            json!({"set": [{"display": "default", "profile": "srgb"}], "clear": [display]}),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_ok(), "{params}");
+            assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{params}");
+        }
+        for params in [
+            json!(null),
+            json!([]),
+            json!({"set": null}),
+            json!({"clear": {}}),
+            json!({"refresh": true}),
+            json!({"refresh": false}),
+            json!({"catalog": true}),
+            json!({"path": "profile.icc"}),
+            json!({"set": [{"display": display, "profile": "auto", "refresh": true}]}),
+            json!({"set": [{"display": display, "file": "profile.icc"}]}),
+            json!({"set": [{"display": display, "profile": {"file": "profile.icc"}}]}),
+            json!({"set": [{"display": 1, "profile": "srgb"}]}),
+            json!({"set": [{"display": "", "profile": "srgb"}]}),
+            json!({"clear": [null]}),
+            json!({"clear": ["default"]}),
+            json!({"clear": ["a".repeat(129)]}),
+            json!({"set": [{"display": "bad\0key", "profile": "srgb"}]}),
+            json!({"set": vec![json!({"display": "default", "profile": "srgb"}); 66]}),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_err(), "{params}");
+            assert!(authorize_desktop_engine_command(id, &params).is_err(), "{params}");
+        }
+        for profile in [
+            "",
+            "working",
+            "working-rgb",
+            "workingRgb",
+            "working-cmyk",
+            "workingGray",
+            "default",
+            "document",
+            "outside.icc",
+            "profile.ICM",
+            "/outside/profile.icc",
+            "C:\\profiles\\display.icc",
+            "file:profile.icc",
+            "future-builtin",
+        ] {
+            let params = json!({"set": [{"display": display, "profile": profile}]});
+            assert!(authorize_engine_command(id, &params).is_err(), "{params}");
+        }
+    }
+
+    #[test]
+    fn color_settings_cannot_bypass_monitor_file_authorization_with_nested_overrides() {
+        let params = serde_json::json!({"monitorOverrides":{"mac-cg1:example":"/outside/monitor.icc"}});
+        assert!(authorize_engine_command("edit.colorSettings", &params).is_err());
+        assert!(authorize_desktop_engine_command("edit.colorSettings", &params).is_err());
+        let mut headless = crate::Headless::new();
+        assert!(headless.command_run("edit.colorSettings", params).is_err());
+        assert!(headless.session.color.settings.monitor_overrides.is_empty());
+    }
+
+    #[test]
+    fn monitor_profile_queries_and_builtin_changes_do_not_reload_saved_files() {
+        use serde_json::json;
+        let mut headless = crate::Headless::new();
+        let id = photocraft_engine::monitor_cmds::COMMAND;
+        let display = photocraft_engine::monitor_cmds::mac_display_key(1, 2, 3).unwrap();
+        headless.session.color.settings.monitor_profile = "/unavailable/default.icc".into();
+        headless.session.color.settings.monitor_overrides.insert(display.clone(), "/unavailable/display.icc".into());
+        let status = headless.command_run(id, json!({})).unwrap();
+        assert_eq!(status["default"], "/unavailable/default.icc");
+        let status = headless.command_run(id, json!({"set": [{"display": "default", "profile": "display-p3"}]})).unwrap();
+        assert_eq!(status["default"], "display-p3");
+        assert_eq!(status["overrides"][&display], "/unavailable/display.icc");
+        let status = headless.command_run(id, json!({"clear": [display]})).unwrap();
+        assert_eq!(status["overrides"], json!({}));
+    }
+
+    #[test]
+    fn nested_actions_cannot_reload_or_choose_monitor_files() {
+        use photocraft_engine::actions_cmds::Action;
+        use serde_json::json;
+        let id = photocraft_engine::monitor_cmds::COMMAND;
+        for params in [
+            json!({"refresh": true}),
+            json!({"set": [{"display": "default", "profile": "/outside/display.icc"}]}),
+            json!({"set": [{"display": "default", "profile": "working"}]}),
+        ] {
+            let mut headless = crate::Headless::new();
+            headless.session.actions.list.push(Action::new("Inner", vec![(id.into(), params.clone())]));
+            headless.session.actions.list.push(Action::new("Outer", vec![("actions.play".into(), json!({"action": "Inner"}))]));
+            let before = headless.command_run(id, json!({})).unwrap();
+            let played = headless.command_run("actions.play", json!({"action": "Outer"})).unwrap();
+            assert_eq!(played["ran"], 0, "{played}");
+            assert!(played["failed"]["error"].as_str().unwrap_or("").contains("ambient filesystem paths"), "{played}");
+            assert_eq!(headless.command_run(id, json!({})).unwrap(), before, "{params}");
+        }
+        let mut headless = crate::Headless::new();
+        headless.session.actions.list.push(Action::new("Built-in", vec![(id.into(), json!({"set": [{"display": "default", "profile": "display-p3"}]}))]));
+        let played = headless.command_run("actions.play", json!({"action": "Built-in"})).unwrap();
+        assert_eq!(played["ran"], 1, "{played}");
+        assert_eq!(headless.command_run(id, json!({})).unwrap()["default"], "display-p3");
     }
 
     #[test]

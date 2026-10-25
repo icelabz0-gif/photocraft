@@ -4537,3 +4537,20 @@ shape	Appearance	Aspetto
 	Grayscale Ramp	Barra scala di grigio
 	Current Colors	Colori correnti
 	Make Ramp Web Safe	Limita la barra ai colori web
+
+# Monitor profile chooser (#575)
+	All displays (default)	Tutti i monitor (predefinito)
+	Applying monitor profiles…	Applicazione dei profili monitor…
+	Choose ICC File…	Scegli file ICC…
+	Currently applied:	Attualmente applicato:
+	Disconnected display	Monitor scollegato
+	Display:	Monitor:
+	Displays without a unique identity use the default.	I monitor senza un identificatore univoco usano il valore predefinito.
+	Monitor Profiles…	Profili monitor…
+	Profile search reached its limit.	La ricerca dei profili ha raggiunto il limite.
+	Profile:	Profilo:
+	Reading profiles…	Lettura dei profili…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Ricollega questo monitor per modificarne il profilo. «Usa predefinito» rimuove la scelta salvata.
+	Refresh	Aggiorna
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	La ricerca comprende le cartelle standard dei profili. Altri profili possono essere scelti come file ICC.
+	Use default	Usa predefinito

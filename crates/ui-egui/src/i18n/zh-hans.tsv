@@ -3089,3 +3089,20 @@ curves	Smooth	平滑
 	Exported {path}	已导出 {path}
 	Exported {n} files	已导出 {n} 个文件
 	Driver: {driver}	驱动程序：{driver}
+
+# Monitor profile chooser (#575)
+	All displays (default)	所有显示器（默认）
+	Applying monitor profiles…	正在应用显示器配置文件…
+	Choose ICC File…	选择 ICC 文件…
+	Currently applied:	当前应用：
+	Disconnected display	未连接的显示器
+	Display:	显示器：
+	Displays without a unique identity use the default.	没有唯一标识的显示器使用默认设置。
+	Monitor Profiles…	显示器配置文件…
+	Profile search reached its limit.	配置文件搜索已达到上限。
+	Profile:	配置文件：
+	Reading profiles…	正在读取配置文件…
+	Reconnect this display to change its profile. Use default removes the saved choice.	请重新连接此显示器以更改其配置文件。“使用默认设置”会移除已保存的选择。
+	Refresh	刷新
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	搜索范围包括标准配置文件文件夹。其他配置文件可作为 ICC 文件选择。
+	Use default	使用默认设置

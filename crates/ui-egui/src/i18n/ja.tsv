@@ -4099,3 +4099,20 @@ curves	Smooth	スムーズ
 	Grayscale Ramp	グレースケールランプ
 	Current Colors	現在のカラー
 	Make Ramp Web Safe	ランプを Web セーフにする
+
+# Monitor profile chooser (#575)
+	All displays (default)	すべてのディスプレイ（既定）
+	Applying monitor profiles…	モニタープロファイルを適用中…
+	Choose ICC File…	ICCファイルを選択…
+	Currently applied:	現在適用中:
+	Disconnected display	未接続のディスプレイ
+	Display:	ディスプレイ:
+	Displays without a unique identity use the default.	固有の識別情報がないディスプレイには既定の設定を使用します。
+	Monitor Profiles…	モニタープロファイル…
+	Profile search reached its limit.	プロファイル検索が上限に達しました。
+	Profile:	プロファイル:
+	Reading profiles…	プロファイルを読み込み中…
+	Reconnect this display to change its profile. Use default removes the saved choice.	プロファイルを変更するには、このディスプレイを再接続してください。「既定を使用」を選ぶと保存済みの選択を削除します。
+	Refresh	更新
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	標準のプロファイルフォルダーを検索します。その他のプロファイルはICCファイルとして選択できます。
+	Use default	既定を使用

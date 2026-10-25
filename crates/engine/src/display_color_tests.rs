@@ -243,7 +243,7 @@ fn monitor_profile_setting() {
 }
 
 fn display(id: u32, frame: [f64; 4], icc: Option<Vec<u8>>) -> crate::display_color::Display {
-    crate::display_color::Display { id, name: format!("Display {id}"), frame, profile_name: None, icc: icc.map(Arc::new) }
+    crate::display_color::Display { key: None, id, name: format!("Display {id}"), frame, profile_name: None, icc: icc.map(Arc::new) }
 }
 
 fn p3() -> Option<Vec<u8>> {
@@ -361,6 +361,8 @@ fn saved_monitor_profile_that_is_gone_is_reported() {
     // Preferences load settings without validating them: a saved .icc path deleted since.
     let mut s = Session::new();
     s.color.settings.monitor_profile = "/nonexistent/photocraft/display.icc".into();
+    assert!(s.color.monitor_status().loading);
+    s.execute("edit.monitorProfiles", serde_json::json!({"refresh":true})).unwrap();
     let st = s.color.monitor_status();
     assert_eq!((st.requested.as_str(), st.source), ("/nonexistent/photocraft/display.icc", "fallback"));
     assert!(st.reason.as_deref().unwrap_or("").contains("cannot read profile"), "{st:?}");

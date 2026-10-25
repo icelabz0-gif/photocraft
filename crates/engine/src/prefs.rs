@@ -1904,7 +1904,10 @@ impl Session {
         let presets = v.as_object_mut().and_then(|m| m.remove("presets"));
         let mut invalid = Vec::new();
         let prefs: Preferences = read_lenient(v, &[], &mut invalid);
-        if let Some(c) = color {
+        if let Some(mut c) = color {
+            crate::monitor_cmds::sanitize_saved(&mut c);
+            self.color.monitor_files.files.clear();
+            self.color.monitor_files.changed();
             self.color.settings = read_lenient(c, &["colorSettings"], &mut invalid);
             photocraft_compose::psblend::set_text_gamma(self.color.settings.blend_text_gamma);
         }
@@ -1944,6 +1947,8 @@ impl Session {
             let next = serde_json::from_value(cur).map_err(|e| format!("invalid value for `{path}`: {e}"))?;
             if validate_color {
                 crate::color_cmds::validate_settings(&next)?;
+                let loaded = crate::monitor_cmds::changed_files(&self.color.settings, &next, &self.color.monitor_files)?;
+                self.color.monitor_files.install(&next, loaded);
             }
             self.color.settings = next;
             self.prefs.edit(|_| ());
@@ -2088,6 +2093,16 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
         s.prefs.edit(|p| *p = saved_prefs);
         s.color.settings = saved_color;
         return Err(bad(cmd, e));
+    }
+    if color_changed {
+        match crate::monitor_cmds::changed_files(&saved_color, &s.color.settings, &s.color.monitor_files) {
+            Ok(loaded) => s.color.monitor_files.install(&s.color.settings, loaded),
+            Err(e) => {
+                s.prefs.edit(|p| *p = saved_prefs);
+                s.color.settings = saved_color;
+                return Err(bad(cmd, e));
+            }
+        }
     }
     // `colorSettings.blendTextGamma` lives in the compositor too, as `edit.colorSettings` sets it.
     photocraft_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);

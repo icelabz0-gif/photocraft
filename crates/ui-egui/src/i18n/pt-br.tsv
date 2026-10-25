@@ -4350,3 +4350,20 @@ layerLabel	No Color	Sem cor
 	Grayscale Ramp	Rampa de tons de cinza
 	Current Colors	Cores atuais
 	Make Ramp Web Safe	Tornar rampa segura para a Web
+
+# Monitor profile chooser (#575)
+	All displays (default)	Todos os monitores (padrão)
+	Applying monitor profiles…	Aplicando perfis de monitor…
+	Choose ICC File…	Escolher arquivo ICC…
+	Currently applied:	Aplicado atualmente:
+	Disconnected display	Monitor desconectado
+	Display:	Monitor:
+	Displays without a unique identity use the default.	Monitores sem um identificador único usam o padrão.
+	Monitor Profiles…	Perfis de monitor…
+	Profile search reached its limit.	A busca de perfis atingiu o limite.
+	Profile:	Perfil:
+	Reading profiles…	Lendo perfis…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Reconecte este monitor para alterar seu perfil. “Usar padrão” remove a escolha salva.
+	Refresh	Atualizar
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	A busca abrange as pastas padrão de perfis. Outros perfis podem ser escolhidos como arquivos ICC.
+	Use default	Usar padrão

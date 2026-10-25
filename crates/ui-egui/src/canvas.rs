@@ -1371,7 +1371,7 @@ pub(crate) fn display_image(display: Option<&photocraft_engine::display_color::C
     }
 }
 
-/// The canvas display of `doc` on `display` (`None`: the main window's) and a key that changes
+/// The canvas display of `doc` on `display` (`None`: the default rule) and a key that changes
 /// with it (folded into the canvas caches' preview keys, so a monitor or profile change
 /// re-renders).
 pub(crate) fn canvas_display(
@@ -1379,7 +1379,7 @@ pub(crate) fn canvas_display(
     doc: &Document,
     display: Option<u32>,
 ) -> (Option<std::sync::Arc<photocraft_engine::display_color::CanvasDisplay>>, u64) {
-    match app.session.color.canvas_display_for(doc, display.or(app.session.color.main_display)) {
+    match app.session.color.canvas_display_for(doc, display) {
         Ok(d) => {
             let k = d.key;
             (Some(d), k)
@@ -1617,7 +1617,7 @@ pub fn navigator_texture(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     let (snapshot, id, revision, last_damage) =
         app.session.documents().get(idx).map(|st| (std::sync::Arc::downgrade(&st.doc), st.doc.id, st.revision, st.last_damage))?;
     let (doc, preview_key) = display_doc(app, idx);
-    let (display, display_key) = canvas_display(app, &doc, None);
+    let (display, display_key) = canvas_display(app, &doc, app.session.color.main_display);
     let preview_key = preview_key ^ display_key;
     let cached = app.navigator_textures.get(&id).cloned();
     if let Some((r, p, _, t)) = &cached
@@ -7466,8 +7466,8 @@ mod tests {
         app.run("edit.fill", json!({"color": "#cc8040"})).unwrap();
         let icc = |id: &str| Some(resolve_profile(id, None, None).unwrap().to_bytes());
         app.session.color.set_displays(Ok(vec![
-            Display { id: 1, name: "A".into(), frame: [0.0, 0.0, 100.0, 100.0], profile_name: None, icc: icc("srgb") },
-            Display { id: 4, name: "B".into(), frame: [100.0, 0.0, 100.0, 100.0], profile_name: None, icc: icc("display-p3") },
+            Display { key: None, id: 1, name: "A".into(), frame: [0.0, 0.0, 100.0, 100.0], profile_name: None, icc: icc("srgb") },
+            Display { key: None, id: 4, name: "B".into(), frame: [100.0, 0.0, 100.0, 100.0], profile_name: None, icc: icc("display-p3") },
         ]));
         app
     }
@@ -7777,6 +7777,39 @@ mod tests {
         assert!(gpu.has_display_lut(key, 4));
         // The shared texture's key is the same for both displays.
         assert_eq!(texture_key(canvas_display(&app, &doc, Some(1)).0.as_deref()), texture_key(canvas_display(&app, &doc, Some(4)).0.as_deref()));
+    }
+
+    #[test]
+    fn navigator_on_gpu_uses_main_display_rule_and_refreshes_on_move() {
+        let _gpu = photocraft_testkit::gpu_lock();
+        let Ok(rs) = std::panic::catch_unwind(|| egui_kittest::wgpu::create_render_state(crate::gpu_canvas::wgpu_setup(), Default::default())) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut app = app_on_two_displays();
+        let key = photocraft_engine::monitor_cmds::mac_display_key(1, 1, 4).unwrap();
+        app.session.color.displays[1].key = Some(key.clone());
+        app.run("edit.monitorProfiles", json!({"set":[{"display":key,"profile":"rec2020"}]})).unwrap();
+        let doc = app.session.active().unwrap().doc.clone();
+        let ctx = egui::Context::default();
+        let buf = photocraft_compose::thumbnail_buffer(&doc, NAVIGATOR_SIDE);
+        app.set_wgpu(rs);
+        let mut previous = None;
+        for on in [Some(4), Some(1), None, Some(4)] {
+            app.session.color.main_display = on;
+            let canvas = app.session.color.canvas_display_for(&doc, on).unwrap();
+            let expected = display_image(Some(&canvas), &buf).pixels;
+            let (_, preview) = display_doc(&mut app, 0);
+            let tex = navigator_texture(&mut app, &ctx, 0).unwrap();
+            let mut delta = ctx.tex_manager().write().take_delta();
+            if previous.as_ref() != Some(&expected) {
+                let egui::ImageData::Color(image) = &delta.set.get(&tex).expect("changed monitor must upload new navigator pixels")[0].image;
+                assert_eq!(image.pixels, expected, "display {on:?}");
+            }
+            assert_eq!(app.navigator_textures[&doc.id].1, preview ^ canvas.key);
+            previous = Some(expected);
+            delta.clear();
+        }
     }
 
     /// The navigator's update after an edit (its image with the edit's damage, grown by the

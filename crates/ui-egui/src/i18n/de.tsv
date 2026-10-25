@@ -3433,3 +3433,20 @@ curves	Smooth	Glätten
 	Grayscale Ramp	Graustufenbalken
 	Current Colors	Aktuelle Farben
 	Make Ramp Web Safe	Farbbalken auf Webfarben beschränken
+
+# Monitor profile chooser (#575)
+	All displays (default)	Alle Monitore (Standard)
+	Applying monitor profiles…	Monitorprofile werden angewendet…
+	Choose ICC File…	ICC-Datei wählen…
+	Currently applied:	Aktuell angewendet:
+	Disconnected display	Nicht verbundener Monitor
+	Display:	Monitor:
+	Displays without a unique identity use the default.	Monitore ohne eindeutige Kennung verwenden den Standard.
+	Monitor Profiles…	Monitorprofile…
+	Profile search reached its limit.	Die Profilsuche hat ihr Limit erreicht.
+	Profile:	Profil:
+	Reading profiles…	Profile werden gelesen…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Verbinden Sie diesen Monitor erneut, um sein Profil zu ändern. „Standard verwenden“ entfernt die gespeicherte Auswahl.
+	Refresh	Aktualisieren
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Die Suche umfasst die üblichen Profilordner. Andere Profile können als ICC-Dateien ausgewählt werden.
+	Use default	Standard verwenden

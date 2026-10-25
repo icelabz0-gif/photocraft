@@ -4149,3 +4149,20 @@ cameraData	Lens	Lens
 	Grayscale Ramp	Gri Tonlama Şeridi
 	Current Colors	Geçerli Renkler
 	Make Ramp Web Safe	Şeridi Web Renkleriyle Sınırla
+
+# Monitor profile chooser (#575)
+	All displays (default)	Tüm ekranlar (varsayılan)
+	Applying monitor profiles…	Monitör profilleri uygulanıyor…
+	Choose ICC File…	ICC Dosyası Seç…
+	Currently applied:	Şu anda uygulanan:
+	Disconnected display	Bağlantısı kesilmiş ekran
+	Display:	Ekran:
+	Displays without a unique identity use the default.	Benzersiz kimliği olmayan ekranlar varsayılanı kullanır.
+	Monitor Profiles…	Monitör Profilleri…
+	Profile search reached its limit.	Profil araması sınırına ulaştı.
+	Profile:	Profil:
+	Reading profiles…	Profiller okunuyor…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Profilini değiştirmek için bu ekranı yeniden bağlayın. “Varsayılanı kullan” kayıtlı seçimi kaldırır.
+	Refresh	Yenile
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Arama, standart profil klasörlerini kapsar. Diğer profiller ICC dosyaları olarak seçilebilir.
+	Use default	Varsayılanı kullan

@@ -81,6 +81,7 @@ pub fn poll_frame(app: &mut PhotocraftApp, ctx: &egui::Context, _frame: &eframe:
 }
 
 fn poll_with_output_name(app: &mut PhotocraftApp, ctx: &egui::Context, output_name: Option<String>) {
+    crate::monitor_profiles_ui::poll(app, ctx);
     set_root_output_name(app, output_name);
     if let Some(rx) = &app.monitors.pending {
         let r = match rx.try_recv() {
@@ -106,6 +107,9 @@ fn poll_with_output_name(app: &mut PhotocraftApp, ctx: &egui::Context, output_na
     let focused = ctx.input(|i| i.focused) || std::mem::take(&mut app.monitors.window_focused);
     let regained = focused && app.monitors.focused == Some(false);
     app.monitors.focused = Some(focused);
+    if regained {
+        crate::monitor_profiles_ui::refresh(app);
+    }
     if regained || displays_changed(app, ctx) {
         app.monitors.again = true;
     }
@@ -199,6 +203,7 @@ fn start(app: &mut PhotocraftApp, now: f64) {
 /// management). Manual monitor profiles don't depend on the reading. A failed re-read keeps the
 /// previous reading and says so in the status.
 pub fn apply(app: &mut PhotocraftApp, r: Detection) {
+    crate::monitor_profiles_ui::refresh(app);
     if let Some(e) = app.session.color.set_displays(r) {
         log::warn!("re-reading the display profiles failed: {e}; keeping the previous ones");
     }
@@ -360,8 +365,22 @@ mod tests {
     /// right and higher up.
     fn displays(builtin: Option<Arc<Vec<u8>>>) -> Vec<Display> {
         vec![
-            Display { id: 1, name: "Built-in Retina Display".into(), frame: [0.0, 0.0, 1728.0, 1117.0], profile_name: Some("Color LCD".into()), icc: builtin },
-            Display { id: 4, name: "ROG PG32UQX".into(), frame: [1728.0, -667.0, 3008.0, 1692.0], profile_name: Some("Apple_Display".into()), icc: p3() },
+            Display {
+                key: None,
+                id: 1,
+                name: "Built-in Retina Display".into(),
+                frame: [0.0, 0.0, 1728.0, 1117.0],
+                profile_name: Some("Color LCD".into()),
+                icc: builtin,
+            },
+            Display {
+                key: None,
+                id: 4,
+                name: "ROG PG32UQX".into(),
+                frame: [1728.0, -667.0, 3008.0, 1692.0],
+                profile_name: Some("Apple_Display".into()),
+                icc: p3(),
+            },
         ]
     }
 
@@ -436,7 +455,7 @@ mod tests {
     fn displays_without_profiles_share_one_notice() {
         // Two profile-less monitors (a Linux desk: DP-4 and DP-5) gave two identical cards.
         let mut app = app();
-        let desk = |id, name: &str, x| Display { id, name: name.into(), frame: [x, 0.0, 1920.0, 1080.0], profile_name: None, icc: None };
+        let desk = |id, name: &str, x| Display { key: None, id, name: name.into(), frame: [x, 0.0, 1920.0, 1080.0], profile_name: None, icc: None };
         apply(&mut app, Ok(vec![desk(1, "DP-4", 0.0), desk(2, "DP-5", 1920.0)]));
         assert_eq!(app.ui.notices.len(), 1);
         let lines = &app.ui.notices[0].lines;
@@ -626,8 +645,8 @@ mod tests {
     fn root_window_uses_winit_monitor_name_to_select_its_profile() {
         let mut app = app();
         app.session.color.set_displays(Ok(vec![
-            Display { id: 1, name: "DP-1".into(), frame: [0.0, 0.0, 1920.0, 1080.0], profile_name: None, icc: None },
-            Display { id: 2, name: "HDMI-1".into(), frame: [1920.0, 0.0, 1920.0, 1080.0], profile_name: None, icc: None },
+            Display { key: None, id: 1, name: "DP-1".into(), frame: [0.0, 0.0, 1920.0, 1080.0], profile_name: None, icc: None },
+            Display { key: None, id: 2, name: "HDMI-1".into(), frame: [1920.0, 0.0, 1920.0, 1080.0], profile_name: None, icc: None },
         ]));
         app.monitors.root_output_name = Some("HDMI-1".into());
         let ctx = egui::Context::default();

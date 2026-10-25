@@ -111,6 +111,151 @@ fn read_one(path: &Path) -> Option<InstalledProfile> {
     Some(InstalledProfile { path, description, class: p.class, color_space: p.color_space })
 }
 
+/// A monitor destination discovered in one of the standard profile folders.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MonitorCatalogProfile {
+    pub path: String,
+    pub description: String,
+    /// A content identity, also used to match a connected display's automatic profile.
+    pub fingerprint: String,
+}
+
+/// This is a bounded folder search, not the full macOS ColorSync catalog.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MonitorCatalog {
+    pub profiles: Vec<MonitorCatalogProfile>,
+    pub complete: bool,
+    pub truncated: bool,
+    /// Unreadable files/folders, excluded directory symlinks and profiles that cannot be
+    /// RGB monitor destinations.
+    pub skipped: usize,
+}
+
+/// Search profile folders off the UI thread. No global cache: each explicit refresh observes
+/// current bytes even when a calibration tool keeps the same filename, length and timestamp.
+/// Within these folders, directory symlinks are skipped instead of expanding the search beyond
+/// its roots; file symlinks still use the same bounded regular-file reader as other profiles.
+/// The web cannot search native profile folders and returns an empty, partial catalog.
+pub fn monitor_catalog(dirs: &[PathBuf]) -> MonitorCatalog {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        monitor_catalog_with_limits(dirs, MAX_FILES, crate::monitor_cmds::MAX_TOTAL_BYTES)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dirs;
+        MonitorCatalog::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn monitor_catalog_with_limits(dirs: &[PathBuf], max_entries: usize, byte_budget: u64) -> MonitorCatalog {
+    struct Scan {
+        catalog: MonitorCatalog,
+        remaining_entries: usize,
+        remaining_bytes: u64,
+        visited: std::collections::BTreeSet<PathBuf>,
+    }
+    impl Scan {
+        fn entry(&mut self) -> bool {
+            if self.remaining_entries == 0 || self.remaining_bytes == 0 {
+                self.catalog.truncated = true;
+                return false;
+            }
+            self.remaining_entries -= 1;
+            true
+        }
+
+        fn directory(&mut self, dir: &Path, depth: usize) {
+            if !self.visited.insert(dir.to_owned()) {
+                return;
+            }
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(_) => {
+                    self.catalog.skipped += 1;
+                    return;
+                }
+            };
+            for entry in entries {
+                if !self.entry() {
+                    return;
+                }
+                let Ok(entry) = entry else {
+                    self.catalog.skipped += 1;
+                    continue;
+                };
+                let Ok(kind) = entry.file_type() else {
+                    self.catalog.skipped += 1;
+                    continue;
+                };
+                let path = entry.path();
+                if kind.is_symlink() && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    // Do not recurse through linked directories, even when they are acyclic.
+                    self.catalog.skipped += 1;
+                    continue;
+                }
+                if kind.is_dir() {
+                    if depth < MAX_DEPTH {
+                        self.directory(&path, depth + 1);
+                    } else {
+                        self.catalog.skipped += 1;
+                        self.catalog.truncated = true;
+                    }
+                } else if path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("icc") || x.eq_ignore_ascii_case("icm")) {
+                    self.profile(&path);
+                }
+            }
+        }
+
+        fn profile(&mut self, path: &Path) {
+            // Command specs are UTF-8 paths. Lossy conversion could make Apply read a different
+            // file; exclude names that cannot round-trip through command parameters.
+            let Some(spec) = path.to_str().filter(|s| s.len() <= 4096) else {
+                self.catalog.skipped += 1;
+                return;
+            };
+            if std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= crate::monitor_cmds::MAX_PROFILE_BYTES && m.len() > self.remaining_bytes) {
+                self.catalog.truncated = true;
+                self.remaining_bytes = 0;
+                return;
+            }
+            let bytes = match crate::monitor_cmds::read_profile_bytes_limited(path, &mut self.remaining_bytes) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    self.catalog.skipped += 1;
+                    self.catalog.truncated |= self.remaining_bytes == 0;
+                    return;
+                }
+            };
+            let profile = match Profile::parse(&bytes) {
+                Ok(profile) if crate::monitor_cmds::validate_profile(&profile).is_ok() => profile,
+                _ => {
+                    self.catalog.skipped += 1;
+                    return;
+                }
+            };
+            let description = if profile.description.trim().is_empty() {
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or(spec).to_string()
+            } else {
+                profile.description.trim().to_string()
+            };
+            self.catalog.profiles.push(MonitorCatalogProfile { path: spec.into(), description, fingerprint: crate::monitor_cmds::fingerprint(&bytes) });
+        }
+    }
+
+    let mut scan = Scan { catalog: MonitorCatalog::default(), remaining_entries: max_entries, remaining_bytes: byte_budget, visited: Default::default() };
+    for dir in dirs {
+        if !scan.entry() {
+            break;
+        }
+        scan.directory(dir, 0);
+    }
+    scan.catalog.profiles.sort_by(|a, b| a.description.to_lowercase().cmp(&b.description.to_lowercase()).then_with(|| a.path.cmp(&b.path)));
+    scan.catalog.profiles.dedup_by(|a, b| a.path == b.path);
+    scan.catalog
+}
+
 /// How long a scan is reused: dialogs ask every frame, and a newly installed profile shows up
 /// within this long.
 const FRESH: std::time::Duration = std::time::Duration::from_secs(10);
@@ -222,6 +367,74 @@ mod tests {
     fn scan_of_nothing_is_empty() {
         assert!(scan(&[]).is_empty());
         assert!(scan(&[PathBuf::from("/definitely/not/a/folder")]).is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn monitor_catalog_lists_only_applicable_rgb_profiles_and_observes_replacements() {
+        let d = temp_dir("monitors");
+        let path = d.join("display.icc");
+        std::fs::write(&path, Builtin::Srgb.profile().to_bytes().as_slice()).unwrap();
+        std::fs::write(d.join("printer.icc"), Builtin::CoatedCmyk.profile().to_bytes().as_slice()).unwrap();
+        std::fs::write(d.join("broken.icc"), b"not a profile").unwrap();
+        let first = monitor_catalog(std::slice::from_ref(&d));
+        assert!(!first.complete && !first.truncated);
+        assert_eq!(first.skipped, 2);
+        assert_eq!(first.profiles.len(), 1);
+        assert_eq!(first.profiles[0].path, path.to_str().unwrap());
+        assert_eq!(first.profiles[0].fingerprint, crate::monitor_cmds::fingerprint(&Builtin::Srgb.profile().to_bytes()));
+
+        std::fs::write(&path, Builtin::DisplayP3.profile().to_bytes().as_slice()).unwrap();
+        let next = monitor_catalog(std::slice::from_ref(&d));
+        assert_eq!(next.profiles.len(), 1);
+        assert_ne!(first.profiles[0].fingerprint, next.profiles[0].fingerprint);
+        assert_eq!(next.profiles[0].description, Builtin::DisplayP3.profile().description);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn monitor_catalog_bounds_all_directory_entries_and_file_reads() {
+        let d = temp_dir("monitor-limits");
+        for n in 0..10 {
+            std::fs::write(d.join(format!("notes-{n}.txt")), b"not a profile").unwrap();
+        }
+        let catalog = monitor_catalog_with_limits(std::slice::from_ref(&d), 4, crate::monitor_cmds::MAX_TOTAL_BYTES);
+        assert!(catalog.truncated && catalog.profiles.is_empty());
+        std::fs::write(d.join("display.icc"), Builtin::Srgb.profile().to_bytes().as_slice()).unwrap();
+        let catalog = monitor_catalog_with_limits(std::slice::from_ref(&d), MAX_FILES, 132);
+        assert!(catalog.truncated && catalog.profiles.is_empty());
+
+        // Invalid data also consumes the shared read budget; it cannot allow unlimited reads.
+        let broken = d.join("broken.icc");
+        std::fs::write(&broken, [0u8; 132]).unwrap();
+        let mut remaining = 200;
+        assert!(crate::monitor_cmds::read_profile_bytes_limited(&broken, &mut remaining).is_err());
+        assert_eq!(remaining, 68);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn monitor_catalog_counts_directory_symlinks_as_skipped_and_reads_file_symlinks() {
+        let d = temp_dir("monitor-symlinks");
+        let external = temp_dir("monitor-symlink-target");
+        std::fs::write(external.join("external.icc"), Builtin::DisplayP3.profile().to_bytes().as_slice()).unwrap();
+        std::os::unix::fs::symlink(&external, d.join("vendor/calibrations")).unwrap();
+        std::os::unix::fs::symlink(&d, d.join("vendor/cycle")).unwrap();
+        let original = d.join("display.icc");
+        let alias = d.join("linked.icm");
+        std::fs::write(&original, Builtin::Srgb.profile().to_bytes().as_slice()).unwrap();
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        let catalog = monitor_catalog(std::slice::from_ref(&d));
+        assert_eq!(catalog.skipped, 2, "both acyclic and cyclic directory links are excluded");
+        assert_eq!(catalog.profiles.len(), 2);
+        let paths: Vec<_> = catalog.profiles.iter().map(|profile| profile.path.as_str()).collect();
+        assert_eq!(paths, vec![original.to_str().unwrap(), alias.to_str().unwrap()]);
+        assert!(catalog.profiles.iter().all(|profile| profile.fingerprint == crate::monitor_cmds::fingerprint(&Builtin::Srgb.profile().to_bytes())));
+        assert!(!catalog.truncated);
+        std::fs::remove_dir_all(d).unwrap();
+        std::fs::remove_dir_all(external).unwrap();
     }
 
     #[test]

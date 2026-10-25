@@ -4130,3 +4130,20 @@ curves	Smooth	Згладити
 	Grayscale Ramp	Шкала градацій сірого
 	Current Colors	Поточні кольори
 	Make Ramp Web Safe	Зробити шкалу безпечною для вебу
+
+# Monitor profile chooser (#575)
+	All displays (default)	Усі монітори (типово)
+	Applying monitor profiles…	Застосування профілів моніторів…
+	Choose ICC File…	Вибрати файл ICC…
+	Currently applied:	Зараз застосовано:
+	Disconnected display	Від’єднаний монітор
+	Display:	Монітор:
+	Displays without a unique identity use the default.	Монітори без унікального ідентифікатора використовують типове налаштування.
+	Monitor Profiles…	Профілі моніторів…
+	Profile search reached its limit.	Досягнуто ліміту пошуку профілів.
+	Profile:	Профіль:
+	Reading profiles…	Читання профілів…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Знову під’єднайте цей монітор, щоб змінити його профіль. «Використовувати типове» видаляє збережений вибір.
+	Refresh	Оновити
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Пошук охоплює стандартні теки профілів. Інші профілі можна вибрати як файли ICC.
+	Use default	Використовувати типове

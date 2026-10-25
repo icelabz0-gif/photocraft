@@ -168,6 +168,22 @@ UI-level commands (`view.zoomIn`, `window.theme.pro`, `edit.search`, …) are al
 
 Commands that read or write files by path, instead of through the automation roots, are refused with "automation command `…` uses ambient filesystem paths and is disabled; use capability-scoped document methods". That covers every `file.*` command except `file.new`, the `file.close*` commands and a few path-free ones such as `file.fileInfo`, so `file.open`, `file.save`, `file.saveAs` and `file.saveACopy` always fail here: open and save with `app.open` / `app.save`. Path parameters of other commands (`layer.exportAs {path}`, `filter.distort.displace {mapPath}`, preset imports, and plug-in install/reload) are refused the same way. `prefs.set` rejects whole-preference updates and file-backed sections (`colorSettings`, `scriptEvents`, `historyLog`, `plugIns` and `scratchDisks`) so automation cannot configure ambient file access indirectly. The desktop app also refuses `image.mode.*`, which can load the colour profiles set in its preferences. The rules are in `crates/automation/src/workspace.rs`.
 
+`edit.monitorProfiles {}` reports the current default, per-display overrides and applied
+monitor status without reading files. Automation may set `"auto"` or an explicit built-in
+profile ID, for example `{"set":[{"display":"default","profile":"display-p3"}]}`, and
+remove a saved override with `{"clear":["<display key>"]}`. Use the opaque persistent key
+from the display list, not the transient numeric display ID. Only connected displays with
+a unique identity accept new overrides; without detected displays, the CLI can set only
+`"default"`. Clearing an override also works for a disconnected display. Changes are atomic.
+File paths, working/document-profile aliases, `refresh` (including `false`) and unknown
+parameters are refused by automation, including in nested actions and synthetic UI input.
+Monitor dialog automation can edit only `target` and `choices`; its baseline and command
+routing are read-only. Automated draft edits retain their restrictions on later human Apply.
+Native interactive file selection and catalog/Refresh controls are not automation file
+authority; choose ICC files through the interactive desktop dialog. A built-in/default
+change does not reload other saved ICC files. Monitor choices affect display output only,
+not document profiles or exported pixels.
+
 Embedded Smart Objects can be opened with `layer.smartObjects.editContents {layer?}` or
 unpacked with `layer.smartObjects.convertToLayers {layer?}`. This includes Photoshop sources
 stored by UUID in the document's embedded linked-layer blocks. Sources requiring a disk read

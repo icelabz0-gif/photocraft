@@ -458,6 +458,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     }
                 }
                 DialogKind::Command if crate::color_range_ui::owns(&fields) => crate::color_range_ui::body(app, ui, &mut fields),
+                DialogKind::Command if crate::monitor_profiles_ui::owns(&fields) => crate::monitor_profiles_ui::body(app, ui, &mut fields, d.id),
                 DialogKind::Command if crate::prefs_ui::owns(&fields) => crate::prefs_ui::body(app, ui, &mut fields),
                 DialogKind::Command if fields.contains_key("__export") => crate::export_dialog::body(app, ui, &mut fields),
                 // Image Size and Canvas Size open on Width, selected (#2329).
@@ -469,6 +470,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     // Color Settings: the monitor profile in use can change while it is open.
                     if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
                         fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
+                        if !cfg!(target_arch = "wasm32") && crate::widgets::secondary_button(ui, tl!("Monitor Profiles…"), 160.0).clicked() {
+                            crate::monitor_profiles_ui::open(app);
+                        }
                     }
                     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
                     // OK / Cancel buttons stay inside a small window. The preview window below the
@@ -547,7 +551,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                             crate::file_ui::ok_label(&d.fields).unwrap_or(tl!("OK"))
                         };
                         // Dialogs that need an input first (a preset name, a selection) grey OK out.
-                        let can_ok = crate::crop_presets::can_confirm(app, &fields) && crate::stack_dialog::can_confirm(&fields);
+                        let can_ok = crate::crop_presets::can_confirm(app, &fields)
+                            && crate::stack_dialog::can_confirm(&fields)
+                            && !(crate::monitor_profiles_ui::owns(&fields) && crate::monitor_profiles_ui::busy(app));
                         let ok = DialogButton::new(ButtonRole::Default, ok_label, 84.0).enabled(can_ok);
                         // Photoshop: holding Alt turns Cancel into Reset (the dialog stays open).
                         // Dialogs opt in via `dialog_alt_reset::supported` (per marker).
@@ -563,6 +569,16 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         let clicked = if d.kind == DialogKind::Command && crate::prefs_ui::is_preferences(&fields) {
                             let changed = crate::prefs_ui::preferences_changed(app, &fields);
                             dialog_buttons(ui, &[ok, cancel, DialogButton::new(ButtonRole::Apply, tl!("Apply"), 84.0).enabled(changed)])
+                        } else if crate::monitor_profiles_ui::owns(&fields) {
+                            dialog_buttons(
+                                ui,
+                                &[
+                                    ok,
+                                    cancel,
+                                    DialogButton::new(ButtonRole::Apply, tl!("Apply"), 84.0)
+                                        .enabled(crate::monitor_profiles_ui::changed(&fields) && !crate::monitor_profiles_ui::busy(app)),
+                                ],
+                            )
                         } else if crate::mask_trash_prompt::owns(&fields) && !crate::mask_trash_prompt::is_vector(&fields) {
                             // Photoshop: Apply / Cancel / Delete. Delete answers with the choice set.
                             let apply = DialogButton::new(ButtonRole::Default, tl!("Apply"), 84.0).enabled(crate::mask_trash_prompt::can_apply(&fields));
@@ -656,7 +672,11 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             crate::color_picker_ui::open_requested(app, d.id);
         }
         if apply_requested && outcome.is_none() {
-            let _ = crate::prefs_ui::apply(app, d.id);
+            if crate::monitor_profiles_ui::owns(&d.fields) {
+                let _ = crate::monitor_profiles_ui::apply(app, d.id, false);
+            } else {
+                let _ = crate::prefs_ui::apply(app, d.id);
+            }
         }
         match outcome {
             Some(true) => {
@@ -798,6 +818,9 @@ fn file_command(fields: &Fields) -> Option<&'static str> {
 
 /// Confirm a dialog: run its action and close it. Used by the OK button and by automation.
 pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
+    if app.ui.dialogs.iter().any(|d| d.id == id && crate::monitor_profiles_ui::owns(&d.fields)) {
+        return crate::monitor_profiles_ui::apply(app, id, true);
+    }
     if crate::layer_style::color_picker::has_child(app, id) {
         return Err("confirm or cancel the Layer Style color picker first".into());
     }
@@ -922,6 +945,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 /// Cancel a dialog and its dependent Layer Style picker, without applying edits.
 pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
     let closed = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
+    crate::monitor_profiles_ui::cancel(app, id);
     crate::actions::stopped(app, &closed.fields);
     if crate::guide_layout_ui::owns(&closed.fields) {
         app.ui.dialogs.retain(|child| child.fields.get("__dialog").and_then(Value::as_u64) != Some(id));
@@ -947,6 +971,9 @@ pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 /// schema dialog for filters, the Color Range dialog for `select.colorRange`, otherwise a bare
 /// confirm dialog.
 pub fn open_command_dialog(app: &mut PhotocraftApp, command: &str, label: &str) -> u64 {
+    if command == photocraft_engine::monitor_cmds::COMMAND {
+        return crate::monitor_profiles_ui::open(app);
+    }
     if command == "view.newGuideLayout" {
         return crate::guide_layout_ui::open(app);
     }

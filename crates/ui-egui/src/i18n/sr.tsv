@@ -4493,3 +4493,20 @@ shape	Appearance	Izgled
 	Grayscale Ramp	Skala nijansi sive
 	Current Colors	Trenutne boje
 	Make Ramp Web Safe	Učini skalu bezbednom za veb
+
+# Monitor profile chooser (#575)
+	All displays (default)	Svi ekrani (podrazumevano)
+	Applying monitor profiles…	Primenjivanje profila monitora…
+	Choose ICC File…	Izaberi ICC datoteku…
+	Currently applied:	Trenutno primenjeno:
+	Disconnected display	Nepovezan ekran
+	Display:	Ekran:
+	Displays without a unique identity use the default.	Ekrani bez jedinstvenog identifikatora koriste podrazumevano podešavanje.
+	Monitor Profiles…	Profili monitora…
+	Profile search reached its limit.	Pretraga profila je dostigla ograničenje.
+	Profile:	Profil:
+	Reading profiles…	Čitanje profila…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Ponovo povežite ovaj ekran da biste promenili njegov profil. „Koristi podrazumevano“ uklanja sačuvani izbor.
+	Refresh	Osveži
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Pretraga obuhvata standardne fascikle profila. Drugi profili se mogu izabrati kao ICC datoteke.
+	Use default	Koristi podrazumevano

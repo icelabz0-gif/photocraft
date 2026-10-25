@@ -3913,3 +3913,20 @@ curves	Smooth	Làm mượt
 	Grayscale Ramp	Dải thang xám
 	Current Colors	Màu hiện tại
 	Make Ramp Web Safe	Giới hạn dải màu ở màu web
+
+# Monitor profile chooser (#575)
+	All displays (default)	Tất cả màn hình (mặc định)
+	Applying monitor profiles…	Đang áp dụng hồ sơ màn hình…
+	Choose ICC File…	Chọn tệp ICC…
+	Currently applied:	Đang áp dụng:
+	Disconnected display	Màn hình đã ngắt kết nối
+	Display:	Màn hình:
+	Displays without a unique identity use the default.	Màn hình không có mã nhận dạng duy nhất sẽ dùng mặc định.
+	Monitor Profiles…	Hồ sơ màn hình…
+	Profile search reached its limit.	Tìm kiếm hồ sơ đã đạt giới hạn.
+	Profile:	Hồ sơ:
+	Reading profiles…	Đang đọc hồ sơ…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Kết nối lại màn hình này để đổi hồ sơ. “Dùng mặc định” sẽ xóa lựa chọn đã lưu.
+	Refresh	Làm mới
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Tìm kiếm trong các thư mục hồ sơ tiêu chuẩn. Có thể chọn hồ sơ khác dưới dạng tệp ICC.
+	Use default	Dùng mặc định

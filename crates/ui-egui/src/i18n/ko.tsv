@@ -3631,3 +3631,20 @@ curves	Smooth	매끄럽게
 	Grayscale Ramp	회색 음영 램프
 	Current Colors	현재 색상
 	Make Ramp Web Safe	램프를 웹 안전 색상으로 만들기
+
+# Monitor profile chooser (#575)
+	All displays (default)	모든 디스플레이(기본값)
+	Applying monitor profiles…	모니터 프로파일 적용 중…
+	Choose ICC File…	ICC 파일 선택…
+	Currently applied:	현재 적용된 프로파일:
+	Disconnected display	연결되지 않은 디스플레이
+	Display:	디스플레이:
+	Displays without a unique identity use the default.	고유 식별 정보가 없는 디스플레이는 기본값을 사용합니다.
+	Monitor Profiles…	모니터 프로파일…
+	Profile search reached its limit.	프로파일 검색이 한도에 도달했습니다.
+	Profile:	프로파일:
+	Reading profiles…	프로파일 읽는 중…
+	Reconnect this display to change its profile. Use default removes the saved choice.	프로파일을 변경하려면 이 디스플레이를 다시 연결하세요. “기본값 사용”을 선택하면 저장된 선택이 삭제됩니다.
+	Refresh	새로 고침
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	표준 프로파일 폴더를 검색합니다. 다른 프로파일은 ICC 파일로 선택할 수 있습니다.
+	Use default	기본값 사용

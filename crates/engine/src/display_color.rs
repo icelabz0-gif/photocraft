@@ -26,7 +26,7 @@ use photocraft_compose::Buffer;
 use photocraft_doc::Document;
 use photocraft_raster::Rgba8Image;
 
-use crate::color_cmds::{ColorState, composite_profile, mode_space, profile_from_bytes, resolve_profile};
+use crate::color_cmds::{ColorState, composite_profile, mode_space, profile_from_bytes};
 use crate::{EngineError, Result};
 
 /// Display intent and black point compensation of the monitor transform.
@@ -192,6 +192,8 @@ pub enum MonitorDetection {
 pub struct Display {
     /// Platform display id (macOS: `CGDirectDisplayID`).
     pub id: u32,
+    /// Persistent physical identity, absent when the platform cannot establish one.
+    pub key: Option<String>,
     /// E.g. "Built-in Retina Display".
     pub name: String,
     /// `[x, y, width, height]` in OS points; origin at the top-left of the primary display,
@@ -222,6 +224,9 @@ pub fn display_at(displays: &[Display], rect: [f64; 4]) -> Option<u32> {
 pub struct MonitorStatus {
     /// Color Settings › Monitor Profile as set: `auto`, a built-in id or an `.icc` path.
     pub requested: String,
+    pub rule: String,
+    pub identity: String,
+    pub loading: bool,
     /// `auto` (the display's own profile), `manual` (the chosen profile) or `fallback` (sRGB,
     /// because the requested profile isn't available or usable: see `reason`).
     pub source: &'static str,
@@ -245,6 +250,9 @@ impl MonitorStatus {
             (Some(n), "auto") => n.as_str(),
             _ => self.profile.as_str(),
         };
+        if self.loading {
+            return format!("{name} (monitor profile loading)");
+        }
         match &self.reason {
             Some(r) => format!("{name} ({}: {r})", self.source),
             None => format!("{name} ({})", self.source),
@@ -255,6 +263,9 @@ impl MonitorStatus {
 /// A resolved monitor profile and what it was resolved from (setting, display, profile bytes,
 /// detection state).
 struct MonitorEntry {
+    revision: u64,
+    rule: String,
+    identity: String,
     spec: String,
     display: Option<u32>,
     icc: Option<Arc<Vec<u8>>>,
@@ -323,7 +334,7 @@ impl ColorState {
             .iter()
             .map(|d| {
                 serde_json::json!({
-                    "id": d.id, "name": d.name, "frame": d.frame, "profileName": d.profile_name,
+                    "id": d.id, "key": d.key, "name": d.name, "frame": d.frame, "profileName": d.profile_name,
                     "main": self.main_display == Some(d.id), "status": self.monitor_status_for(Some(d.id)),
                 })
             })
@@ -335,14 +346,35 @@ impl ColorState {
         id.and_then(|id| self.displays.iter().find(|d| d.id == id)).or(self.displays.first())
     }
 
+    /// Only a current, unique physical identity can select an override.
+    pub fn display_identity(&self, display: &Display) -> &'static str {
+        if !matches!(self.monitor_detection, MonitorDetection::Found) {
+            return "stale";
+        }
+        let Some(key) = display.key.as_deref() else {
+            return "unavailable";
+        };
+        if self.displays.iter().filter(|d| d.key.as_deref() == Some(key)).count() == 1 { "ok" } else { "ambiguous" }
+    }
+
     fn resolved_monitor(&self, display: Option<u32>) -> (Arc<Profile>, MonitorStatus) {
-        let spec = self.settings.monitor_profile.as_str();
-        let auto = spec.is_empty() || spec == "auto";
+        use crate::monitor_cmds::{automatic, builtin, load_profile, validate_profile};
+        let exact = display.and_then(|id| self.displays.iter().find(|d| d.id == id));
+        let identity = exact.map_or("unavailable", |d| self.display_identity(d));
+        let selected = exact
+            .filter(|_| identity == "ok")
+            .and_then(|d| d.key.as_ref())
+            .and_then(|key| self.settings.monitor_overrides.get(key).map(|spec| (key.as_str(), spec.as_str())));
+        let (rule, spec) = selected.unwrap_or(("default", &self.settings.monitor_profile));
+        let auto = automatic(spec);
         let shown = self.display_or_primary(display);
-        let icc = if auto { shown.and_then(|d| d.icc.clone()) } else { None };
+        let icc = shown.and_then(|d| d.icc.clone());
         let mut cache = self.display.monitor.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = cache.get(&display)
             && e.spec == spec
+            && e.rule == rule
+            && e.identity == identity
+            && e.revision == self.monitor_files.revision
             && e.display == shown.map(|d| d.id)
             && e.detection == self.monitor_detection
             && match (&e.icc, &icc) {
@@ -353,53 +385,70 @@ impl ColorState {
         {
             return (e.profile.clone(), e.status.clone());
         }
-        let found = if auto {
-            match (shown, &icc, &self.monitor_detection) {
+        let auto_profile = || {
+            let p = match (shown, &icc, &self.monitor_detection) {
                 (_, Some(b), _) => profile_from_bytes(b).map_err(|e| format!("the display profile can't be read: {e}")),
                 (Some(d), None, _) => Err(format!("{} has no ICC profile", d.name)),
                 (None, None, MonitorDetection::Pending) => Err("the display profile hasn't been read yet".into()),
                 (None, None, MonitorDetection::Failed { reason }) => Err(reason.clone()),
-                (None, None, _) => Err("this platform doesn't report display profiles".into()),
+                _ => Err("this platform doesn't report display profiles".into()),
+            }?;
+            validate_profile(&p)?;
+            Ok::<_, String>(p)
+        };
+        // File parsing is exclusively in commands/jobs. A missing cache entry is loading,
+        // not a missing file; keep displaying Automatic until the first read completes.
+        let loading = !auto && builtin(spec).is_none() && !self.monitor_files.files.contains_key(spec);
+        let manual = || {
+            if builtin(spec).is_some() {
+                return load_profile(spec).map(|p| p.profile);
+            }
+            self.monitor_files.files.get(spec).cloned().unwrap_or_else(|| Err("monitor profile is loading".into())).map(|p| p.profile)
+        };
+        let (p, source, reason) = if auto {
+            match auto_profile() {
+                Ok(p) => (p, "auto", None),
+                Err(r) => (Arc::new(Builtin::Srgb.profile().clone()), "fallback", Some(r)),
             }
         } else {
-            resolve_profile(spec, None, Some(photocraft_color::ColorMode::Rgb)).map_err(|e| e.to_string())
-        };
-        let usable = found.and_then(|p| {
-            if p.color_space != ColorSpace::Rgb {
-                return Err(format!("`{}` is a {:?} profile, not RGB", p.description, p.color_space));
+            match manual() {
+                Ok(p) => (p, "manual", None),
+                Err(r) => match auto_profile() {
+                    Ok(p) => (p, "auto", (!loading).then_some(r)),
+                    Err(fallback) => (Arc::new(Builtin::Srgb.profile().clone()), "fallback", (!loading).then(|| format!("{r}; {fallback}"))),
+                },
             }
-            // The canvas transforms end at this profile: one that can't be a destination would
-            // otherwise leave the canvas silently unmanaged.
-            Transform::new(Builtin::Srgb.profile(), &p, DISPLAY_INTENT, DISPLAY_BPC)
-                .map_err(|e| format!("`{}` can't be used as a display profile: {e}", p.description))?;
-            Ok(p)
-        });
-        let (p, source, reason) = match usable {
-            Ok(p) => (p, if auto { "auto" } else { "manual" }, None),
-            Err(r) => (Arc::new(Builtin::Srgb.profile().clone()), "fallback", Some(r)),
         };
         let status = MonitorStatus {
             requested: if spec.is_empty() { "auto".into() } else { spec.to_string() },
+            rule: rule.into(),
+            identity: identity.into(),
+            loading,
             source,
             display: shown.map(|d| d.name.clone()),
             profile: p.description.clone(),
-            profile_name: if auto { shown.and_then(|d| d.profile_name.clone()) } else { None },
+            profile_name: if source == "auto" { shown.and_then(|d| d.profile_name.clone()) } else { None },
             fingerprint: format!("{:016x}", p.content_hash()),
             detection: self.monitor_detection.clone(),
             reason,
         };
-        if cache.len() > 16 {
+        if cache.len() > 64 {
             cache.clear();
         }
-        let entry = MonitorEntry {
-            spec: spec.to_string(),
-            display: shown.map(|d| d.id),
-            icc,
-            detection: self.monitor_detection.clone(),
-            profile: p.clone(),
-            status: status.clone(),
-        };
-        cache.insert(display, entry);
+        cache.insert(
+            display,
+            MonitorEntry {
+                revision: self.monitor_files.revision,
+                rule: rule.into(),
+                identity: identity.into(),
+                spec: spec.into(),
+                display: shown.map(|d| d.id),
+                icc,
+                detection: self.monitor_detection.clone(),
+                profile: p.clone(),
+                status: status.clone(),
+            },
+        );
         (p, status)
     }
 

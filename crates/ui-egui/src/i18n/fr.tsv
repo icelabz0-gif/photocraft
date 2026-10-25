@@ -4462,3 +4462,20 @@ shape	Appearance	Apparence
 	Grayscale Ramp	Barre de niveaux de gris
 	Current Colors	Couleurs actuelles
 	Make Ramp Web Safe	Limiter la barre aux couleurs Web
+
+# Monitor profile chooser (#575)
+	All displays (default)	Tous les écrans (par défaut)
+	Applying monitor profiles…	Application des profils d’écran…
+	Choose ICC File…	Choisir un fichier ICC…
+	Currently applied:	Actuellement appliqué :
+	Disconnected display	Écran déconnecté
+	Display:	Écran :
+	Displays without a unique identity use the default.	Les écrans sans identifiant unique utilisent le réglage par défaut.
+	Monitor Profiles…	Profils d’écran…
+	Profile search reached its limit.	La recherche de profils a atteint sa limite.
+	Profile:	Profil :
+	Reading profiles…	Lecture des profils…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Reconnectez cet écran pour modifier son profil. « Utiliser le réglage par défaut » supprime le choix enregistré.
+	Refresh	Actualiser
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	La recherche couvre les dossiers de profils habituels. D’autres profils peuvent être choisis sous forme de fichiers ICC.
+	Use default	Utiliser le réglage par défaut

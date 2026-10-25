@@ -4180,3 +4180,20 @@ curves	Smooth	Vloeiend maken
 	Grayscale Ramp	Grijswaardenbalk
 	Current Colors	Huidige kleuren
 	Make Ramp Web Safe	Balk beperken tot webkleuren
+
+# Monitor profile chooser (#575)
+	All displays (default)	Alle beeldschermen (standaard)
+	Applying monitor profiles…	Monitorprofielen toepassen…
+	Choose ICC File…	ICC-bestand kiezen…
+	Currently applied:	Momenteel toegepast:
+	Disconnected display	Niet-aangesloten beeldscherm
+	Display:	Beeldscherm:
+	Displays without a unique identity use the default.	Beeldschermen zonder unieke identificatie gebruiken de standaardinstelling.
+	Monitor Profiles…	Monitorprofielen…
+	Profile search reached its limit.	De limiet voor het zoeken naar profielen is bereikt.
+	Profile:	Profiel:
+	Reading profiles…	Profielen lezen…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Sluit dit beeldscherm opnieuw aan om het profiel te wijzigen. ‘Standaard gebruiken’ verwijdert de opgeslagen keuze.
+	Refresh	Vernieuwen
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Er wordt gezocht in de gebruikelijke profielmappen. Andere profielen kunnen als ICC-bestanden worden gekozen.
+	Use default	Standaard gebruiken

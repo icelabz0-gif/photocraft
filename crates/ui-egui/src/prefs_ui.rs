@@ -1035,6 +1035,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
         "edit.keyboardShortcuts" => Some(Ok(json!({"dialog": open_shortcuts(app, 0)}))),
         "edit.menus" => Some(Ok(json!({"dialog": open_shortcuts(app, 1)}))),
         "edit.toolbar" => Some(Ok(json!({"dialog": open_shortcuts(app, 2)}))),
+        "edit.monitorProfiles" => Some(Ok(json!({"dialog":crate::monitor_profiles_ui::open(app)}))),
         "edit.colorSettings" => {
             let d = crate::filter_dialog::open(app, "edit.colorSettings");
             let cur = serde_json::to_value(&app.session.color.settings).unwrap_or_default();
@@ -1048,6 +1049,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                         dm.fields.insert(k.clone(), v.clone());
                     }
                 }
+                dm.fields.remove("monitorProfile");
                 dm.fields.insert("__note".into(), json!(note));
             }
             dialog(d)

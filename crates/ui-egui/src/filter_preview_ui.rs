@@ -66,8 +66,9 @@ pub(crate) fn window(app: &PhotocraftApp, dialog: u64, ui: &mut egui::Ui, f: &mu
     // Channel visibility and the active mask can change without a document revision. Both the
     // original (press-and-hold) and filtered textures must follow the canvas's current view.
     let view = (st.channel_view.clone(), app.session.prefs().interface.show_channels_in_color, st.active_layer);
-    if cache.view.as_ref() != Some(&view) {
-        cache = Cache { view: Some(view), ..Default::default() };
+    let display_key = crate::canvas::canvas_display(app, &st.doc, app.session.color.main_display).1;
+    if cache.view.as_ref() != Some(&view) || cache.display_key != display_key {
+        cache = Cache { view: Some(view), display_key, ..Default::default() };
     }
 
     // Unfiltered proxy: built once per document revision and factor (cheap at the proxy factor).
@@ -240,7 +241,7 @@ fn upload(ctx: &egui::Context, app: &PhotocraftApp, name: &str, doc: &Document) 
         return ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
     }
     let buf = if factor == 1 { photocraft_compose::flatten(doc) } else { photocraft_compose::render_reduced(doc, width, height) };
-    let (display, _) = crate::canvas::canvas_display(app, doc, None);
+    let (display, _) = crate::canvas::canvas_display(app, doc, app.session.color.main_display);
     let img = crate::canvas::display_image(display.as_deref(), &buf);
     ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
 }
@@ -269,6 +270,7 @@ struct CachedTex {
 /// The dialog's live textures: the filtered proxy and the unfiltered proxy.
 #[derive(Clone, Default)]
 struct Cache {
+    display_key: u64,
     filtered: Option<CachedTex>,
     original: Option<CachedTex>,
     view: Option<(photocraft_engine::channel_cmds::ChannelView, bool, Option<photocraft_doc::LayerId>)>,
@@ -277,6 +279,54 @@ struct Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_preview_follows_main_display_override_and_invalidates_on_move() {
+        use photocraft_engine::display_color::Display;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width":16,"height":16})).unwrap();
+        app.run("edit.fill", json!({"color":"#cc8040"})).unwrap();
+        let key = photocraft_engine::monitor_cmds::mac_display_key(1, 1, 4).unwrap();
+        app.session.color.set_displays(Ok(vec![
+            Display {
+                key: None,
+                id: 1,
+                name: "A".into(),
+                frame: [0.0, 0.0, 100.0, 100.0],
+                profile_name: None,
+                icc: Some(photocraft_cms::Builtin::Srgb.profile().to_bytes()),
+            },
+            Display {
+                key: Some(key.clone()),
+                id: 4,
+                name: "B".into(),
+                frame: [100.0, 0.0, 100.0, 100.0],
+                profile_name: None,
+                icc: Some(photocraft_cms::Builtin::DisplayP3.profile().to_bytes()),
+            },
+        ]));
+        app.run("edit.monitorProfiles", json!({"set":[{"display":key,"profile":"rec2020"}]})).unwrap();
+        let id = crate::filter_dialog::open(&mut app, "filter.blur.gaussianBlur").unwrap();
+        let mut fields = app.ui.dialogs.last().unwrap().fields.clone();
+        let ctx = egui::Context::default();
+        let cache_id = egui::Id::new(("filter-preview-ui", id));
+        let doc = app.session.active().unwrap().doc.clone();
+        let mut previous = None;
+        for on in [Some(4), Some(1), Some(4)] {
+            app.session.color.main_display = on;
+            let canvas = app.session.color.canvas_display_for(&doc, on).unwrap();
+            let expected = crate::canvas::display_image(Some(&canvas), &photocraft_compose::flatten(&doc)).pixels;
+            let mut out = ctx.run_ui(Default::default(), |ui| window(&app, id, ui, &mut fields));
+            let cache = ctx.data(|d| d.get_temp::<Cache>(cache_id).unwrap());
+            assert_eq!(cache.display_key, canvas.key);
+            let tex = cache.original.unwrap().tex.id();
+            assert_ne!(previous, Some(tex), "moving to a different profile invalidates the cached preview");
+            let egui::ImageData::Color(image) = &out.textures_delta.set.get(&tex).unwrap()[0].image;
+            assert_eq!(image.pixels, expected, "display {on:?}");
+            previous = Some(tex);
+            out.textures_delta.clear();
+        }
+    }
 
     #[test]
     fn full_resolution_preview_textures_respect_the_device_limit() {

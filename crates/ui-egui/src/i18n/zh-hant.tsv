@@ -3045,3 +3045,20 @@ curves	Smooth	平滑
 	Grayscale Ramp	灰階色帶
 	Current Colors	目前色彩
 	Make Ramp Web Safe	讓色帶成為網頁安全色
+
+# Monitor profile chooser (#575)
+	All displays (default)	所有顯示器（預設）
+	Applying monitor profiles…	正在套用顯示器描述檔…
+	Choose ICC File…	選擇 ICC 檔案…
+	Currently applied:	目前套用：
+	Disconnected display	未連接的顯示器
+	Display:	顯示器：
+	Displays without a unique identity use the default.	沒有唯一識別碼的顯示器使用預設設定。
+	Monitor Profiles…	顯示器描述檔…
+	Profile search reached its limit.	描述檔搜尋已達上限。
+	Profile:	描述檔：
+	Reading profiles…	正在讀取描述檔…
+	Reconnect this display to change its profile. Use default removes the saved choice.	請重新連接此顯示器以變更其描述檔。「使用預設設定」會移除已儲存的選擇。
+	Refresh	重新整理
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	搜尋範圍包括標準描述檔資料夾。其他描述檔可作為 ICC 檔案選擇。
+	Use default	使用預設設定

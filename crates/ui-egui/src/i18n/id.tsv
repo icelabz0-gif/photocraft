@@ -3435,3 +3435,20 @@ curves	Smooth	Haluskan
 	Grayscale Ramp	Gradasi Grayscale
 	Current Colors	Warna Saat Ini
 	Make Ramp Web Safe	Jadikan Gradasi Aman untuk Web
+
+# Monitor profile chooser (#575)
+	All displays (default)	Semua monitor (default)
+	Applying monitor profiles…	Menerapkan profil monitor…
+	Choose ICC File…	Pilih Berkas ICC…
+	Currently applied:	Sedang diterapkan:
+	Disconnected display	Monitor terputus
+	Display:	Monitor:
+	Displays without a unique identity use the default.	Monitor tanpa identitas unik menggunakan default.
+	Monitor Profiles…	Profil Monitor…
+	Profile search reached its limit.	Pencarian profil mencapai batasnya.
+	Profile:	Profil:
+	Reading profiles…	Membaca profil…
+	Reconnect this display to change its profile. Use default removes the saved choice.	Sambungkan kembali monitor ini untuk mengubah profilnya. Gunakan default menghapus pilihan yang disimpan.
+	Refresh	Segarkan
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	Pencarian mencakup folder profil standar. Profil lain dapat dipilih sebagai berkas ICC.
+	Use default	Gunakan default

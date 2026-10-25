@@ -78,7 +78,33 @@ return out"#;
 fn detect() -> Detection {
     let mut cmd = std::process::Command::new("/usr/bin/osascript");
     cmd.args(["-e", SCRIPT]);
-    parse_reply(&run_helper(&mut cmd, HELPER_TIMEOUT)?)
+    let before = display_identities();
+    let mut displays = parse_reply(&run_helper(&mut cmd, HELPER_TIMEOUT)?)?;
+    // NSScreen and CoreGraphics are separate snapshots. A disconnected/replaced display must
+    // not inherit a physical override just because macOS reused the runtime display id.
+    apply_identities(&mut displays, &before, &display_identities());
+    Ok(displays)
+}
+
+#[cfg(target_os = "macos")]
+fn display_identities() -> std::collections::BTreeMap<u32, String> {
+    // Sleeping displays remain online and in NSScreen, but disappear from the active list.
+    // Keep their physical identity; only the exact NSScreen ids receive these keys below.
+    core_graphics2::display::get_online_display_list(32)
+        .into_iter()
+        .flatten()
+        .filter_map(|display| {
+            photocraft_engine::monitor_cmds::mac_display_key(display.vendor_number(), display.model_number(), display.serial_number())
+                .map(|key| (display.id, key))
+        })
+        .collect()
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn apply_identities(displays: &mut [Display], before: &std::collections::BTreeMap<u32, String>, after: &std::collections::BTreeMap<u32, String>) {
+    for display in displays {
+        display.key = before.get(&display.id).filter(|key| after.get(&display.id) == Some(*key)).cloned();
+    }
 }
 
 /// How long a reading may take before the helper is stopped (it normally takes about 0.4 s).
@@ -95,17 +121,21 @@ fn run_helper(cmd: &mut std::process::Command, timeout: std::time::Duration) -> 
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run the display profile reader: {e}"))?;
     // Drain both pipes while waiting: a reply larger than the pipe buffer would otherwise block
     // the helper until the deadline.
-    let drain = |p: Option<Box<dyn Read + Send>>| {
+    let drain = |p: Option<Box<dyn Read + Send>>, limit: u64| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            if let Some(mut p) = p {
-                let _ = p.read_to_end(&mut buf);
+            if let Some(p) = p {
+                p.take(limit.saturating_add(1)).read_to_end(&mut buf).map_err(|e| format!("couldn't read the display profile reply: {e}"))?;
             }
-            buf
+            if buf.len() as u64 > limit {
+                return Err("the display profile reply exceeded its size limit".to_string());
+            }
+            Ok(buf)
         })
     };
-    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    // The ICC data is base64 here; cap the entire reply before decoding individual profiles.
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>), 64 << 20);
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>), 16 << 10);
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -123,11 +153,11 @@ fn run_helper(cmd: &mut std::process::Command, timeout: std::time::Duration) -> 
             }
         }
     };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
+    let out = out.join().map_err(|_| "the display profile reply reader stopped".to_string())??;
+    let err = err.join().map_err(|_| "the display profile error reader stopped".to_string())??;
     if !status.success() {
         let err = String::from_utf8_lossy(&err);
-        let first = err.lines().next().unwrap_or("").trim();
+        let first: String = err.lines().next().unwrap_or("").trim().chars().take(160).collect();
         return Err(format!("reading the display profiles failed ({status}){}", if first.is_empty() { String::new() } else { format!(": {first}") }));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
@@ -230,6 +260,7 @@ mod linux {
             let Some(primary_name) = output_names.first() else { continue };
             let profile = unambiguous_clone_profile(&output_names, &profiles);
             displays.push(Display {
+                key: None,
                 id: crtc,
                 name: primary_name.clone(),
                 frame: [f64::from(crtc_info.x), f64::from(crtc_info.y), f64::from(crtc_info.width), f64::from(crtc_info.height)],
@@ -360,7 +391,7 @@ mod linux {
 fn parse_reply(out: &str) -> Detection {
     let mut displays = Vec::new();
     let mut primary_height = None;
-    for line in out.lines().filter(|l| !l.trim().is_empty()) {
+    for line in out.lines().filter(|l| !l.trim().is_empty()).take(32) {
         let f: Vec<&str> = line.splitn(8, '\t').collect();
         let [id, x, y, w, h, b64, profile_name, name] = f.as_slice() else { continue };
         let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
@@ -374,7 +405,7 @@ fn parse_reply(out: &str) -> Detection {
         // treated as no profile (the engine then says the display has none).
         let icc = (!b64.is_empty()).then(|| base64_decode(b64)).flatten().filter(|b| b.len() >= 132 && b.get(36..40) == Some(b"acsp"));
         let profile_name = Some(profile_name.trim().to_string()).filter(|n| !n.is_empty());
-        displays.push(Display { id, name, frame: [x, top, w, h], profile_name, icc: icc.map(std::sync::Arc::new) });
+        displays.push(Display { key: None, id, name, frame: [x, top, w, h], profile_name, icc: icc.map(std::sync::Arc::new) });
     }
     if displays.is_empty() {
         // Only the start of the first field: a display line carries a whole base64 ICC profile,
@@ -414,6 +445,9 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         } as u32)
     };
     let s = s.trim_end_matches('=').as_bytes();
+    if s.len() > (32_usize << 20).div_ceil(3) * 4 {
+        return None;
+    }
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     for chunk in s.chunks(4) {
         let mut acc = 0u32;
@@ -428,12 +462,37 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         };
         out.extend_from_slice(&acc.to_be_bytes()[1..1 + n]);
     }
-    Some(out)
+    (out.len() <= 32 << 20).then_some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_identity_requires_matching_snapshots_not_display_order() {
+        use std::collections::BTreeMap;
+        let mut displays = parse_reply("4\t0\t0\t800\t600\t\t\tExternal\n1\t800\t0\t800\t600\t\t\tBuilt-in").unwrap();
+        let stable = BTreeMap::from([(1, "built-in".into()), (4, "external".into())]);
+        apply_identities(&mut displays, &stable, &stable);
+        assert_eq!(displays[0].key.as_deref(), Some("external"));
+        assert_eq!(displays[1].key.as_deref(), Some("built-in"));
+
+        let replaced = BTreeMap::from([(4, "different-physical-display".into())]);
+        apply_identities(&mut displays, &stable, &replaced);
+        assert!(displays.iter().all(|display| display.key.is_none()));
+        apply_identities(&mut displays, &BTreeMap::new(), &stable);
+        assert!(displays.iter().all(|display| display.key.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excessive_helper_errors_are_bounded() {
+        let _spawns = crate::CHILD_SPAWNS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let error =
+            run_helper(std::process::Command::new("/bin/sh").args(["-c", "head -c 20000 /dev/zero >&2"]), std::time::Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("size limit"), "{error}");
+    }
 
     #[test]
     fn base64() {

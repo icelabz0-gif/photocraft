@@ -146,6 +146,7 @@ pub mod menu_catalog;
 pub mod menu_keys;
 pub mod menu_nav;
 pub mod menus;
+pub mod monitor_profiles_ui;
 pub mod monitor_status;
 pub mod move_box;
 pub mod move_distance;
@@ -673,6 +674,7 @@ pub struct Services {
     /// Reads the displays and their ICC profiles in the background (desktop macOS; see
     /// `monitor_status`). Without one, the canvas uses the profile chosen in Color Settings, or sRGB.
     pub read_displays: Option<monitor_status::ReadDisplaysFn>,
+    pub monitor_catalog: Option<monitor_profiles_ui::CatalogReader>,
     /// The macOS menu bar, when the desktop app installed one; the in-window menus are hidden then.
     pub native_menu: Option<native_menu::NativeMenu>,
     /// Ends the app once leaving is settled (nothing unsaved, or the prompt answered), instead of
@@ -710,6 +712,7 @@ pub struct PhotocraftApp {
     info_samplers: Option<panels::SamplerReadouts>,
     /// Display profile readings (#569).
     monitors: monitor_status::State,
+    monitor_profiles: monitor_profiles_ui::Runtime,
     checker: Option<egui::TextureHandle>,
     drag: Option<canvas::Drag>,
     /// A Move-tool press landed on a locked layer: the first pointer move shows Photoshop's
@@ -1032,6 +1035,7 @@ impl PhotocraftApp {
             navigator_plain: std::collections::HashSet::new(),
             info_samplers: None,
             monitors: Default::default(),
+            monitor_profiles: Default::default(),
             checker: None,
             drag: None,
             move_blocked: false,

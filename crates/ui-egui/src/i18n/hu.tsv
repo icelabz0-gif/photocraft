@@ -4335,3 +4335,20 @@ cameraRaw	Yellow	Sárga
 	Grayscale Ramp	Szürkeárnyalatos sáv
 	Current Colors	Aktuális színek
 	Make Ramp Web Safe	Sáv korlátozása webes színekre
+
+# Monitor profile chooser (#575)
+	All displays (default)	Összes kijelző (alapértelmezett)
+	Applying monitor profiles…	Monitorprofilok alkalmazása…
+	Choose ICC File…	ICC-fájl kiválasztása…
+	Currently applied:	Jelenleg alkalmazva:
+	Disconnected display	Leválasztott kijelző
+	Display:	Kijelző:
+	Displays without a unique identity use the default.	Az egyedi azonosító nélküli kijelzők az alapértelmezett beállítást használják.
+	Monitor Profiles…	Monitorprofilok…
+	Profile search reached its limit.	A profilkeresés elérte a korlátját.
+	Profile:	Profil:
+	Reading profiles…	Profilok olvasása…
+	Reconnect this display to change its profile. Use default removes the saved choice.	A profil módosításához csatlakoztassa újra ezt a kijelzőt. Az „Alapértelmezett használata” törli a mentett választást.
+	Refresh	Frissítés
+	Search covers standard profile folders. Other profiles can be chosen as ICC files.	A keresés a szokásos profilmappákra terjed ki. Más profilok ICC-fájlként választhatók ki.
+	Use default	Alapértelmezett használata

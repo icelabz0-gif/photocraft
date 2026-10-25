@@ -420,6 +420,17 @@ fn main() -> eframe::Result {
             mac_window::disable_native_title_drag();
             // Long commands and file opens run as background jobs with progress and Cancel (#210).
             app.background_jobs = std::env::var_os("PHOTOCRAFT_INLINE_JOBS").is_none();
+            app.services.monitor_catalog = Some(std::sync::Arc::new(|| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("monitor-catalog".into())
+                    .spawn(move || {
+                        let catalog = photocraft_engine::installed_profiles::monitor_catalog(&photocraft_engine::installed_profiles::profile_dirs());
+                        let _ = tx.send(catalog);
+                    })
+                    .ok()?;
+                Some(rx)
+            }));
             // Displays and their profiles (#569): wait briefly so the first frames already use
             // the right profile; a slower reading is applied when it arrives, and the shell reads
             // again when the displays may have changed.

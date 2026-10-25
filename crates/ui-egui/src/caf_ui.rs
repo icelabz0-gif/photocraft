@@ -1221,7 +1221,7 @@ fn view_image(app: &PhotocraftApp) -> Option<egui::ColorImage> {
     let w = app.distort.caf.as_ref()?;
     let st = app.session.active()?;
     let buf = photocraft_compose::render_reduced(&st.doc, w.pw as u32, w.ph as u32);
-    let (display, _) = crate::canvas::canvas_display(app, &st.doc, None);
+    let (display, _) = crate::canvas::canvas_display(app, &st.doc, app.session.color.main_display);
     Some(crate::canvas::display_image(display.as_deref(), &buf))
 }
 
@@ -2006,6 +2006,31 @@ mod tests {
         let d = ws(&app).describe();
         assert_eq!(d["previewReady"], json!(false));
         assert!(d["previewError"].as_str().is_some_and(|e| e.contains("selection")), "{d}");
+    }
+
+    #[test]
+    fn the_view_uses_the_current_displays_profile_override() {
+        let mut app = app_with_selection();
+        let key = photocraft_engine::monitor_cmds::mac_display_key(1, 2, 3).unwrap();
+        app.session.color.set_displays(Ok(vec![photocraft_engine::display_color::Display {
+            key: Some(key.clone()),
+            id: 7,
+            name: "Test display".into(),
+            frame: [0.0, 0.0, 1000.0, 800.0],
+            profile_name: None,
+            icc: None,
+        }]));
+        app.session.color.main_display = Some(7);
+        app.run("edit.monitorProfiles", json!({"set": [{"display": key, "profile": "display-p3"}]})).unwrap();
+        open(&mut app).unwrap();
+        let doc = &app.session.active().unwrap().doc;
+        let w = ws(&app);
+        let buf = photocraft_compose::render_reduced(doc, w.pw as u32, w.ph as u32);
+        let display = app.session.color.canvas_display(doc).unwrap();
+        let expected = crate::canvas::display_image(Some(&display), &buf);
+        let default = app.session.color.canvas_display_for(doc, None).unwrap();
+        assert_ne!(expected.pixels, crate::canvas::display_image(Some(&default), &buf).pixels);
+        assert!(view_image(&app).unwrap().pixels == expected.pixels, "CAF must use the current display override, not the global default");
     }
 
     /// The view shows the document, not the layer alone: after Apply to a new layer the fill

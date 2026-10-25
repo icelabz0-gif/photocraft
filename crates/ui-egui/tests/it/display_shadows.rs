@@ -162,6 +162,7 @@ fn gpu_display_shadows_match_independent_icc_reference_at_all_depths() {
                 app.set_wgpu(cc.wgpu_render_state.as_ref().expect("render state").clone());
                 app.session.color.set_displays(Ok(vec![Display {
                     id: 1,
+                    key: None,
                     name: "Synthetic display".into(),
                     frame: [0.0, 0.0, 1000.0, 700.0],
                     profile_name: None,
