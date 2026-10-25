@@ -428,13 +428,43 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
         }
         "line" => {
             let (pf, pto, pw) = match prev {
-                Some(LiveShape::Line { from, to, weight }) => (Some(*from), Some(*to), *weight),
+                Some(LiveShape::Line { from, to, weight }) | Some(LiveShape::ArrowLine { from, to, weight, .. }) => (Some(*from), Some(*to), *weight),
                 _ => (None, None, 1.0),
             };
-            LiveShape::Line {
-                from: nums::<2>(p, "from").or(pf).ok_or_else(|| bad(cmd, "`from`: [x, y] is required"))?,
-                to: nums::<2>(p, "to").or(pto).ok_or_else(|| bad(cmd, "`to`: [x, y] is required"))?,
-                weight: f64p(p, "weight").unwrap_or(pw).max(0.0),
+            let from = nums::<2>(p, "from").or(pf).ok_or_else(|| bad(cmd, "`from`: [x, y] is required"))?;
+            let to = nums::<2>(p, "to").or(pto).ok_or_else(|| bad(cmd, "`to`: [x, y] is required"))?;
+            let weight = f64p(p, "weight").unwrap_or(pw).max(0.0);
+            let arrow_fields = ["arrowStart", "arrowEnd", "arrowWidth", "arrowLength", "arrowConcavity"];
+            let is_arrow = matches!(prev, Some(LiveShape::ArrowLine { .. })) || arrow_fields.iter().any(|k| p.get(*k).is_some());
+            if is_arrow {
+                let (ps, pe, pwidth, plen, pc) = match prev {
+                    Some(LiveShape::ArrowLine { start, end, width, length, concavity, .. }) => (*start, *end, *width, *length, *concavity),
+                    _ => (false, false, 52.0, 50.0, 0.0),
+                };
+                let dim = |key: &str, fallback: f64, min: f64, max: f64| -> Result<f64> {
+                    let value = match p.get(key) {
+                        Some(v) => v.as_f64().ok_or_else(|| bad(cmd, format!("`{key}` must be numeric")))?,
+                        None => fallback,
+                    };
+                    // Preserve scaled arrowhead dimensions when editing other properties.
+                    let preserved_scaled_size = p.get(key).is_none() && matches!(key, "arrowWidth" | "arrowLength") && value >= min;
+                    if !value.is_finite() || (!(min..=max).contains(&value) && !preserved_scaled_size) {
+                        return Err(bad(cmd, format!("`{key}` must be within {min}..={max}")));
+                    }
+                    Ok(value)
+                };
+                LiveShape::ArrowLine {
+                    from,
+                    to,
+                    weight,
+                    start: p.get("arrowStart").and_then(Value::as_bool).unwrap_or(ps),
+                    end: p.get("arrowEnd").and_then(Value::as_bool).unwrap_or(pe),
+                    width: dim("arrowWidth", pwidth, 1.0, 4096.0)?,
+                    length: dim("arrowLength", plen, 1.0, 4096.0)?,
+                    concavity: dim("arrowConcavity", pc, 0.0, 100.0)?,
+                }
+            } else {
+                LiveShape::Line { from, to, weight }
             }
         }
         o => return Err(bad(cmd, format!("unknown kind `{o}`"))),
@@ -444,9 +474,10 @@ fn live_from_params(cmd: &str, kind: &str, p: &Value, prev: Option<&LiveShape>) 
 /// The path `shape.create` draws for live-shape params `p` (the Shape tools preview it while dragging).
 pub fn shape_path(p: &Value) -> Result<Path> {
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rect");
-    Ok(vector::shapes::live_path(&live_from_params("shape.create", kind, p, None)?))
+    let live = live_from_params("shape.create", kind, p, None)?;
+    Ok(vector::shapes::live_path(&live))
 }
-
+/// Returns the public shape kind used by shape commands and inspection.
 fn live_kind(l: &LiveShape) -> &'static str {
     match l {
         LiveShape::Rect { radii, .. } if radii.iter().any(|r| *r > 0.0) => "roundedRect",
@@ -454,7 +485,7 @@ fn live_kind(l: &LiveShape) -> &'static str {
         LiveShape::Ellipse { .. } => "ellipse",
         LiveShape::Polygon { star_ratio, .. } if *star_ratio < 1.0 => "star",
         LiveShape::Polygon { .. } => "polygon",
-        LiveShape::Line { .. } => "line",
+        LiveShape::Line { .. } | LiveShape::ArrowLine { .. } => "line",
     }
 }
 
@@ -522,12 +553,62 @@ pub(crate) fn shift_shape(doc: &Document, sh: &mut ShapeLayer, dx: f64, dy: f64)
     }
 }
 
-/// Applies an affine transform to a shape's path, keeping the live shape when the transform
-/// is a translation plus axis-aligned scale (otherwise the shape stops being parametric).
+/// Applies an affine transform to a shape's path, preserving live parameters when
+/// they can still reproduce the transformed geometry accurately.
+/// Returns axial and perpendicular scales only when an affine transform keeps an
+/// arrowhead's local axes perpendicular. A skewed head cannot be regenerated
+/// faithfully from the current ArrowLine width and length parameters.
+fn arrow_axis_scales(a: &Affine, from: [f64; 2], to: [f64; 2]) -> Option<(f64, f64)> {
+    let [m0, m1, m2, m3, _, _] = a.m;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let old_length = dx.hypot(dy);
+    if !old_length.is_finite() || old_length <= 1e-12 {
+        return None;
+    }
+    let (ux, uy) = (dx / old_length, dy / old_length);
+    let (ax, ay) = (m0 * ux + m2 * uy, m1 * ux + m3 * uy);
+    let (px, py) = (-m0 * uy + m2 * ux, -m1 * uy + m3 * ux);
+    let axial = ax.hypot(ay);
+    let perpendicular = px.hypot(py);
+    if !axial.is_finite() || !perpendicular.is_finite() || axial <= 1e-12 || perpendicular <= 1e-12 {
+        return None;
+    }
+    let dot = ax * px + ay * py;
+    (dot.abs() <= 1e-10 * axial * perpendicular).then_some((axial, perpendicular))
+}
+
 pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
+    // Check original arrow dimensions before transforming the path.
+    // Parameters already clamped by arrow_line cannot faithfully
+    // regenerate the transformed geometry.
+    if let Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, .. }) = sh.live.as_ref()
+        && (*start || *end)
+    {
+        let original_length = (to[0] - from[0]).hypot(to[1] - from[1]);
+
+        if !weight.is_finite()
+            || *weight < 0.1
+            || !width.is_finite()
+            || *width < 1.0
+            || !length.is_finite()
+            || *length < 1.0
+            || !original_length.is_finite()
+            || original_length < 1.0
+        {
+            sh.live = None;
+        }
+    }
+
     sh.path = sh.path.transform(a);
     let [m0, m1, m2, m3, tx, ty] = a.m;
     let axis_aligned = m1.abs() < 1e-12 && m2.abs() < 1e-12 && m0 > 0.0 && m3 > 0.0;
+    // The path has already received the exact affine transform. Drop live arrow
+    // parameters if later edits would regenerate a different, unskewed head.
+    if let Some(LiveShape::ArrowLine { from, to, .. }) = sh.live.as_ref()
+        && arrow_axis_scales(a, *from, *to).is_none()
+    {
+        sh.live = None;
+    }
     sh.live = match (sh.live.take(), axis_aligned) {
         (Some(l), true) => {
             let r = |r: [f64; 4]| [r[0] * m0 + tx, r[1] * m3 + ty, r[2] * m0, r[3] * m3];
@@ -540,6 +621,22 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 LiveShape::Ellipse { rect } => LiveShape::Ellipse { rect: r(rect) },
                 LiveShape::Polygon { rect, sides, star_ratio, corner_radius } => {
                     LiveShape::Polygon { rect: r(rect), sides, star_ratio, corner_radius: corner_radius * m0.min(m3) }
+                }
+                LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let old_len = dx.hypot(dy);
+                    let new_len = (dx * m0).hypot(dy * m3);
+                    let perpendicular_scale = if old_len > 0.0 && new_len > 0.0 { m0 * m3 * old_len / new_len } else { m0.min(m3) };
+                    LiveShape::ArrowLine {
+                        from: pt(from),
+                        to: pt(to),
+                        weight: weight * perpendicular_scale,
+                        start,
+                        end,
+                        width: width * perpendicular_scale,
+                        length: length * if old_len > 0.0 { new_len / old_len } else { m0.min(m3) },
+                        concavity,
+                    }
                 }
                 LiveShape::Line { from, to, weight } => {
                     // Live-shape edits regenerate the line's filled bar from its parameters.
@@ -569,11 +666,61 @@ pub fn transform_shape(sh: &mut ShapeLayer, a: &Affine) {
                 }
                 LiveShape::Ellipse { rect } => Some(LiveShape::Ellipse { rect: r(rect) }),
                 LiveShape::Line { from, to, weight } => Some(LiveShape::Line { from: pt(from), to: pt(to), weight: weight * k }),
+                LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity } => {
+                    // Flips and quarter-turns can have different axial and perpendicular
+                    // scales; using the smaller axis for both loses arrowhead length.
+                    let (axial_scale, perpendicular_scale) = arrow_axis_scales(a, from, to).unwrap_or((k, k));
+                    Some(LiveShape::ArrowLine {
+                        from: pt(from),
+                        to: pt(to),
+                        weight: weight * perpendicular_scale,
+                        start,
+                        end,
+                        width: width * perpendicular_scale,
+                        length: length * axial_scale,
+                        concavity,
+                    })
+                }
                 _ => None,
             }
         }
+        // Arbitrary rotations and other orthogonal-axis affine transforms also
+        // preserve arrow geometry and should keep their editable live parameters.
+        (Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, concavity }), false) => {
+            arrow_axis_scales(a, from, to).map(|(axial_scale, perpendicular_scale)| {
+                let pt = |p: [f64; 2]| [m0 * p[0] + m2 * p[1] + tx, m1 * p[0] + m3 * p[1] + ty];
+                LiveShape::ArrowLine {
+                    from: pt(from),
+                    to: pt(to),
+                    weight: weight * perpendicular_scale,
+                    start,
+                    end,
+                    width: width * perpendicular_scale,
+                    length: length * axial_scale,
+                    concavity,
+                }
+            })
+        }
         _ => None,
     };
+    // Keep the exact transformed outline. Remove live arrow parameters
+    // when minimum-size constraints would alter its regenerated geometry.
+    if let Some(LiveShape::ArrowLine { from, to, weight, start, end, width, length, .. }) = sh.live.as_ref()
+        && (*start || *end)
+    {
+        let line_length = (to[0] - from[0]).hypot(to[1] - from[1]);
+        if !weight.is_finite()
+            || *weight < 0.1
+            || !width.is_finite()
+            || *width < 1.0
+            || !length.is_finite()
+            || *length < 1.0
+            || !line_length.is_finite()
+            || line_length < 1.0
+        {
+            sh.live = None;
+        }
+    }
     sh.psd_raw = None;
 }
 
@@ -673,6 +820,7 @@ fn default_name(kind: &str) -> &'static str {
     }
 }
 
+/// Creates a shape layer from validated parameters, retaining live arrow settings.
 fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "shape.create";
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rect");
@@ -722,6 +870,7 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
     shape_info(s, id)
 }
 
+/// Edits a vector layer, preserving unchanged live arrowhead parameters.
 fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "shape.edit";
     let id = layer_id(s, p)?;
@@ -734,7 +883,23 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
             sh.live = None;
             sh.psd_raw = None;
         }
-        let geom_keys = ["kind", "rect", "radii", "radius", "sides", "starRatio", "cornerRadius", "from", "to", "weight"];
+        let geom_keys = [
+            "kind",
+            "rect",
+            "radii",
+            "radius",
+            "sides",
+            "starRatio",
+            "cornerRadius",
+            "from",
+            "to",
+            "weight",
+            "arrowStart",
+            "arrowEnd",
+            "arrowWidth",
+            "arrowLength",
+            "arrowConcavity",
+        ];
         if geom_keys.iter().any(|k| p.get(*k).is_some()) {
             let kind = p.get("kind").and_then(Value::as_str).map(str::to_string).or_else(|| sh.live.as_ref().map(|l| live_kind(l).to_string()));
             let kind = kind.ok_or_else(|| bad(CMD, "this shape has no live-shape parameters; pass `kind` or `path`"))?;
@@ -1763,7 +1928,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Shape Layer",
             ["Layer", "New"],
             leak(format!(
-                r##"{{"kind":"rect|roundedRect|ellipse|polygon|star|line|path"="rect","rect":[x,y,w,h] (rect/roundedRect/ellipse/polygon/star),"radii":[tl,tr,br,bl]|r (roundedRect=10),"sides":3..100=5,"starRatio":0..1 (star=0.5),"cornerRadius":px=0 (polygon/star: rounds every vertex; the Triangle tool is a 3-sided polygon),"from":[x,y],"to":[x,y],"weight":px=1 (line),"path":{{…}} (kind path),{fill}=foreground,{stroke}=none,"name":str?,"addTo":layerId? + "op":"combine|subtract|intersect|exclude" (append to an existing shape layer)}} → shape.info. {PATH_FORM}"##
+                r##"{{"kind":"rect|roundedRect|ellipse|polygon|star|line|path"="rect","rect":[x,y,w,h] (rect/roundedRect/ellipse/polygon/star),"radii":[tl,tr,br,bl]|r (roundedRect=10),"sides":3..100=5,"starRatio":0..1 (star=0.5),"cornerRadius":px=0 (polygon/star: rounds every vertex; the Triangle tool is a 3-sided polygon),"from":[x,y],"to":[x,y],"weight":px=1 (line),"arrowStart":bool=false,"arrowEnd":bool=false,"arrowWidth":px=52,"arrowLength":px=50,"arrowConcavity":0..100=0 (line),"path":{{…}} (kind path),{fill}=foreground,{stroke}=none,"name":str?,"addTo":layerId? + "op":"combine|subtract|intersect|exclude" (append to an existing shape layer)}} → shape.info. {PATH_FORM}"##
             )),
             has_doc,
             shape_create
@@ -1773,7 +1938,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Shape",
             [],
             leak(format!(
-                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"cornerRadius":px?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
+                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"cornerRadius":px?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"arrowStart":bool?,"arrowEnd":bool?,"arrowWidth":px?,"arrowLength":px?,"arrowConcavity":0..100? (line arrows),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
             )),
             has_layer,
             shape_edit
@@ -1995,3 +2160,105 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod arrow_affine_regression_tests {
+    use super::*;
+
+    #[test]
+    fn forty_five_degree_rotation_retains_live_arrow_and_geometry() {
+        let live =
+            LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 8.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 50.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        let c = std::f64::consts::FRAC_PI_4.cos();
+        let s = std::f64::consts::FRAC_PI_4.sin();
+        a.m = [c, s, -s, c, 0.0, 0.0];
+        transform_shape(&mut sh, &a);
+        let Some(LiveShape::ArrowLine { width, length, .. }) = sh.live.as_ref() else {
+            panic!("Arrow must remain parametrically editable after 45-degree rotation");
+        };
+        assert!((*width - 31.0).abs() < 1e-9);
+        assert!((*length - 31.0).abs() < 1e-9);
+        let rebuilt = vector::shapes::live_path(sh.live.as_ref().unwrap());
+        assert_eq!(sh.path.subpaths.len(), rebuilt.subpaths.len());
+        for (existing, generated) in sh.path.subpaths.iter().zip(rebuilt.subpaths.iter()) {
+            assert_eq!(existing.knots.len(), generated.knots.len());
+            for (a, b) in existing.knots.iter().zip(generated.knots.iter()) {
+                assert!((a.anchor.x - b.anchor.x).abs() < 1e-8);
+                assert!((a.anchor.y - b.anchor.y).abs() < 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn subpixel_scale_keeps_transformed_path_but_drops_unreproducible_live_parameters() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 5.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.01, 0.0, 0.0, 0.01, 0.0, 0.0];
+
+        let expected_path = sh.path.transform(&a);
+        transform_shape(&mut sh, &a);
+
+        assert_eq!(sh.path, expected_path);
+        assert!(sh.live.is_none());
+    }
+
+    #[test]
+    fn headless_short_arrow_remains_editable_after_scaling() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [0.5, 0.0], weight: 0.05, start: false, end: false, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.5, 0.0, 0.0, 0.5, 0.0, 0.0];
+
+        let expected = sh.path.transform(&a);
+        transform_shape(&mut sh, &a);
+
+        assert_eq!(sh.path, expected);
+        assert!(matches!(sh.live, Some(LiveShape::ArrowLine { start: false, end: false, .. })));
+    }
+
+    #[test]
+    fn scale_above_minimum_still_keeps_live_arrow_editable() {
+        let live = LiveShape::ArrowLine { from: [0.0, 0.0], to: [100.0, 0.0], weight: 5.0, start: false, end: true, width: 31.0, length: 31.0, concavity: 0.0 };
+        let mut sh = ShapeLayer { path: vector::shapes::live_path(&live), live: Some(live), ..ShapeLayer::default() };
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [0.5, 0.0, 0.0, 0.5, 0.0, 0.0];
+
+        transform_shape(&mut sh, &a);
+
+        let Some(LiveShape::ArrowLine { width, length, .. }) = sh.live else {
+            panic!("Ordinary scaling must preserve editable arrow parameters");
+        };
+
+        assert!((width - 15.5).abs() < 1e-9);
+        assert!((length - 15.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reflected_horizontal_arrow_uses_axial_scale_for_head_length() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [-2.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let (axial, perpendicular) = arrow_axis_scales(&a, [0.0, 0.0], [100.0, 0.0]).unwrap();
+        assert!((axial - 2.0).abs() < 1e-10);
+        assert!((perpendicular - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn anisotropic_diagonal_arrow_cannot_remain_parametric() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [2.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert!(arrow_axis_scales(&a, [0.0, 0.0], [100.0, 100.0]).is_none());
+    }
+
+    #[test]
+    fn uniform_scale_preserves_diagonal_arrow_axes() {
+        let mut a = Affine::translate(0.0, 0.0);
+        a.m = [2.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let (axial, perpendicular) = arrow_axis_scales(&a, [0.0, 0.0], [100.0, 100.0]).unwrap();
+        assert!((axial - 2.0).abs() < 1e-10);
+        assert!((perpendicular - 2.0).abs() < 1e-10);
+    }
+}
