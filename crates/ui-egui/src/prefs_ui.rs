@@ -1288,6 +1288,9 @@ fn humanize(key: &str) -> String {
     if key == "doNotAppendCopy" {
         return "Do not append \"copy\" to filename when saving a copy".into();
     }
+    if key == "saveAsToOriginalFolder" {
+        return "Save As to Original Folder".into();
+    }
     if key == "lowLatencyDrawing" {
         return "Low-Latency Drawing (vsync off, applies at next launch)".into();
     }
