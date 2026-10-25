@@ -89,10 +89,17 @@ fn stroke_param(app: &PhotocraftApp) -> Value {
 /// A Line-tool drag snapped as Photoshop's Align Edges (on by default) does: the ends on whole
 /// pixels, and a horizontal or vertical line's sides on pixel edges, each side moved down to the
 /// edge at or before it (a 1 px line drawn at y 23 fills row 22, as in Photoshop), so a 1 px line
-/// fills one pixel row instead of half of two (#9486). Diagonal lines keep their exact sides.
-/// None when the ends meet.
+/// fills one pixel row instead of half of two (#9486). Diagonal lines keep their exact sides, and a
+/// 45° one its angle. None when the ends meet.
 fn align_line_edges(a: [f64; 2], b: [f64; 2], weight: f64) -> Option<([f64; 2], [f64; 2], f64)> {
+    let d = [b[0] - a[0], b[1] - a[1]];
     let (mut a, mut b) = (a.map(f64::round), b.map(f64::round));
+    // A 45° line (⇧) keeps its angle: one whole-pixel step along both axes, not each end rounded
+    // on its own (which can turn a short diagonal into a 1 × 2 step).
+    if (d[0].abs() - d[1].abs()).abs() <= 1e-9 * d[0].abs().max(1.0) {
+        let step = d[0].abs().round();
+        b = [a[0] + step.copysign(d[0]), a[1] + step.copysign(d[1])];
+    }
     if a == b {
         return None;
     }
@@ -2420,6 +2427,21 @@ mod tests {
                 (want.y0 + want.y1) / 2 + 1,
             ));
             assert!(mid[3] > 0.999, "opaque: {mid:?}");
+        }
+    }
+
+    /// CodeRabbit on #9506: a ⇧-drag line stays at 45° when its ends snap to whole pixels, even a
+    /// short one (rounding each end on its own turned 10.1,10.49 → 11.3,11.69 into a 1 × 2 step).
+    #[test]
+    fn a_short_shift_drag_line_keeps_its_45_degrees() {
+        let o = app().ui.tool_options.clone();
+        for (start, end) in [([10.1, 10.49], [11.3, 11.69]), ([20.4, 5.6], [17.1, 8.9]), ([3.3, 40.2], [9.8, 33.1]), ([50.5, 50.5], [44.2, 44.0])] {
+            let g = shape_geometry(&o, Tool::Line, start, end, egui::Modifiers::SHIFT).expect("a line");
+            let p = |k: &str| [g[k][0].as_f64().unwrap(), g[k][1].as_f64().unwrap()];
+            let (from, to) = (p("from"), p("to"));
+            assert!(from.iter().chain(&to).all(|v| v.fract() == 0.0), "whole pixels: {g}");
+            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+            assert!(dx != 0.0 && dx.abs() == dy.abs(), "{start:?} → {end:?}: still 45°: {g}");
         }
     }
 
