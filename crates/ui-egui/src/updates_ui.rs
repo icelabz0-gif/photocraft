@@ -75,7 +75,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             craft_update::StartupPromptResponse::UpdateAndRestart => {
                 prompt.is_installing = true;
                 if let Some(install) = craft_update::self_update::current(&craft_update::suite::PHOTOCRAFT) {
-                    let release = prompt.release.clone();
+                    let mut release = prompt.release.clone();
                     std::thread::spawn(move || {
                         let http = match craft_update::Http::new("PhotoCraft/Update") {
                             Ok(h) => h,
@@ -84,6 +84,13 @@ pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                                 return;
                             }
                         };
+                        if release.assets.is_empty() {
+                            if let Ok(Some(full)) =
+                                craft_update::check_for_update(&craft_update::suite::PHOTOCRAFT, &http, photocraft_engine::build_info::VERSION)
+                            {
+                                release = full;
+                            }
+                        }
                         let paths = match craft_update::Paths::for_app(&craft_update::suite::PHOTOCRAFT) {
                             Ok(p) => p,
                             Err(e) => {

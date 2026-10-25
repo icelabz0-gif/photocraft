@@ -177,6 +177,7 @@ opt-level = "z"
 [profile.wasm-release.package.photocraft-paint]
 opt-level = 3
 
+# TEMPORARY: remove once craft-update (egui feature, StartupPrompt) is released in storytold/craft-libs.
 [patch."https://github.com/storytold/craft-libs"]
 craft-update = { git = "https://github.com/dylanmtaylor/craft-libs", branch = "feat/craft-update" }
 
