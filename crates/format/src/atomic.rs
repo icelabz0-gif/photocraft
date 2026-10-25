@@ -468,14 +468,15 @@ fn temp_is_stale(pid: u32, path: &Path) -> bool {
 }
 
 /// Whether process `pid` exists right now. `kill(pid, 0)` only checks: success or `EPERM` means
-/// the process exists (it may belong to another user), `ESRCH` means it is gone. A PID that is
-/// not a valid `pid_t` is treated as running: keeping a file we cannot judge is the safe call.
+/// the process exists (it may belong to another user), `ESRCH` means it is gone. Any other error
+/// (e.g. a seccomp-filtered errno) and a PID that is not a valid `pid_t` are treated as running:
+/// keeping a file we cannot judge is the safe call.
 #[cfg(unix)]
 fn pid_is_running(pid: u32) -> bool {
     let Some(p) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else { return true };
     match rustix::process::test_kill_process(p) {
         Ok(()) => true,
-        Err(e) => e == rustix::io::Errno::PERM,
+        Err(e) => e != rustix::io::Errno::SRCH,
     }
 }
 
