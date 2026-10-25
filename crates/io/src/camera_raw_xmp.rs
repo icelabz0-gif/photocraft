@@ -210,6 +210,21 @@ fn apply(params: &mut CameraRaw, report: &mut LoadReport, name: &str, value: &st
     }
 }
 
+/// The sidecars Camera Raw keeps a raw file's settings in, most likely first: the raw's path with
+/// its extension replaced by `.xmp` (`IMG_0001.CR2` → `IMG_0001.xmp`), then `.XMP`. A path without
+/// an extension has none. darktable's `IMG_0001.CR2.xmp` holds darktable's own settings, not
+/// Camera Raw's, so it is not one.
+pub fn sidecar_paths(raw: &str) -> Vec<String> {
+    let name_start = raw.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    match raw.rfind('.').filter(|&dot| dot > name_start) {
+        Some(dot) => {
+            let base = raw.get(..dot).unwrap_or(raw);
+            vec![format!("{base}.xmp"), format!("{base}.XMP")]
+        }
+        None => Vec::new(),
+    }
+}
+
 /// Apply a Camera Raw settings file over `params`. Fails on input that isn't XMP or holds no
 /// Camera Raw settings; never panics on malformed input.
 pub fn load(params: &mut CameraRaw, bytes: &[u8]) -> Result<LoadReport, String> {
@@ -419,5 +434,15 @@ mod tests {
         let r = load(&mut p, xmp).unwrap();
         assert_eq!(p, before);
         assert_eq!(r.ignored, vec!["Contrast2012".to_string(), "ToneCurvePV2012".to_string()]);
+    }
+
+    #[test]
+    fn a_raws_sidecar_replaces_its_extension() {
+        assert_eq!(sidecar_paths("/p/IMG_0001.CR2"), ["/p/IMG_0001.xmp", "/p/IMG_0001.XMP"]);
+        assert_eq!(sidecar_paths(r"C:\shots.v2\a.nef"), [r"C:\shots.v2\a.xmp", r"C:\shots.v2\a.XMP"]);
+        // No extension in the file name (a dot in a folder doesn't count), or a hidden file.
+        assert!(sidecar_paths("/p.d/IMG").is_empty());
+        assert!(sidecar_paths("/p/.cr2").is_empty());
+        assert!(sidecar_paths("").is_empty());
     }
 }

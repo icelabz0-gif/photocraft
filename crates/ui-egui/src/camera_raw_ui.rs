@@ -393,7 +393,18 @@ fn open_raw(app: &mut PhotocraftApp, ctx: &egui::Context, raw: RawOpen) -> Resul
     let index = document_index(app, raw.document).ok_or("the raw document was closed")?;
     app.session.set_active(index);
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
-    open_pixels(app, ctx, layer, surf, CameraRaw::default(), Coverage::None, Target::OpenRaw)?;
+    let sidecar = raw.path.as_deref().and_then(sidecar_settings);
+    let params = sidecar.as_ref().map_or_else(CameraRaw::default, |(_, p, _)| p.clone());
+    open_pixels(app, ctx, layer, surf, params, Coverage::None, Target::OpenRaw)?;
+    if let Some((file, _, report)) = &sidecar {
+        app.ui.status_error = false;
+        app.ui.status = if report.ignored.is_empty() {
+            crate::i18n::fmt(tl!("Loaded Camera Raw settings from {file}"), &[("file", file)])
+        } else {
+            let template = "Loaded Camera Raw settings from {file} ({n} not supported)";
+            crate::i18n::fmt(tl!(template), &[("file", file), ("n", &report.ignored.len().to_string())])
+        };
+    }
     let curve = match (&raw.bytes, &raw.path) {
         (Some(b), _) => Some(photocraft_io::raw::tone_curve(b)),
         #[cfg(not(target_arch = "wasm32"))]
@@ -409,6 +420,29 @@ fn open_raw(app: &mut PhotocraftApp, ctx: &egui::Context, raw: RawOpen) -> Resul
         d.raw_open = Some(raw);
     }
     Ok(())
+}
+
+/// The settings in the Camera Raw sidecar beside the raw file at `path` (`IMG_0001.xmp` for
+/// `IMG_0001.CR2`), over the defaults, as Camera Raw opens a raw with the settings saved for it:
+/// the file's name, the settings and what was not supported. `None` when there is no readable
+/// sidecar with Camera Raw settings; one that can't be used is left alone, and the raw opens with
+/// the defaults.
+#[cfg(not(target_arch = "wasm32"))]
+fn sidecar_settings(path: &str) -> Option<(String, CameraRaw, photocraft_io::camera_raw_xmp::LoadReport)> {
+    use photocraft_io::camera_raw_xmp::{MAX_XMP_BYTES, load, sidecar_paths};
+    sidecar_paths(path).into_iter().find_map(|sidecar| {
+        let meta = std::fs::metadata(&sidecar).ok().filter(|m| m.is_file() && m.len() <= MAX_XMP_BYTES as u64)?;
+        let bytes = std::fs::read(&sidecar).ok().filter(|b| b.len() as u64 == meta.len())?;
+        let mut params = CameraRaw::default();
+        let report = load(&mut params, &bytes).ok()?;
+        params.validate_changes(&CameraRaw::default()).ok()?;
+        Some((crate::file_open::display_name(&sidecar), params, report))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sidecar_settings(_: &str) -> Option<(String, CameraRaw, photocraft_io::camera_raw_xmp::LoadReport)> {
+    None
 }
 
 fn document_index(app: &PhotocraftApp, id: photocraft_doc::DocId) -> Option<usize> {
@@ -1883,6 +1917,50 @@ mod tests {
         assert_eq!(st.saved_revision, st.revision, "Open leaves the document unmodified");
         assert_eq!(st.doc.depth, photocraft_color::SampleType::U16);
         assert!(mean_red(&app) > before + 0.05, "{before} → {}", mean_red(&app));
+    }
+
+    /// The open-time dialog starts from the settings in the raw's Camera Raw sidecar
+    /// (`IMG_0004.xmp` beside `IMG_0004.dng`), and Open develops with them. A sidecar that isn't
+    /// Camera Raw's leaves the defaults.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raw_opens_with_its_sidecar_settings() {
+        let (mut app, dng) = raw_app();
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join(format!("photocraft-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw_path = dir.join("IMG_0004.dng");
+        std::fs::write(&raw_path, &dng).unwrap();
+        std::fs::write(
+            dir.join("IMG_0004.xmp"),
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+            <rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="+1.00" crs:LensProfileEnable="1"/>
+            </rdf:RDF></x:xmpmeta>"#,
+        )
+        .unwrap();
+        app.open_bytes("IMG_0004.dng", &dng).unwrap();
+        let before = mean_red(&app);
+        let mut raw = app.pending_raw_open.take().unwrap();
+        raw.path = Some(raw_path.to_string_lossy().into_owned());
+        open_raw(&mut app, &ctx, raw).unwrap();
+        assert_eq!(app.camera_raw.as_ref().unwrap().params.exposure, 1.0);
+        assert!(app.ui.status.contains("IMG_0004.xmp") && app.ui.status.contains("1 not supported"), "{}", app.ui.status);
+        let r = menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"commit": true}})).unwrap().unwrap();
+        assert_eq!(r["redeveloped"], true, "{r}");
+        assert!(mean_red(&app) > before + 0.05, "{before} → {}", mean_red(&app));
+
+        // darktable's sidecar has no Camera Raw settings: the defaults.
+        std::fs::write(dir.join("IMG_0004.xmp"), r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:darktable="http://darktable.sf.net/" darktable:xmp_version="5"/></rdf:RDF></x:xmpmeta>"#).unwrap();
+        app.open_bytes("IMG_0004.dng", &dng).unwrap();
+        let mut raw = app.pending_raw_open.take().unwrap();
+        raw.path = Some(raw_path.to_string_lossy().into_owned());
+        open_raw(&mut app, &ctx, raw).unwrap();
+        assert_eq!(
+            app.camera_raw.as_ref().unwrap().params,
+            CameraRaw { encoding_gamma: app.camera_raw.as_ref().unwrap().params.encoding_gamma, ..CameraRaw::default() }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn pixels(app: &PhotocraftApp) -> Vec<f32> {
